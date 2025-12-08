@@ -1,5 +1,5 @@
 // index.js
-// EzerBot – Bot de Telegram para fidelización + sellos + catálogo + carrito
+// EzerBot – Bot de Telegram para fidelización + sellos + catálogo + carrito con cantidades
 // Servidor para Render (Node + Express)
 
 const express = require('express');
@@ -25,6 +25,8 @@ app.use(express.json());
 const carts = new Map();
 // Último catálogo enviado: chatId -> array de items
 const lastCatalog = new Map();
+// Estado de "estoy esperando que el usuario escriba la cantidad"
+const pendingQty = new Map(); // chatId -> { index, unidad }
 
 // Endpoint simple para probar que Render está vivo
 app.get('/', (_req, res) => {
@@ -71,6 +73,96 @@ async function handleUpdate(update) {
       ],
       resize_keyboard: true
     };
+
+    // Si estamos esperando una cantidad para un producto
+    const pending = pendingQty.get(chatId);
+    if (pending) {
+      const catalog = lastCatalog.get(chatId) || [];
+      const item = catalog[pending.index];
+
+      if (!item) {
+        pendingQty.delete(chatId);
+        await sendMessage(
+          chatId,
+          'Hubo un problema al identificar el producto. Probá nuevamente desde "Ver catálogo".',
+          mainKeyboard
+        );
+        return;
+      }
+
+      const unidadTipo = (pending.unidad || item.unidad || '').toLowerCase() || 'unidad';
+      const num = parseInt(text, 10);
+
+      if (isNaN(num)) {
+        await sendMessage(
+          chatId,
+          'Por favor escribí un número válido.\n' +
+          (unidadTipo === 'kg'
+            ? 'Ejemplo: 100, 250, 500, 1000 (gramos).'
+            : 'Ejemplo: 1, 2, 3 (unidades).'),
+          mainKeyboard
+        );
+        return;
+      }
+
+      if (unidadTipo === 'kg') {
+        if (num < 100) {
+          await sendMessage(
+            chatId,
+            'Para productos por kilo, la cantidad mínima es 100 gramos.\n' +
+            'Ejemplo: 100, 250, 500, 1000.',
+            mainKeyboard
+          );
+          return;
+        }
+      } else {
+        if (num < 1) {
+          await sendMessage(
+            chatId,
+            'Para productos por unidad, la cantidad mínima es 1 unidad.',
+            mainKeyboard
+          );
+          return;
+        }
+      }
+
+      const precioBase = Number(item.precio || 0);
+      let subtotal = 0;
+
+      if (unidadTipo === 'kg') {
+        subtotal = Math.round((num / 1000) * precioBase);
+      } else {
+        subtotal = Math.round(num * precioBase);
+      }
+
+      const cart = carts.get(chatId) || [];
+      cart.push({
+        nombre: item.nombre || 'Producto',
+        cantidad: num,
+        unidadTipo: unidadTipo,
+        precioBase: precioBase,
+        subtotal: subtotal,
+        moneda: item.moneda || 'ARS'
+      });
+      carts.set(chatId, cart);
+
+      pendingQty.delete(chatId);
+
+      let detalleCant =
+        unidadTipo === 'kg'
+          ? `${num} g`
+          : `${num} un.`;
+
+      await sendMessage(
+        chatId,
+        `🛒 Agregué *${detalleCant} de ${item.nombre}* a tu carrito.\n` +
+        `Subtotal: *${subtotal} ${item.moneda || 'ARS'}*.\n\n` +
+        `Ahora tenés *${cart.length}* producto(s) en tu carrito.\n` +
+        `Tocá *“🛍 Mi carrito”* para ver el detalle.`,
+        mainKeyboard
+      );
+      return;
+    }
 
     // /start o inicio
     if (!text || text === '/start' || text.toLowerCase() === 'start') {
@@ -217,7 +309,7 @@ async function handleUpdate(update) {
       return;
     }
 
-    // Ver catálogo (ahora con "Agregar al carrito")
+    // Ver catálogo (ahora pidiendo cantidad)
     if (text.startsWith('🛒') || /catálogo/i.test(text)) {
       const catalogo = await getCatalogoFromSheets();
 
@@ -241,10 +333,16 @@ async function handleUpdate(update) {
         const moneda = item.moneda || catalogo.moneda || 'ARS';
         const precio = item.precio != null ? `${item.precio} ${moneda}` : '';
         const img = item.imagenUrl || item.imagen || '';
+        const unidadTipo = (item.unidad || '').toLowerCase() || 'unidad';
 
         let caption = `🛒 *${nombre}*\n`;
-        if (precio) caption += `💰 *Precio:* ${precio}\n`;
-        if (desc) caption += `\n${desc}\n`;
+        if (precio) caption += `💰 *Precio:* ${precio}`;
+        if (unidadTipo === 'kg') {
+          caption += ' (por kilo)';
+        } else {
+          caption += ' (por unidad)';
+        }
+        if (desc) caption += `\n\n${desc}\n`;
 
         const inlineKb = {
           inline_keyboard: [[
@@ -282,16 +380,22 @@ async function handleUpdate(update) {
 
       let total = 0;
       let lineas = cart.map((item, i) => {
-        const precioNum = Number(item.precio || 0);
-        total += precioNum;
-        return `${i + 1}) *${item.nombre}* - ${precioNum} ${item.moneda || 'ARS'}`;
+        const sub = Number(item.subtotal != null ? item.subtotal : item.precioBase || 0);
+        total += sub;
+        let detalleCant = '';
+        if (item.unidadTipo === 'kg') {
+          detalleCant = `x ${item.cantidad} g`;
+        } else {
+          detalleCant = `x ${item.cantidad} un.`;
+        }
+        return `${i + 1}) *${item.nombre}* ${detalleCant} - ${sub} ${item.moneda || 'ARS'}`;
       });
 
       let msg = '🛍 *Tu carrito*\n\n';
       msg += lineas.join('\n');
       msg += `\n\n💰 *Total:* ${total} ARS\n`;
-      msg += `\nPor ahora este carrito es informativo.\n` +
-        `En la próxima versión vas a poder confirmar el pedido y recibir el alias para el pago.`;
+      msg += `\nMás adelante vas a poder confirmar el pedido y recibir los datos de pago.\n` +
+             `Por ahora este carrito te ayuda a no equivocarte al elegir cantidades.`;
 
       await sendMessage(chatId, msg, mainKeyboard);
       return;
@@ -368,22 +472,24 @@ async function handleCallback(callback) {
         return;
       }
 
-      const cart = carts.get(chatId) || [];
-      cart.push({
-        nombre: item.nombre || 'Producto',
-        precio: item.precio || 0,
-        moneda: item.moneda || 'ARS'
-      });
-      carts.set(chatId, cart);
+      const unidadTipo = (item.unidad || '').toLowerCase() || 'unidad';
 
-      await answerCallbackQuery(callback.id, 'Producto agregado al carrito 🛒');
+      pendingQty.set(chatId, { index, unidad: unidadTipo });
 
-      await sendMessage(
-        chatId,
-        `🛒 Agregué *${item.nombre}* a tu carrito.\n` +
-        `Ahora tenés *${cart.length}* producto(s).\n\n` +
-        `Tocá *“🛍 Mi carrito”* para ver el detalle.`,
-      );
+      let textoPregunta = '';
+      if (unidadTipo === 'kg') {
+        textoPregunta =
+          `¿Cuántos gramos de *${item.nombre}* querés?\n` +
+          `Ejemplo: 100, 250, 500, 1000.`;
+      } else {
+        textoPregunta =
+          `¿Cuántas unidades de *${item.nombre}* querés?\n` +
+          `Ejemplo: 1, 2, 3.`;
+      }
+
+      await answerCallbackQuery(callback.id, '');
+      await sendMessage(chatId, textoPregunta);
+
       return;
     }
 
