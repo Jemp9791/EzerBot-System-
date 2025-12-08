@@ -1,5 +1,5 @@
 // index.js
-// EzerBot – Bot de Telegram para fidelización + sellos + catálogo
+// EzerBot – Bot de Telegram para fidelización + sellos + catálogo + carrito
 // Servidor para Render (Node + Express)
 
 const express = require('express');
@@ -21,19 +21,21 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 // Para recibir JSON de Telegram
 app.use(express.json());
 
+// Carritos en memoria: chatId -> array de items
+const carts = new Map();
+// Último catálogo enviado: chatId -> array de items
+const lastCatalog = new Map();
+
 // Endpoint simple para probar que Render está vivo
 app.get('/', (_req, res) => {
   res.send('EzerBot server running');
 });
 
 // Endpoint de Webhook de Telegram
-// URL configurada: /webhook/<BOT_TOKEN>
 app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
   try {
     const update = req.body;
-    // Respondemos rápido a Telegram
-    res.sendStatus(200);
-    // Procesamos el mensaje aparte
+    res.sendStatus(200); // responder rápido a Telegram
     await handleUpdate(update);
   } catch (err) {
     console.error('❌ Error procesando update:', err);
@@ -47,17 +49,25 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
 
 async function handleUpdate(update) {
   try {
-    const message = update.message || update.callback_query?.message;
+    // 1) Callbacks (botones inline: agregar al carrito, etc.)
+    if (update.callback_query) {
+      await handleCallback(update.callback_query);
+      return;
+    }
+
+    // 2) Mensajes normales
+    const message = update.message;
     if (!message) return;
 
     const chatId = message.chat.id;
-    const text = (update.message?.text || '').trim();
+    const text = (message.text || '').trim();
 
-    // Menú principal
+    // Menú principal (botones abajo)
     const mainKeyboard = {
       keyboard: [
         ['🛒 Ver catálogo', '🏆 Mis sellos y puntos'],
-        ['🎁 Canjear beneficio', '🏬 Información del local']
+        ['🎁 Canjear beneficio', '🏬 Información del local'],
+        ['🛍 Mi carrito', '📲 Hablar con el vendedor']
       ],
       resize_keyboard: true
     };
@@ -67,7 +77,7 @@ async function handleUpdate(update) {
       const config = await getConfigFromSheets();
       const nombre = config?.NegocioNombre || 'Tu local favorito';
       const descripcion = config?.Descripcion ||
-        'Bienvenido a nuestro sistema de sellos y beneficios.';
+        'Bienvenido a nuestro sistema de sellos, beneficios y compras.';
 
       const bienvenida = [
         `🧀 *${nombre}*`,
@@ -78,7 +88,9 @@ async function handleUpdate(update) {
         '• Ver el 🛒 *catálogo* con productos',
         '• Ver tu 🏆 *tarjeta de sellos y puntos*',
         '• Consultar y 🎁 *canjear beneficios*',
-        '• Ver info del 🏬 *local* (horarios, dirección, etc.)'
+        '• Ver info del 🏬 *local* (horarios, dirección, etc.)',
+        '• Revisar tu 🛍 *carrito* antes de confirmar el pedido',
+        '• 📲 *Hablar con el vendedor* por WhatsApp'
       ].join('\n');
 
       await sendMessage(chatId, bienvenida, mainKeyboard);
@@ -89,7 +101,7 @@ async function handleUpdate(update) {
     //   RUTAS DEL MENÚ
     // ====================
 
-    // Información del local
+    // Información del local (con logo)
     if (text.startsWith('🏬') || /información del local/i.test(text)) {
       const config = await getConfigFromSheets();
       const nombre = config?.NegocioNombre || 'Negocio';
@@ -97,21 +109,27 @@ async function handleUpdate(update) {
       const horarios = config?.Horarios || 'Horarios no configurados';
       const insta = config?.Instagram || '';
       const tel = config?.TelefonoNegocio || '';
+      const logoUrl = config?.LogoURL || config?.SelloURL || '';
 
       let msg = `🏬 *${nombre}*\n\n`;
       msg += `📍 *Dirección:* ${direccion}\n`;
       msg += `🕒 *Horarios:* ${horarios}\n`;
       if (tel) msg += `📞 *Teléfono:* ${tel}\n`;
       if (insta) msg += `📷 *Instagram:* ${insta}\n`;
-      msg += `\nGracias por ser parte de *Todo Queso Club* 🧀`;
+      msg += `\nGracias por ser parte de *${nombre} Club* 🧀`;
 
-      await sendMessage(chatId, msg, mainKeyboard);
+      if (logoUrl) {
+        await sendPhoto(chatId, logoUrl, msg, mainKeyboard);
+      } else {
+        await sendMessage(chatId, msg, mainKeyboard);
+      }
       return;
     }
 
     // Mis sellos y puntos
     if (text.startsWith('🏆') || /mis sellos/i.test(text)) {
       const estado = await getEstadoClienteFromSheets(chatId);
+      const config = await getConfigFromSheets();
 
       if (!estado || !estado.tieneTarjeta) {
         const msg = 'No encontré tu tarjeta todavía.\n' +
@@ -120,32 +138,17 @@ async function handleUpdate(update) {
         return;
       }
 
-      // Estructura esperada desde Sheets (ajustá Apps Script si hace falta):
-      // {
-      //   tieneTarjeta: true,
-      //   nombreCliente: 'Jenny',
-      //   sellosActuales: 3,
-      //   sellosNivelActual: 10,
-      //   nivelActual: 'TQ Bronce',
-      //   sellosTotalesAcumulados: 25,
-      //   beneficioProximo: '2 prepizzas, 400 grs de queso...',
-      //   tarjetaImagenUrl: 'https://...'  // opcional
-      // }
-
       const nombre = estado.nombreCliente || '';
       const sellosActuales = Number(estado.sellosActuales || 0);
       const sellosNivelActual = Number(estado.sellosNivelActual || 10);
       const nivelActual = estado.nivelActual || 'Nivel inicial';
       const beneficioProximo = estado.beneficioProximo || '';
       const totales = Number(estado.sellosTotalesAcumulados || sellosActuales);
-
       const faltan = Math.max(sellosNivelActual - sellosActuales, 0);
 
-      // Dibujamos la “barra” de sellos con emojis 🧀⬜
       const maxCirculos = Math.min(sellosNivelActual, 10);
       const llenos = Math.min(sellosActuales, maxCirculos);
       const vacios = maxCirculos - llenos;
-
       const barra = `${'🧀'.repeat(llenos)}${'⬜'.repeat(vacios)}`;
 
       let msg = '';
@@ -167,9 +170,9 @@ async function handleUpdate(update) {
 
       await sendMessage(chatId, msg, mainKeyboard);
 
-      // Si tuvieras una imagen de la tarjeta fija
-      if (estado.tarjetaImagenUrl) {
-        await sendPhoto(chatId, estado.tarjetaImagenUrl, 'Tu tarjeta de sellos');
+      const tarjetaUrl = estado.tarjetaImagenUrl || config?.TarjetaURL;
+      if (tarjetaUrl) {
+        await sendPhoto(chatId, tarjetaUrl, 'Tu tarjeta de sellos 🧀', mainKeyboard);
       }
 
       return;
@@ -198,12 +201,6 @@ async function handleUpdate(update) {
         return;
       }
 
-      // Estructura esperada:
-      // beneficioDisponible: true,
-      // descripcionBeneficio: 'Picada para 2 + Coca 1.5L',
-      // venceEl: '2025-01-10',
-      // codigoCanje: 'TQ-ABCD1234'
-
       const desc = estado.descripcionBeneficio || 'Beneficio disponible';
       const vence = estado.venceEl ? `\n📅 Vence el: *${estado.venceEl}*` : '';
       const codigo = estado.codigoCanje ? `\n🔐 Código de canje: *${estado.codigoCanje}*` : '';
@@ -215,14 +212,12 @@ async function handleUpdate(update) {
       msg += `\n\nMostrá este mensaje en el local para validar el beneficio.`;
 
       await sendMessage(chatId, msg, mainKeyboard);
-
-      // Aviso opcional a Sheets de que el cliente vio el beneficio
       await callSheets('marcarBeneficioVisto', { chatId });
 
       return;
     }
 
-    // Ver catálogo
+    // Ver catálogo (ahora con "Agregar al carrito")
     if (text.startsWith('🛒') || /catálogo/i.test(text)) {
       const catalogo = await getCatalogoFromSheets();
 
@@ -235,14 +230,12 @@ async function handleUpdate(update) {
         return;
       }
 
-      // Estructura esperada desde Sheets:
-      // {
-      //   items: [
-      //     { nombre, descripcion, precio, moneda, imagenUrl }
-      //   ]
-      // }
+      lastCatalog.set(chatId, catalogo.items);
 
-      for (const item of catalogo.items.slice(0, 20)) { // límite de 20 por consulta
+      const items = catalogo.items.slice(0, 20); // límite para no spamear
+
+      for (let index = 0; index < items.length; index++) {
+        const item = items[index];
         const nombre = item.nombre || 'Producto';
         const desc = item.descripcion || '';
         const moneda = item.moneda || catalogo.moneda || 'ARS';
@@ -253,20 +246,85 @@ async function handleUpdate(update) {
         if (precio) caption += `💰 *Precio:* ${precio}\n`;
         if (desc) caption += `\n${desc}\n`;
 
+        const inlineKb = {
+          inline_keyboard: [[
+            { text: '🛒 Agregar al carrito', callback_data: `ADD:${index}` }
+          ]]
+        };
+
         if (img) {
-          await sendPhoto(chatId, img, caption);
+          await sendPhoto(chatId, img, caption, inlineKb);
         } else {
-          await sendMessage(chatId, caption);
+          await sendMessage(chatId, caption, inlineKb);
         }
       }
 
-      // Mensaje final recordando el menú
       await sendMessage(
         chatId,
-        'Para hacer un pedido, escribí qué productos querés o usá el menú de abajo.',
+        'Cuando quieras ver lo que llevás, tocá *“🛍 Mi carrito”*.',
         mainKeyboard
       );
 
+      return;
+    }
+
+    // Mi carrito
+    if (text.startsWith('🛍') || /mi carrito/i.test(text)) {
+      const cart = carts.get(chatId) || [];
+      if (cart.length === 0) {
+        await sendMessage(
+          chatId,
+          '🛍 Tu carrito está vacío.\nUsá *“Ver catálogo”* para agregar productos.',
+          mainKeyboard
+        );
+        return;
+      }
+
+      let total = 0;
+      let lineas = cart.map((item, i) => {
+        const precioNum = Number(item.precio || 0);
+        total += precioNum;
+        return `${i + 1}) *${item.nombre}* - ${precioNum} ${item.moneda || 'ARS'}`;
+      });
+
+      let msg = '🛍 *Tu carrito*\n\n';
+      msg += lineas.join('\n');
+      msg += `\n\n💰 *Total:* ${total} ARS\n`;
+      msg += `\nPor ahora este carrito es informativo.\n` +
+        `En la próxima versión vas a poder confirmar el pedido y recibir el alias para el pago.`;
+
+      await sendMessage(chatId, msg, mainKeyboard);
+      return;
+    }
+
+    // 📲 Hablar con el vendedor
+    if (text.startsWith('📲') || /vendedor/i.test(text)) {
+      const config = await getConfigFromSheets();
+      let link = config?.WhatsAppLink || '';
+
+      if (!link) {
+        const tel = (config?.TelefonoNegocio || '').replace(/\D/g, '');
+        if (tel) {
+          link = `https://wa.me/${tel}`;
+        }
+      }
+
+      if (!link) {
+        await sendMessage(
+          chatId,
+          'Por ahora no tengo configurado el enlace de contacto con el vendedor.',
+          mainKeyboard
+        );
+        return;
+      }
+
+      const msg = [
+        '📲 Para hablar con el vendedor, tocá este enlace:',
+        '',
+        link
+      ].join('\n');
+
+      await sendMessage(chatId, msg, mainKeyboard);
       return;
     }
 
@@ -277,13 +335,61 @@ async function handleUpdate(update) {
       '• 🛒 *Ver catálogo*',
       '• 🏆 *Mis sellos y puntos*',
       '• 🎁 *Canjear beneficio*',
-      '• 🏬 *Información del local*'
+      '• 🏬 *Información del local*',
+      '• 🛍 *Mi carrito*',
+      '• 📲 *Hablar con el vendedor*'
     ].join('\n');
 
     await sendMessage(chatId, ayuda, mainKeyboard);
 
   } catch (err) {
     console.error('❌ Error en handleUpdate:', err);
+  }
+}
+
+// =====================
+//   CALLBACKS INLINE
+// =====================
+
+async function handleCallback(callback) {
+  try {
+    const chatId = callback.message.chat.id;
+    const data = callback.data || '';
+
+    if (data.startsWith('ADD:')) {
+      const idxStr = data.split(':')[1];
+      const index = parseInt(idxStr, 10);
+
+      const catalog = lastCatalog.get(chatId) || [];
+      const item = catalog[index];
+
+      if (!item) {
+        await answerCallbackQuery(callback.id, 'No encontré el producto 😕');
+        return;
+      }
+
+      const cart = carts.get(chatId) || [];
+      cart.push({
+        nombre: item.nombre || 'Producto',
+        precio: item.precio || 0,
+        moneda: item.moneda || 'ARS'
+      });
+      carts.set(chatId, cart);
+
+      await answerCallbackQuery(callback.id, 'Producto agregado al carrito 🛒');
+
+      await sendMessage(
+        chatId,
+        `🛒 Agregué *${item.nombre}* a tu carrito.\n` +
+        `Ahora tenés *${cart.length}* producto(s).\n\n` +
+        `Tocá *“🛍 Mi carrito”* para ver el detalle.`,
+      );
+      return;
+    }
+
+    await answerCallbackQuery(callback.id, '');
+  } catch (err) {
+    console.error('❌ Error en handleCallback:', err);
   }
 }
 
@@ -315,7 +421,6 @@ async function getConfigFromSheets() {
 }
 
 async function getEstadoClienteFromSheets(chatId) {
-  // En Apps Script podés usar el chatId como identificador temporal
   return await callSheets('estadoCliente', { chatId });
 }
 
@@ -350,13 +455,14 @@ async function sendMessage(chatId, text, keyboard) {
   }
 }
 
-async function sendPhoto(chatId, photoUrl, caption) {
+async function sendPhoto(chatId, photoUrl, caption, keyboard) {
   try {
     const body = {
       chat_id: chatId,
       photo: photoUrl,
       caption,
-      parse_mode: 'Markdown'
+      parse_mode: 'Markdown',
+      reply_markup: keyboard ? keyboard : undefined
     };
 
     const res = await fetch(`${TELEGRAM_API}/sendPhoto`, {
@@ -370,6 +476,28 @@ async function sendPhoto(chatId, photoUrl, caption) {
     }
   } catch (err) {
     console.error('❌ Excepción sendPhoto:', err);
+  }
+}
+
+async function answerCallbackQuery(callbackId, text) {
+  try {
+    const body = {
+      callback_query_id: callbackId,
+      text: text || undefined,
+      show_alert: false
+    };
+
+    const res = await fetch(`${TELEGRAM_API}/answerCallbackQuery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+
+    if (!res.ok) {
+      console.error('❌ Error answerCallbackQuery:', res.status, await res.text());
+    }
+  } catch (err) {
+    console.error('❌ Excepción answerCallbackQuery:', err);
   }
 }
 
