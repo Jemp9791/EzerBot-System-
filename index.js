@@ -1,13 +1,10 @@
 // index.js
-// EzerBot – Bot de Telegram para fidelización + sellos + catálogo + carrito con cantidades
-// Servidor para Render (Node + Express)
-
+// EzerBot – fidelización + catálogo + carrito con cantidades + cierre simple
 const express = require('express');
 const fetch = require('node-fetch');
 
 const app = express();
 
-// ==== CONFIGURACIÓN BÁSICA ====
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHEETS_URL = process.env.SHEETS_URL;
 const PORT = process.env.PORT || 10000;
@@ -18,26 +15,21 @@ if (!BOT_TOKEN || !SHEETS_URL) {
 
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Para recibir JSON de Telegram
 app.use(express.json());
 
-// Carritos en memoria: chatId -> array de items
-const carts = new Map();
-// Último catálogo enviado: chatId -> array de items
-const lastCatalog = new Map();
-// Estado de "estoy esperando que el usuario escriba la cantidad"
-const pendingQty = new Map(); // chatId -> { index, unidad }
+// Estado en memoria
+const carts = new Map();       // chatId -> [items]
+const lastCatalog = new Map(); // chatId -> [items]
+const pendingQty = new Map();  // chatId -> { index, unidad }
 
-// Endpoint simple para probar que Render está vivo
 app.get('/', (_req, res) => {
   res.send('EzerBot server running');
 });
 
-// Endpoint de Webhook de Telegram
 app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
   try {
     const update = req.body;
-    res.sendStatus(200); // responder rápido a Telegram
+    res.sendStatus(200);
     await handleUpdate(update);
   } catch (err) {
     console.error('❌ Error procesando update:', err);
@@ -45,26 +37,21 @@ app.post(`/webhook/${BOT_TOKEN}`, async (req, res) => {
   }
 });
 
-// =====================
-//   LÓGICA PRINCIPAL
-// =====================
+// ============ LÓGICA PRINCIPAL ============
 
 async function handleUpdate(update) {
   try {
-    // 1) Callbacks (botones inline: agregar al carrito, etc.)
     if (update.callback_query) {
       await handleCallback(update.callback_query);
       return;
     }
 
-    // 2) Mensajes normales
     const message = update.message;
     if (!message) return;
 
     const chatId = message.chat.id;
     const text = (message.text || '').trim();
 
-    // Menú principal (botones abajo)
     const mainKeyboard = {
       keyboard: [
         ['🛒 Ver catálogo', '🏆 Mis sellos y puntos'],
@@ -74,7 +61,7 @@ async function handleUpdate(update) {
       resize_keyboard: true
     };
 
-    // Si estamos esperando una cantidad para un producto
+    // ¿Estamos esperando cantidad?
     const pending = pendingQty.get(chatId);
     if (pending) {
       const catalog = lastCatalog.get(chatId) || [];
@@ -90,9 +77,12 @@ async function handleUpdate(update) {
         return;
       }
 
-      const unidadTipo = (pending.unidad || item.unidad || '').toLowerCase() || 'unidad';
-      const num = parseInt(text, 10);
+      const unidadTipo =
+        (pending.unidad || item.unidad || '').toLowerCase() === 'kg'
+          ? 'kg'
+          : 'unidad';
 
+      const num = parseInt(text, 10);
       if (isNaN(num)) {
         await sendMessage(
           chatId,
@@ -128,7 +118,6 @@ async function handleUpdate(update) {
 
       const precioBase = Number(item.precio || 0);
       let subtotal = 0;
-
       if (unidadTipo === 'kg') {
         subtotal = Math.round((num / 1000) * precioBase);
       } else {
@@ -139,19 +128,16 @@ async function handleUpdate(update) {
       cart.push({
         nombre: item.nombre || 'Producto',
         cantidad: num,
-        unidadTipo: unidadTipo,
-        precioBase: precioBase,
-        subtotal: subtotal,
+        unidadTipo,
+        precioBase,
+        subtotal,
         moneda: item.moneda || 'ARS'
       });
       carts.set(chatId, cart);
 
       pendingQty.delete(chatId);
 
-      let detalleCant =
-        unidadTipo === 'kg'
-          ? `${num} g`
-          : `${num} un.`;
+      const detalleCant = unidadTipo === 'kg' ? `${num} g` : `${num} un.`;
 
       await sendMessage(
         chatId,
@@ -164,7 +150,7 @@ async function handleUpdate(update) {
       return;
     }
 
-    // /start o inicio
+    // /start
     if (!text || text === '/start' || text.toLowerCase() === 'start') {
       const config = await getConfigFromSheets();
       const nombre = config?.NegocioNombre || 'Tu local favorito';
@@ -189,11 +175,7 @@ async function handleUpdate(update) {
       return;
     }
 
-    // ====================
-    //   RUTAS DEL MENÚ
-    // ====================
-
-    // Información del local (con logo)
+    // Información del local
     if (text.startsWith('🏬') || /información del local/i.test(text)) {
       const config = await getConfigFromSheets();
       const nombre = config?.NegocioNombre || 'Negocio';
@@ -218,7 +200,7 @@ async function handleUpdate(update) {
       return;
     }
 
-    // Mis sellos y puntos
+    // Mis sellos
     if (text.startsWith('🏆') || /mis sellos/i.test(text)) {
       const estado = await getEstadoClienteFromSheets(chatId);
       const config = await getConfigFromSheets();
@@ -309,7 +291,7 @@ async function handleUpdate(update) {
       return;
     }
 
-    // Ver catálogo (ahora pidiendo cantidad)
+    // Ver catálogo
     if (text.startsWith('🛒') || /catálogo/i.test(text)) {
       const catalogo = await getCatalogoFromSheets();
 
@@ -324,7 +306,7 @@ async function handleUpdate(update) {
 
       lastCatalog.set(chatId, catalogo.items);
 
-      const items = catalogo.items.slice(0, 20); // límite para no spamear
+      const items = catalogo.items.slice(0, 20);
 
       for (let index = 0; index < items.length; index++) {
         const item = items[index];
@@ -333,7 +315,7 @@ async function handleUpdate(update) {
         const moneda = item.moneda || catalogo.moneda || 'ARS';
         const precio = item.precio != null ? `${item.precio} ${moneda}` : '';
         const img = item.imagenUrl || item.imagen || '';
-        const unidadTipo = (item.unidad || '').toLowerCase() || 'unidad';
+        const unidadTipo = (item.unidad || '').toLowerCase() === 'kg' ? 'kg' : 'unidad';
 
         let caption = `🛒 *${nombre}*\n`;
         if (precio) caption += `💰 *Precio:* ${precio}`;
@@ -379,38 +361,38 @@ async function handleUpdate(update) {
       }
 
       let total = 0;
-      let lineas = cart.map((item, i) => {
+      const lineas = cart.map((item, i) => {
         const sub = Number(item.subtotal != null ? item.subtotal : item.precioBase || 0);
         total += sub;
-        let detalleCant = '';
-        if (item.unidadTipo === 'kg') {
-          detalleCant = `x ${item.cantidad} g`;
-        } else {
-          detalleCant = `x ${item.cantidad} un.`;
-        }
+        const detalleCant =
+          item.unidadTipo === 'kg'
+            ? `x ${item.cantidad} g`
+            : `x ${item.cantidad} un.`;
         return `${i + 1}) *${item.nombre}* ${detalleCant} - ${sub} ${item.moneda || 'ARS'}`;
       });
 
       let msg = '🛍 *Tu carrito*\n\n';
       msg += lineas.join('\n');
       msg += `\n\n💰 *Total:* ${total} ARS\n`;
-      msg += `\nMás adelante vas a poder confirmar el pedido y recibir los datos de pago.\n` +
-             `Por ahora este carrito te ayuda a no equivocarte al elegir cantidades.`;
+      msg += `\nSi está todo bien, podés confirmar tu pedido:\n`;
 
-      await sendMessage(chatId, msg, mainKeyboard);
+      await sendMessage(chatId, msg, {
+        inline_keyboard: [[
+          { text: '🧾 Confirmar pedido', callback_data: 'CHECKOUT' }
+        ]]
+      });
+
       return;
     }
 
-    // 📲 Hablar con el vendedor
+    // Hablar con el vendedor
     if (text.startsWith('📲') || /vendedor/i.test(text)) {
       const config = await getConfigFromSheets();
       let link = config?.WhatsAppLink || '';
 
       if (!link) {
         const tel = (config?.TelefonoNegocio || '').replace(/\D/g, '');
-        if (tel) {
-          link = `https://wa.me/${tel}`;
-        }
+        if (tel) link = `https://wa.me/${tel}`;
       }
 
       if (!link) {
@@ -451,9 +433,7 @@ async function handleUpdate(update) {
   }
 }
 
-// =====================
-//   CALLBACKS INLINE
-// =====================
+// ============ CALLBACKS ============
 
 async function handleCallback(callback) {
   try {
@@ -463,7 +443,6 @@ async function handleCallback(callback) {
     if (data.startsWith('ADD:')) {
       const idxStr = data.split(':')[1];
       const index = parseInt(idxStr, 10);
-
       const catalog = lastCatalog.get(chatId) || [];
       const item = catalog[index];
 
@@ -472,7 +451,10 @@ async function handleCallback(callback) {
         return;
       }
 
-      const unidadTipo = (item.unidad || '').toLowerCase() || 'unidad';
+      const unidadTipo =
+        (item.unidad || '').toLowerCase() === 'kg'
+          ? 'kg'
+          : 'unidad';
 
       pendingQty.set(chatId, { index, unidad: unidadTipo });
 
@@ -489,7 +471,69 @@ async function handleCallback(callback) {
 
       await answerCallbackQuery(callback.id, '');
       await sendMessage(chatId, textoPregunta);
+      return;
+    }
 
+    if (data === 'CHECKOUT') {
+      await answerCallbackQuery(callback.id, '');
+      const cart = carts.get(chatId) || [];
+      if (cart.length === 0) {
+        await sendMessage(chatId, 'Tu carrito está vacío.', {
+          keyboard: [
+            ['🛒 Ver catálogo', '🏆 Mis sellos y puntos'],
+            ['🎁 Canjear beneficio', '🏬 Información del local'],
+            ['🛍 Mi carrito', '📲 Hablar con el vendedor']
+          ],
+          resize_keyboard: true
+        });
+        return;
+      }
+
+      let total = 0;
+      const lineas = cart.map((item, i) => {
+        const sub = Number(item.subtotal != null ? item.subtotal : item.precioBase || 0);
+        total += sub;
+        const detalleCant =
+          item.unidadTipo === 'kg'
+            ? `x ${item.cantidad} g`
+            : `x ${item.cantidad} un.`;
+        return `${i + 1}) *${item.nombre}* ${detalleCant} - ${sub} ${item.moneda || 'ARS'}`;
+      });
+
+      const config = await getConfigFromSheets();
+      let alias = '';
+      if (config?.PermitirPagoOnline === 'SI' && config?.AliasPago) {
+        alias = config.AliasPago;
+      }
+
+      let linkVendedor = config?.WhatsAppLink || '';
+      if (!linkVendedor) {
+        const tel = (config?.TelefonoNegocio || '').replace(/\D/g, '');
+        if (tel) linkVendedor = `https://wa.me/${tel}`;
+      }
+
+      let msg = '🧾 *Resumen de tu pedido*\n\n';
+      msg += lineas.join('\n');
+      msg += `\n\n💰 *Total:* ${total} ARS\n`;
+
+      if (alias) {
+        msg += `\nAlias para pago: *${alias}*`;
+      }
+
+      if (linkVendedor) {
+        msg += `\n\nCuando hayas realizado el pago, enviá el comprobante al vendedor:\n${linkVendedor}`;
+      }
+
+      await sendMessage(chatId, msg, {
+        keyboard: [
+          ['🛒 Ver catálogo', '🏆 Mis sellos y puntos'],
+          ['🎁 Canjear beneficio', '🏬 Información del local'],
+          ['🛍 Mi carrito', '📲 Hablar con el vendedor']
+        ],
+        resize_keyboard: true
+      });
+
+      carts.delete(chatId);
       return;
     }
 
@@ -499,9 +543,7 @@ async function handleCallback(callback) {
   }
 }
 
-// =====================
-//   LLAMADAS A SHEETS
-// =====================
+// ============ LLAMADAS A SHEETS ============
 
 async function callSheets(accion, extraParams = {}) {
   try {
@@ -534,9 +576,7 @@ async function getCatalogoFromSheets() {
   return await callSheets('catalogo');
 }
 
-// =====================
-//   HELPERS TELEGRAM
-// =====================
+// ============ HELPERS TELEGRAM ============
 
 async function sendMessage(chatId, text, keyboard) {
   try {
@@ -607,9 +647,7 @@ async function answerCallbackQuery(callbackId, text) {
   }
 }
 
-// =====================
-//   ARRANQUE SERVIDOR
-// =====================
+// ============ ARRANQUE SERVIDOR ============
 
 app.listen(PORT, () => {
   console.log(`🚀 EzerBot escuchando en puerto ${PORT}`);
