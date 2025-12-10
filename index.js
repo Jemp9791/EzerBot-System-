@@ -1,6 +1,6 @@
 // --------------------------------------------------------------
 // EZERBOT IA – SISTEMA CLIENTE TODO QUESO
-// Catálogo por categorías + carrito + compartir + envío/retiro
+// Catálogo por categorías + carrito + compartir + sellos
 // --------------------------------------------------------------
 
 import express from "express";
@@ -16,7 +16,7 @@ app.use(express.json());
 const BOT_TOKEN = "8130447159:AAHxzp5S1lcgYOemw5dgF5V1DGh141dHmkA";
 const API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// Tu Apps Script (debe devolver JSON con items)
+// Tu Apps Script (backend con acciones: catalogo, estadoCliente, etc.)
 const SHEETS_URL = "https://script.google.com/macros/s/AKfycbyxm5E2Y7t0hgqh48-AVWpiru2MBXM3E-53T5WgnljMZb_CXZx-F-akgIJVJ4j76MjE/exec";
 
 // Logo de Todo Queso
@@ -76,13 +76,12 @@ function iconForCategory(cat = "") {
 }
 
 // =====================
-// LEER CATÁLOGO DE SHEETS
+// LEER CATÁLOGO Y ESTADO
 // =====================
 
 async function fetchCatalog() {
   try {
-    const res = await axios.get(SHEETS_URL);
-    // Esperamos algo tipo: { items: [ {CODIGO, NOMBRE,...} ] }
+    const res = await axios.get(`${SHEETS_URL}?accion=catalogo`);
     if (!res.data || !res.data.items) return [];
     return res.data.items.map((i) => ({
       codigo: i.CODIGO || "",
@@ -96,6 +95,19 @@ async function fetchCatalog() {
   } catch (err) {
     console.error("ERROR leyendo catálogo:", err.toString());
     return [];
+  }
+}
+
+async function fetchEstadoCliente(chatId) {
+  try {
+    const url = `${SHEETS_URL}?accion=estadoCliente&chatId=${encodeURIComponent(
+      chatId
+    )}`;
+    const res = await axios.get(url);
+    return res.data || {};
+  } catch (err) {
+    console.error("ERROR leyendo estadoCliente:", err.toString());
+    return {};
   }
 }
 
@@ -118,14 +130,17 @@ function mainMenu() {
 }
 
 async function sendWelcome(chatId) {
-  await sendPhoto(
-    chatId,
-    LOGO_URL,
-    "<b>¡Bienvenido/a a TODO QUESO CLUB! 🧀</b>\n" +
-      "Encontrá promos, sumá sellos y canjeá beneficios.\n\n" +
-      "Elegí una opción del menú de abajo 👇",
-    mainMenu()
-  );
+  const caption =
+    "<b>¡Hola! Soy TODO QUESO CLUB 🧀</b>\n\n" +
+    "Somos tu fiambre y quesería de confianza en Garín. " +
+    "Desde este bot podés:\n" +
+    "• Ver promos y productos del día\n" +
+    "• Armar tu pedido paso a paso\n" +
+    "• Sumar sellos con cada compra\n" +
+    "• Canjear beneficios especiales 🎁\n\n" +
+    "Elegí una opción del menú de abajo para empezar 👇";
+
+  await sendPhoto(chatId, LOGO_URL, caption, mainMenu());
 }
 
 // =====================
@@ -135,7 +150,11 @@ async function sendWelcome(chatId) {
 async function showCategories(chatId) {
   const items = await fetchCatalog();
   if (!items || items.length === 0) {
-    return sendMessage(chatId, "El catálogo todavía no tiene productos cargados.", mainMenu());
+    return sendMessage(
+      chatId,
+      "Por ahora el catálogo no tiene productos cargados. Volvé a intentar más tarde 🧀",
+      mainMenu()
+    );
   }
 
   const categoriasSet = new Set();
@@ -147,7 +166,9 @@ async function showCategories(chatId) {
     }
   }
 
-  const categorias = Array.from(categoriasSet).sort((a, b) => a.localeCompare(b));
+  const categorias = Array.from(categoriasSet).sort((a, b) =>
+    a.localeCompare(b)
+  );
   const inline_keyboard = categorias.map((c) => [
     {
       text: `${iconForCategory(c)} ${c}`,
@@ -160,10 +181,12 @@ async function showCategories(chatId) {
   });
 }
 
-// Mostrar productos de una categoría (uno debajo del otro)
+// Mostrar productos de una categoría (fotos con botones)
 async function showProductsOfCategory(chatId, category) {
   const items = await fetchCatalog();
-  const filtered = items.filter((i) => (i.categoria || "Otros") === category);
+  const filtered = items.filter(
+    (i) => (i.categoria || "Otros") === category
+  );
 
   if (filtered.length === 0) {
     return sendMessage(chatId, "No hay productos en esta categoría.", mainMenu());
@@ -193,15 +216,24 @@ async function showProductsOfCategory(chatId, category) {
       ]
     };
 
-    await sendPhoto(chatId, p.imagen, caption, keyboard);
+    await sendPhoto(chatId, p.imagen || LOGO_URL, caption, keyboard);
   }
 
-  await sendMessage(chatId, "¿Querés volver a elegir categoría o ver tu carrito?", {
-    inline_keyboard: [
-      [{ text: "⬅️ Volver a categorías", callback_data: "volver_categorias" }],
-      [{ text: "🛒 Ver carrito", callback_data: "ver_carrito" }]
-    ]
-  });
+  await sendMessage(
+    chatId,
+    "Si no encontraste algo, podés escribirle al vendedor desde el menú 💬.",
+    {
+      inline_keyboard: [
+        [
+          {
+            text: "⬅️ Volver a categorías",
+            callback_data: "volver_categorias"
+          }
+        ],
+        [{ text: "🛒 Ver carrito", callback_data: "ver_carrito" }]
+      ]
+    }
+  );
 }
 
 // =====================
@@ -220,9 +252,9 @@ async function startBuy(chatId, codigo) {
 
   const msg =
     `Vas a comprar <b>${item.nombre}</b> (código <code>${item.codigo}</code>).\n\n` +
-    "Indicá la cantidad:\n" +
-    "• Si es por unidad → escribí 1, 2, 3…\n" +
-    "• Si es por kilo → escribí los gramos (mínimo 100g).";
+    "Escribí la cantidad:\n" +
+    "• Si es por unidad → 1, 2, 3…\n" +
+    "• Si es por kilo → los gramos (mínimo 100g).";
 
   await sendMessage(chatId, msg, mainMenu());
 }
@@ -235,7 +267,10 @@ async function handleQuantity(chatId, text) {
   const qty = Number(text.replace(",", "."));
 
   if (!qty || qty <= 0) {
-    return sendMessage(chatId, "Por favor ingresá un número válido de unidades o gramos.");
+    return sendMessage(
+      chatId,
+      "Por favor ingresá un número válido de unidades o gramos."
+    );
   }
 
   let subtotal;
@@ -244,7 +279,10 @@ async function handleQuantity(chatId, text) {
   } else {
     // Se interpreta como gramos
     if (qty < 100) {
-      return sendMessage(chatId, "El mínimo son 100 gramos. Ingresá un valor mayor o igual a 100.");
+      return sendMessage(
+        chatId,
+        "El mínimo son 100 gramos. Ingresá un valor mayor o igual a 100."
+      );
     }
     subtotal = (item.precio * qty) / 1000;
   }
@@ -277,7 +315,7 @@ async function handleQuantity(chatId, text) {
 async function showCart(chatId) {
   const cart = carts[chatId];
   if (!cart || !cart.items || cart.items.length === 0) {
-    return sendMessage(chatId, "Tu carrito está vacío por ahora.", mainMenu());
+    return sendMessage(chatId, "Tu carrito está vacío por ahora 🧀", mainMenu());
   }
 
   let total = 0;
@@ -300,7 +338,11 @@ async function showCart(chatId) {
 async function checkout(chatId) {
   const cart = carts[chatId];
   if (!cart || !cart.items || cart.items.length === 0) {
-    return sendMessage(chatId, "Tu carrito está vacío. Agregá algo primero 😊", mainMenu());
+    return sendMessage(
+      chatId,
+      "Tu carrito está vacío. Agregá algo primero 😊",
+      mainMenu()
+    );
   }
 
   await sendMessage(
@@ -318,7 +360,11 @@ async function checkout(chatId) {
 async function sendOrderToVendor(chatId, method) {
   const cart = carts[chatId];
   if (!cart || !cart.items || cart.items.length === 0) {
-    return sendMessage(chatId, "Tu carrito quedó vacío, cargá de nuevo.", mainMenu());
+    return sendMessage(
+      chatId,
+      "Tu carrito quedó vacío, empezá un pedido nuevo.",
+      mainMenu()
+    );
   }
 
   let total = 0;
@@ -336,19 +382,33 @@ async function sendOrderToVendor(chatId, method) {
     `🎉 <b>Pedido registrado</b>\n\n` +
     `${detalle}\n` +
     `<b>Total con ${method === "envio" ? "envío" : "retiro"}: $${total}</b>\n\n` +
-    `📲 Pagá por transferencia al alias <b>jennyocampos.mp</b>.\n` +
-    `Luego, si querés, avisá por WhatsApp al vendedor para confirmar.`;
+    "📲 Podés pagar por transferencia al alias <b>jennyocampos.mp</b>.\n" +
+    "Cuando termines, si querés, avisá por WhatsApp al vendedor para confirmar el pedido 😊.";
 
   await sendMessage(chatId, textoCliente, mainMenu());
 
-  // Podríamos enviar detalle al vendedor después (para el POS)
-  // Por ahora sólo limpiamos el carrito
+  // limpiar carrito
   carts[chatId] = { items: [] };
 }
 
 // =====================
 // COMPARTIR PROMO / BOT
 // =====================
+
+function buildShareButtons(text) {
+  const encodedText = encodeURIComponent(text);
+  const waUrl = `https://wa.me/?text=${encodedText}`;
+  const tgUrl = `https://t.me/share/url?url=${encodedText}&text=${encodedText}`;
+  const mailUrl = `mailto:?subject=Todo%20Queso%20Club&body=${encodedText}`;
+
+  return {
+    inline_keyboard: [
+      [{ text: "📲 WhatsApp", url: waUrl }],
+      [{ text: "📨 Telegram", url: tgUrl }],
+      [{ text: "✉️ Email", url: mailUrl }]
+    ]
+  };
+}
 
 async function sharePromo(chatId, codigo) {
   const items = await fetchCatalog();
@@ -367,7 +427,8 @@ async function sharePromo(chatId, codigo) {
 
   await sendMessage(
     chatId,
-    "Copiá y pegá este texto para compartir por WhatsApp, Telegram, mail, etc:\n\n" + texto
+    "Compartí esta promo con tus contactos para que también sumen sellos:\n\n" + texto,
+    buildShareButtons(texto)
   );
 }
 
@@ -379,7 +440,9 @@ async function shareBot(chatId) {
 
   await sendMessage(
     chatId,
-    "Compartí este texto con tus contactos para que también usen el bot y sumen sellos:\n\n" + texto
+    "Compartí este texto con tus contactos para que también usen el bot y sumen sellos:\n\n" +
+      texto,
+    buildShareButtons(texto)
   );
 }
 
@@ -388,32 +451,74 @@ async function shareBot(chatId) {
 // =====================
 
 async function sendInfoLocal(chatId) {
-  const texto =
+  const caption =
     "<b>🏪 TODO QUESO CLUB</b>\n\n" +
     "📍 Fructuoso Díaz 893, Garín\n" +
     "🕒 Lun a Sáb 08:30–14:00 / 16:30–21:00\n" +
     "📱 3484 230184\n" +
-    "📲 Instagram: @todoqueso.club";
+    "📲 Instagram: @todoqueso.club\n\n" +
+    "Mostrale este bot al vendedor para sumar sellos con tus compras 🧀.";
 
-  await sendMessage(chatId, texto, mainMenu());
+  await sendPhoto(chatId, LOGO_URL, caption, mainMenu());
 }
 
 async function talkToVendor(chatId) {
   const url = `https://wa.me/${WHATSAPP_VENDEDOR}`;
   const texto =
-    "Si necesitás algo especial, escribile directo al vendedor por WhatsApp:\n\n" +
+    "Si necesitás algo especial o no encontrás un producto en el catálogo, " +
+    "escribile directo al vendedor por WhatsApp:\n\n" +
     url;
 
   await sendMessage(chatId, texto, mainMenu());
 }
 
+function buildSellosBar(actual, nivel) {
+  const tot = Math.max(1, nivel || 1);
+  const act = Math.min(actual || 0, tot);
+  return "🧀".repeat(act) + "◻️".repeat(tot - act);
+}
+
 async function showSellos(chatId) {
-  // Placeholder por ahora
-  await sendMessage(
-    chatId,
-    "🏆 Tu tarjeta de sellos personalizada va a aparecer acá.\nMuy pronto vas a poder ver tus sellos y beneficios en tiempo real.",
-    mainMenu()
+  const estado = await fetchEstadoCliente(chatId);
+
+  // Sin registro
+  if (!estado || !estado.tieneTarjeta) {
+    const caption =
+      "<b>🏆 Tu tarjeta de sellos</b>\n\n" +
+      "Todavía no estás registrado para sumar sellos.\n\n" +
+      "🧀 Mostrale este bot al vendedor en el local y pedile que te registre.\n" +
+      "Desde tu próxima compra vas a empezar a ver acá tu tarjeta personalizada.";
+    await sendPhoto(chatId, LOGO_URL, caption, mainMenu());
+    return;
+  }
+
+  const bar = buildSellosBar(
+    estado.sellosActuales,
+    estado.sellosNivelActual
   );
+
+  let texto =
+    `<b>🏆 Tarjeta de ${estado.nombreCliente || "cliente"}</b>\n\n` +
+    `Nivel actual: <b>${estado.nivelActual || ""}</b>\n` +
+    `Sellos en este nivel: ${estado.sellosActuales}/${estado.sellosNivelActual}\n` +
+    `${bar}\n\n` +
+    `Sellos totales acumulados: ${estado.sellosTotalesAcumulados || 0}\n`;
+
+  if (estado.beneficioDisponible) {
+    texto +=
+      `\n🎁 <b>Tenés un beneficio disponible:</b>\n` +
+      `${estado.descripcionBeneficio || ""}\n` +
+      (estado.venceEl ? `Vence el: ${estado.venceEl}\n` : "") +
+      (estado.codigoCanje ? `Código de canje: <code>${estado.codigoCanje}</code>\n` : "") +
+      "\nMostrale este código al vendedor para usarlo.";
+  } else if (estado.beneficioProximo) {
+    texto +=
+      `\n✨ Te falta poquito para: ${estado.beneficioProximo}\n` +
+      "Seguí sumando sellos con tus compras 🧀.";
+  }
+
+  const foto = estado.tarjetaImagenUrl || LOGO_URL;
+  await sendPhoto(chatId, foto, texto, mainMenu());
 }
 
 // =====================
@@ -430,13 +535,12 @@ app.post("/webhook", async (req, res) => {
       const chatId = msg.chat.id;
       const text = (msg.text || "").trim();
 
-      // Si hay una compra pendiente, interpretamos el texto como cantidad
+      // Si hay compra pendiente, el texto es la cantidad
       if (carts[chatId] && carts[chatId].pending && text && !text.startsWith("/")) {
         await handleQuantity(chatId, text);
         return res.send("OK");
       }
 
-      // Comandos o textos directos
       if (text === "/start") {
         await sendWelcome(chatId);
         return res.send("OK");
@@ -462,7 +566,7 @@ app.post("/webhook", async (req, res) => {
           await shareBot(chatId);
           break;
         default:
-          // Cualquier otra cosa: bienvenida + menú
+          // Cualquier cosa (hola, etc.) → bienvenida
           await sendWelcome(chatId);
           break;
       }
@@ -493,7 +597,11 @@ app.post("/webhook", async (req, res) => {
         await checkout(chatId);
       } else if (data === "clearcart") {
         carts[chatId] = { items: [] };
-        await sendMessage(chatId, "Vaciamos tu carrito. Podés empezar de nuevo 😊", mainMenu());
+        await sendMessage(
+          chatId,
+          "Vaciamos tu carrito. Podés empezar de nuevo 😊",
+          mainMenu()
+        );
       } else if (data === "retiro") {
         await sendOrderToVendor(chatId, "retiro");
       } else if (data === "envio") {
@@ -510,7 +618,7 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// Endpoint simple para que Render despierte
+// Endpoint simple para Render
 app.get("/", (req, res) => {
   res.send("EzerBot cliente está vivo ✅");
 });
