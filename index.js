@@ -9,7 +9,7 @@ const BOT_TOKEN = process.env.BOT_TOKEN;
 const SHEETS_URL = process.env.SHEETS_URL;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// --- CACHES SENCILLAS PARA QUE RESPONDA MÁS RÁPIDO ---
+// --- CACHES ---
 let configCache = null;
 let catalogCache = null;
 
@@ -27,20 +27,22 @@ async function loadCatalog() {
   return catalogCache;
 }
 
-// --- SESIONES EN MEMORIA ---
+// --- SESIONES ---
 const sessions = {};
 function getSession(chatId) {
   if (!sessions[chatId]) {
     sessions[chatId] = {
       mode: 'IDLE',
       cart: [],
-      pendingProduct: null
+      cartTotal: 0,
+      pendingProduct: null,
+      pendingOrder: null
     };
   }
   return sessions[chatId];
 }
 
-// --- UTILIDADES TELEGRAM ---
+// --- TELEGRAM UTILS ---
 async function sendMessage(chatId, text, extra = {}) {
   return axios.post(`${TELEGRAM_API}/sendMessage`, {
     chat_id: chatId,
@@ -69,7 +71,7 @@ async function answerCallbackQuery(id, text) {
   }).catch(console.error);
 }
 
-// --- MENÚ PRINCIPAL ---
+// --- MENÚ ---
 async function sendMainMenu(chatId) {
   const keyboard = {
     keyboard: [
@@ -79,61 +81,48 @@ async function sendMainMenu(chatId) {
     ],
     resize_keyboard: true
   };
-  await sendMessage(chatId, 'Elegí una opción del menú 👇', {
-    reply_markup: keyboard
-  });
+  await sendMessage(chatId, 'Elegí una opción 👇', { reply_markup: keyboard });
 }
 
 async function sendWelcome(chatId) {
   const cfg = await loadConfig();
   const nombre = cfg.NegocioNombre || 'Tu negocio';
   const desc = cfg.Descripcion || '';
-  await sendMessage(
-    chatId,
-    `🧀 Bienvenido/a a <b>${nombre}</b>\n\n${desc}\n\nUsá los botones de abajo para ver el catálogo, tu carrito o la info del local.`
+  await sendMessage(chatId,
+    `🧀 Bienvenido/a a <b>${nombre}</b>\n\n${desc}\n\nElegí lo que necesitás desde el menú 👇`
   );
   await sendMainMenu(chatId);
 }
 
-// --- INFO DEL LOCAL ---
+// --- INFO LOCAL ---
 async function sendInfoLocal(chatId) {
   const cfg = await loadConfig();
-  const nombre = cfg.NegocioNombre || 'Negocio';
-  const direccion = cfg.Direccion || '—';
-  const horarios = cfg.Horarios || '—';
-  const telefono = cfg.TelefonoNegocio || '';
-  const insta = cfg.Instagram || '';
   const logo = cfg.SelloURL || cfg.TarjetaURL || '';
+  const txt =
+    `🏬 <b>${cfg.NegocioNombre}</b>\n\n` +
+    `📍 ${cfg.Direccion}\n` +
+    `🕒 ${cfg.Horarios}\n` +
+    (cfg.TelefonoNegocio ? `📞 ${cfg.TelefonoNegocio}\n` : '') +
+    (cfg.Instagram ? `📸 ${cfg.Instagram}\n` : '') +
+    `\nGracias por elegirnos 🧀`;
 
-  const texto =
-    `🏬 <b>${nombre}</b>\n\n` +
-    `📍 <b>Dirección:</b> ${direccion}\n` +
-    `🕒 <b>Horarios:</b> ${horarios}\n` +
-    (telefono ? `📞 <b>Teléfono:</b> ${telefono}\n` : '') +
-    (insta ? `📸 <b>Instagram:</b> ${insta}\n` : '') +
-    `\nGracias por ser parte de ${nombre} 🧀`;
-
-  if (logo) {
-    await sendPhoto(chatId, logo, texto);
-  } else {
-    await sendMessage(chatId, texto);
-  }
+  if (logo) await sendPhoto(chatId, logo, txt);
+  else await sendMessage(chatId, txt);
 }
 
-// --- CATÁLOGO COMPLETO (CON FOTOS) ---
+// --- CATÁLOGO COMPLETO ---
 async function sendCatalogoCompleto(chatId) {
   const cfg = await loadConfig();
   const moneda = cfg.Moneda || 'ARS';
   const catalog = await loadCatalog();
 
   if (!catalog.length) {
-    await sendMessage(chatId, 'Por ahora el catálogo no tiene productos cargados 🧀');
+    await sendMessage(chatId, 'No hay productos cargados 🧀');
     return;
   }
 
-  await sendMessage(
-    chatId,
-    'Te muestro algunos productos. Para comprar uno, escribí el <b>código</b> (por ej. TQ01).'
+  await sendMessage(chatId,
+    'Acá tenés algunos productos 🤩\nSi querés comprar uno, escribí su <b>código</b> (ej: TQ01).'
   );
 
   for (const item of catalog) {
@@ -143,77 +132,64 @@ async function sendCatalogoCompleto(chatId) {
     const descripcion = item.descripcion || item.DESCRIPCION || '';
     const imagen = item.imagenUrl || item.IMAGEN || '';
 
-    let caption =
+    const caption =
       `🛒 <b>${nombre}</b>\n` +
-      `💰 <b>Precio:</b> ${precio} ${moneda}\n` +
-      (codigo ? `🔢 <b>Código:</b> ${codigo}\n` : '') +
+      `💰 <b>${precio} ${moneda}</b>\n` +
+      (codigo ? `🔢 Código: <b>${codigo}</b>\n` : '') +
       (descripcion ? `\n${descripcion}` : '') +
-      (codigo ? `\n\nPara comprar este producto escribí el código <b>${codigo}</b>.` : '');
+      (codigo ? `\n\nPara comprarlo, escribí <b>${codigo}</b>.` : '');
 
-    if (imagen) {
-      await sendPhoto(chatId, imagen, caption);
-    } else {
-      await sendMessage(chatId, caption);
-    }
+    if (imagen) await sendPhoto(chatId, imagen, caption);
+    else await sendMessage(chatId, caption);
   }
 }
 
-// --- CATÁLOGO RÁPIDO (TABLA / LISTA) ---
+// --- CATÁLOGO RÁPIDO ---
 async function sendCatalogoRapido(chatId) {
   const cfg = await loadConfig();
   const moneda = cfg.Moneda || 'ARS';
   const catalog = await loadCatalog();
 
   if (!catalog.length) {
-    await sendMessage(chatId, 'Por ahora el catálogo no tiene productos cargados 🧀');
+    await sendMessage(chatId, 'No hay productos cargados 🧀');
     return;
   }
 
-  let texto = '<b>🗂️ Catálogo rápido</b>\n\n';
-  for (const item of catalog) {
-    const codigo = item.codigo || item.CODIGO || '';
-    const nombre = item.nombre || item.NOMBRE || '';
-    const precio = item.precio || item.PRECIO || '';
-    texto += `• <b>${codigo}</b> – ${nombre} – ${precio} ${moneda}\n`;
-  }
+  let txt = '<b>🗂️ Catálogo rápido</b>\n\n';
+  catalog.forEach(item => {
+    txt += `• <b>${item.codigo}</b> – ${item.nombre} – ${item.precio} ${moneda}\n`;
+  });
 
-  texto += '\nPara comprar, escribí el código del producto (ej: <b>TQ01</b>).';
+  txt += `\nEscribí el código del producto (ej: <b>TQ01</b>) para comprarlo.`;
 
-  await sendMessage(chatId, texto);
+  await sendMessage(chatId, txt);
 }
 
-// --- ESTADO DE SELLOS / PUNTOS ---
+// --- ESTADO DE CLIENTE ---
 async function sendEstadoCliente(chatId) {
-  const res = await axios
-    .get(`${SHEETS_URL}?accion=estadoCliente&chatId=${chatId}`)
-    .catch(console.error);
-
-  if (!res || !res.data) {
-    await sendMessage(chatId, 'No pude obtener tu tarjeta en este momento. Probá de nuevo más tarde.');
-    return;
-  }
-
+  const res = await axios.get(`${SHEETS_URL}?accion=estadoCliente&chatId=${chatId}`);
   const info = res.data;
+
   if (!info.tieneTarjeta) {
-    await sendMessage(
-      chatId,
-      'No encontré tu tarjeta todavía. Hacé una compra en el local para empezar a sumar sellos 🧾✨'
+    await sendMessage(chatId,
+      'Todavía no encontré tu tarjeta.\nCuando hagas tu primera compra, empezás a sumar sellos 🧾✨'
     );
     return;
   }
 
-  const msg =
+  let msg =
     `🏆 <b>Mis sellos y puntos</b>\n\n` +
-    `👤 Cliente: ${info.nombreCliente || ''}\n` +
-    `🔘 Nivel actual: ${info.nivelActual || ''}\n` +
-    `🔢 Sellos en este nivel: ${info.sellosActuales}/${info.sellosNivelActual}\n` +
-    `📊 Sellos acumulados totales: ${info.sellosTotalesAcumulados}\n` +
-    (info.beneficioDisponible
-      ? `\n🎁 <b>Beneficio disponible:</b> ${info.descripcionBeneficio}\n` +
-        (info.venceEl ? `⏰ Vence el: ${info.venceEl}\n` : '')
-      : info.beneficioProximo
-        ? `\n🎁 Próximo beneficio: ${info.beneficioProximo}`
-        : '');
+    `👤 ${info.nombreCliente}\n` +
+    `🔘 Nivel: ${info.nivelActual}\n` +
+    `🔢 Progreso: ${info.sellosActuales}/${info.sellosNivelActual}\n` +
+    `📊 Acumulados: ${info.sellosTotalesAcumulados}\n`;
+
+  if (info.beneficioDisponible) {
+    msg += `\n🎁 <b>Beneficio disponible:</b> ${info.descripcionBeneficio}\n`;
+    if (info.venceEl) msg += `⏰ Vence el: ${info.venceEl}`;
+  } else if (info.beneficioProximo) {
+    msg += `\n🎁 Próximo beneficio: ${info.beneficioProximo}`;
+  }
 
   await sendMessage(chatId, msg);
 }
@@ -221,20 +197,18 @@ async function sendEstadoCliente(chatId) {
 // --- CARRITO ---
 function formatCart(session, moneda) {
   if (!session.cart.length) return 'Tu carrito está vacío 🧺';
-  let texto = '🛍️ <b>Tu carrito</b>\n\n';
-  session.cart.forEach((it, idx) => {
-    texto += `${idx + 1}) ${it.nombre} – ${it.detalle} – ${it.subtotal} ${moneda}\n`;
+  let txt = '🛍️ <b>Tu carrito</b>\n\n';
+  session.cart.forEach((it, i) => {
+    txt += `${i + 1}) ${it.nombre} – ${it.detalle} – ${it.subtotal} ${moneda}\n`;
   });
-  texto += `\nTotal: <b>${session.cartTotal || 0} ${moneda}</b>`;
-  return texto;
+  txt += `\nTotal: <b>${session.cartTotal} ${moneda}</b>`;
+  return txt;
 }
 
 async function sendCart(chatId) {
   const cfg = await loadConfig();
   const moneda = cfg.Moneda || 'ARS';
   const session = getSession(chatId);
-
-  const texto = formatCart(session, moneda);
 
   const keyboard = {
     keyboard: [
@@ -245,68 +219,58 @@ async function sendCart(chatId) {
     resize_keyboard: true
   };
 
-  await sendMessage(chatId, texto, { reply_markup: keyboard });
+  await sendMessage(chatId, formatCart(session, moneda), { reply_markup: keyboard });
 }
 
-function clearCart(session) {
-  session.cart = [];
-  session.cartTotal = 0;
+function clearCart(s) {
+  s.cart = [];
+  s.cartTotal = 0;
+  s.pendingOrder = null;
 }
 
-// --- INICIO DE COMPRA POR CÓDIGO ---
+// --- PROCESO DE COMPRA ---
 async function startPurchaseByCode(chatId, codeRaw) {
-  const code = String(codeRaw).trim().toUpperCase();
+  const code = codeRaw.trim().toUpperCase();
   const catalog = await loadCatalog();
-  const item = catalog.find(
-    (p) =>
-      String(p.codigo || p.CODIGO || '').toUpperCase() === code ||
-      String(p.codigobarras || p.CODIGOBARRAS || '') === code
-  );
 
+  const item = catalog.find(p => p.codigo.toUpperCase() === code);
   if (!item) {
-    await sendMessage(chatId, `No encontré ningún producto con código <b>${code}</b>. Revisá el catálogo rápido 🗂️`);
+    await sendMessage(chatId,
+      `No encontré un producto con el código <b>${code}</b>.\nProbá mirar el 🗂️ Catálogo rápido.`
+    );
     return;
   }
 
   const cfg = await loadConfig();
   const moneda = cfg.Moneda || 'ARS';
-
-  const nombre = item.nombre || item.NOMBRE || '';
-  const precio = Number(item.precio || item.PRECIO || 0);
-  const unidad = (item.unidad || item.UNIDAD || 'unidad').toLowerCase();
-  const descripcion = item.descripcion || item.DESCRIPCION || '';
-  const imagen = item.imagenUrl || item.IMAGEN || '';
-
   const session = getSession(chatId);
+
   session.pendingProduct = {
     codigo: code,
-    nombre,
-    precio,
-    unidad
+    nombre: item.nombre,
+    precio: Number(item.precio),
+    unidad: (item.unidad || 'unidad').toLowerCase()
   };
+
   session.mode = 'WAITING_QUANTITY';
 
   const caption =
-    `🛒 <b>${nombre}</b>\n` +
-    `💰 <b>Precio:</b> ${precio} ${moneda} por ${unidad}\n` +
-    (descripcion ? `\n${descripcion}\n` : '') +
-    `\nAhora indicame la cantidad:\n` +
-    (unidad === 'kg'
-      ? '📏 Escribí los gramos que querés (ej: 250, 500, 1000).'
-      : '🔢 Escribí cuántas unidades querés (ej: 1, 2, 3).');
+    `🛒 <b>${item.nombre}</b>\n` +
+    `💰 ${item.precio} ${moneda} por ${session.pendingProduct.unidad}\n\n` +
+    (item.descripcion || '') +
+    `\n\nIndicame la cantidad:\n` +
+    (session.pendingProduct.unidad === 'kg'
+      ? '📏 Escribí gramos (ej: 250, 500, 1000)'
+      : '🔢 Escribí unidades (ej: 1, 2, 3)');
 
-  if (imagen) {
-    await sendPhoto(chatId, imagen, caption);
-  } else {
-    await sendMessage(chatId, caption);
-  }
+  if (item.imagenUrl) await sendPhoto(chatId, item.imagenUrl, caption);
+  else await sendMessage(chatId, caption);
 }
 
-// --- PROCESAR CANTIDAD ---
 async function handleQuantity(chatId, text) {
-  const num = parseInt(String(text).trim(), 10);
+  const num = parseInt(text.trim(), 10);
   if (isNaN(num) || num <= 0) {
-    await sendMessage(chatId, 'Necesito un número válido. Probá otra vez 🙂');
+    await sendMessage(chatId, 'Necesito un número válido 🙂');
     return;
   }
 
@@ -321,24 +285,15 @@ async function handleQuantity(chatId, text) {
     return;
   }
 
-  let detalle = '';
   let subtotal = 0;
+  let detalle = '';
 
   if (p.unidad === 'kg') {
-    // num = gramos
-    const gramos = num;
-    subtotal = Math.round((p.precio * gramos) / 1000);
-    detalle = `${gramos} g`;
+    subtotal = Math.round((p.precio * num) / 1000);
+    detalle = `${num} g`;
   } else {
-    // unidades
-    const unidades = num;
-    subtotal = p.precio * unidades;
-    detalle = `${unidades} un.`;
-  }
-
-  if (!session.cart) {
-    session.cart = [];
-    session.cartTotal = 0;
+    subtotal = p.precio * num;
+    detalle = `${num} un.`;
   }
 
   session.cart.push({
@@ -347,232 +302,178 @@ async function handleQuantity(chatId, text) {
     detalle,
     subtotal
   });
-  session.cartTotal = (session.cartTotal || 0) + subtotal;
 
-  session.mode = 'IDLE';
+  session.cartTotal += subtotal;
+
   session.pendingProduct = null;
+  session.mode = 'IDLE';
 
-  await sendMessage(
-    chatId,
+  await sendMessage(chatId,
     `🛒 Agregué <b>${detalle}</b> de <b>${p.nombre}</b>\nSubtotal: <b>${subtotal} ${moneda}</b>`
   );
-  await sendMessage(chatId, 'Podés escribir otro código para seguir comprando o tocar 🛍️ Mi carrito.');
+
+  await sendMessage(chatId,
+    'Podés seguir agregando productos escribiendo otro código.\nCuando estés listo, abrí tu 🛍️ <b>carrito</b>.'
+  );
 }
 
-// --- CONFIRMAR PEDIDO Y ELEGIR ENTREGA ---
+// --- CONFIRMAR PEDIDO ---
 async function handleConfirmarPedido(chatId) {
-  const cfg = await loadConfig();
   const session = getSession(chatId);
+  const cfg = await loadConfig();
 
-  if (!session.cart || !session.cart.length) {
-    await sendMessage(chatId, 'Tu carrito está vacío 🧺. Primero agregá algún producto.');
+  if (!session.cart.length) {
+    await sendMessage(chatId, 'Tu carrito está vacío 🧺');
     return;
   }
 
   session.mode = 'CHOOSING_DELIVERY';
 
   const opciones = [];
-  if (String(cfg.UsaRetiroLocal || 'SI').toUpperCase() === 'SI') {
-    opciones.push([{ text: '🏬 Retiro en local' }]);
-  }
-  if (String(cfg.UsaEnvioDomicilio || 'NO').toUpperCase() === 'SI') {
-    opciones.push([{ text: '🚚 Envío a domicilio' }]);
-  }
+  if (cfg.UsaRetiroLocal === 'SI') opciones.push([{ text: '🏬 Retiro en local' }]);
+  if (cfg.UsaEnvioDomicilio === 'SI') opciones.push([{ text: '🚚 Envío a domicilio' }]);
   opciones.push([{ text: '⬅️ Cancelar' }]);
 
-  const keyboard = { keyboard: opciones, resize_keyboard: true };
-
-  await sendMessage(chatId, '¿Cómo querés recibir tu pedido?', { reply_markup: keyboard });
+  await sendMessage(chatId, 'Elegí cómo querés recibir tu pedido:', {
+    reply_markup: { keyboard: opciones, resize_keyboard: true }
+  });
 }
 
-async function finalizarPedido(chatId, tipo) {
+async function prepararPedido(chatId, tipo) {
   const cfg = await loadConfig();
   const moneda = cfg.Moneda || 'ARS';
+  const alias = cfg.AliasPago || '';
   const session = getSession(chatId);
 
   const totalProductos = session.cartTotal || 0;
-  let costoEnvio = 0;
-  let textoExtra = '';
-
-  if (tipo === 'ENVIO') {
-    costoEnvio = Number(cfg.CostoEnvioBase || 0);
-    textoExtra = cfg.TextoEnvioDomicilio || '';
-  } else {
-    textoExtra = cfg.TextoRetiroLocal || '';
-  }
-
+  const costoEnvio = tipo === 'ENVIO' ? Number(cfg.CostoEnvioBase || 0) : 0;
   const totalFinal = totalProductos + costoEnvio;
 
-  // Registrar compra para sellos
-  axios
-    .get(`${SHEETS_URL}?accion=registrarCompra&chatId=${chatId}&monto=${totalFinal}`)
-    .catch(console.error);
+  session.pendingOrder = { tipo, totalProductos, costoEnvio, totalFinal };
 
-  // Aviso al vendedor
+  let txt =
+    `🧾 <b>Resumen del pedido</b>\n\n` +
+    `Tipo: ${tipo === 'ENVIO' ? 'Envío a domicilio' : 'Retiro en local'}\n` +
+    `Total productos: ${totalProductos} ${moneda}\n` +
+    (costoEnvio ? `Costo envío: ${costoEnvio} ${moneda}\n` : '') +
+    `\n<b>Total a aprobar:</b> ${totalFinal} ${moneda}\n`;
+
+  if (alias)
+    txt += `\n💳 Podés abonar al alias:\n<b>${alias}</b>\n`;
+
+  txt +=
+    `\nTu pedido ya está listo.\nSolo queda aprobar el pago para que podamos prepararlo 😊.\n` +
+    `Apenas el local confirme tu pago, te avisamos al instante.`;
+
+  await sendMessage(chatId, txt);
+
   if (cfg.ChatIdVendedor) {
     const detalle = formatCart(session, moneda);
+    const aviso = cfg.TextoAvisoVendedor || 'Pago pendiente de aprobación';
+
     const msgV =
-      `📥 Nuevo pedido desde el bot\n\n` +
-      `${detalle}\n\n` +
-      `Tipo: ${tipo === 'ENVIO' ? 'Envío a domicilio' : 'Retiro en local'}\n` +
-      (costoEnvio ? `Costo de envío: ${costoEnvio} ${moneda}\n` : '') +
-      `Total final: ${totalFinal} ${moneda}`;
-    sendMessage(cfg.ChatIdVendedor, msgV).catch(console.error);
+      `${aviso}\n\n${detalle}\n\n` +
+      `Tipo: ${tipo === 'ENVIO' ? 'Envío a domicilio' : 'Retiro'}\n` +
+      (costoEnvio ? `Costo envío: ${costoEnvio}\n` : '') +
+      `Total final: ${totalFinal}\n\n` +
+      `Cliente (chatId): ${chatId}`;
+
+    const keyboard = {
+      inline_keyboard: [[{ text: '✅ Confirmar pago', callback_data: `CONFIRM_PAY:${chatId}` }]]
+    };
+
+    await sendMessage(cfg.ChatIdVendedor, msgV, { reply_markup: keyboard });
   }
 
-  const alias = cfg.AliasPago || '';
-
-  let texto =
-    '🎉 <b>Pedido confirmado</b>\n\n' +
-    `Tipo: ${tipo === 'ENVIO' ? 'Envío a domicilio' : 'Retiro en local'}\n` +
-    `Total productos: ${totalProductos} ${moneda}\n`;
-
-  if (costoEnvio) {
-    texto += `Costo de envío: ${costoEnvio} ${moneda}\n`;
-  }
-
-  texto += `Total a pagar: <b>${totalFinal} ${moneda}</b>\n`;
-
-  if (alias) {
-    texto += `\n💳 Alias para pagar: <b>${alias}</b>\n`;
-  }
-  if (textoExtra) {
-    texto += `\n${textoExtra}`;
-  }
-
-  await sendMessage(chatId, texto);
-
-  clearCart(session);
   session.mode = 'IDLE';
   await sendMainMenu(chatId);
 }
 
-// --- MANEJO DE MENSAJES ---
+// --- TEXTOS ---
 async function handleTextMessage(msg) {
   const chatId = msg.chat.id;
-  const text = (msg.text || '').trim();
+  const text = msg.text.trim();
   const session = getSession(chatId);
 
-  // Prioridad: estados especiales
   if (session.mode === 'WAITING_QUANTITY') {
     await handleQuantity(chatId, text);
     return;
   }
 
   if (session.mode === 'CHOOSING_DELIVERY') {
-    if (text.includes('Retiro')) {
-      await finalizarPedido(chatId, 'RETIRO');
-    } else if (text.includes('Envío') || text.includes('Envio')) {
-      await finalizarPedido(chatId, 'ENVIO');
-    } else {
-      session.mode = 'IDLE';
-      await sendMainMenu(chatId);
-    }
-    return;
-  }
-
-  // Comandos / botones
-  if (text === '/start') {
-    await sendWelcome(chatId);
-    return;
-  }
-
-  if (text === '🛒 Ver catálogo') {
-    await sendCatalogoCompleto(chatId);
-    return;
-  }
-
-  if (text === '🗂️ Catálogo rápido') {
-    await sendCatalogoRapido(chatId);
-    return;
-  }
-
-  if (text === '🛍️ Mi carrito') {
-    await sendCart(chatId);
-    return;
-  }
-
-  if (text === '🏆 Mis sellos y puntos') {
-    await sendEstadoCliente(chatId);
-    return;
-  }
-
-  if (text === '🏬 Información del local') {
-    await sendInfoLocal(chatId);
-    return;
-  }
-
-  if (text === '✅ Confirmar pedido') {
-    await handleConfirmarPedido(chatId);
-    return;
-  }
-
-  if (text === '🧹 Vaciar carrito') {
-    clearCart(session);
-    await sendMessage(chatId, 'Vacié tu carrito 🧺');
-    await sendMainMenu(chatId);
-    return;
-  }
-
-  if (text === '⬅️ Volver al menú' || text === '⬅️ Cancelar') {
+    if (text.includes('Retiro')) return prepararPedido(chatId, 'RETIRO');
+    if (text.includes('Envío') || text.includes('Envio')) return prepararPedido(chatId, 'ENVIO');
     session.mode = 'IDLE';
-    await sendMainMenu(chatId);
-    return;
+    return sendMainMenu(chatId);
   }
 
-  // Si el texto parece un código de producto (letras + números, sin espacios)
-  if (/^[A-Za-z0-9]+$/.test(text)) {
-    await startPurchaseByCode(chatId, text);
-    return;
-  }
+  if (text === '/start') return sendWelcome(chatId);
+  if (text === '🛒 Ver catálogo') return sendCatalogoCompleto(chatId);
+  if (text === '🗂️ Catálogo rápido') return sendCatalogoRapido(chatId);
+  if (text === '🛍️ Mi carrito') return sendCart(chatId);
+  if (text === '🏆 Mis sellos y puntos') return sendEstadoCliente(chatId);
+  if (text === '🏬 Información del local') return sendInfoLocal(chatId);
+  if (text === '🧹 Vaciar carrito') { clearCart(session); return sendMainMenu(chatId); }
+  if (text === '⬅️ Volver al menú' || text === '⬅️ Cancelar') { session.mode='IDLE'; return sendMainMenu(chatId); }
+  if (text === '✅ Confirmar pedido') return handleConfirmarPedido(chatId);
 
-  // Cualquier otra cosa: lo mando al menú
-  await sendMessage(
-    chatId,
-    'No entendí ese mensaje 🤔. Podés usar los botones de abajo o escribir el código de un producto (por ej. TQ01).'
-  );
+  if (/^[A-Za-z0-9]+$/.test(text)) return startPurchaseByCode(chatId, text);
+
+  await sendMessage(chatId, 'No entendí 🤔. Podés usar los botones o escribir un código como <b>TQ01</b>.');
   await sendMainMenu(chatId);
 }
 
-// --- MANEJO DE CALLBACKS (lo dejamos preparado por si luego queremos botones inline) ---
+// --- CALLBACKS ---
 async function handleCallbackQuery(cb) {
   const id = cb.id;
-  const data = cb.data || '';
-  const chatId = cb.message.chat.id;
+  const data = cb.data;
+  const chatIdV = cb.message.chat.id;
 
-  if (data.startsWith('add_')) {
-    const code = data.substring(4);
-    await startPurchaseByCode(chatId, code);
-    await answerCallbackQuery(id, 'Producto seleccionado');
+  if (data.startsWith('CONFIRM_PAY:')) {
+    const clientId = data.split(':')[1];
+    const cfg = await loadConfig();
+    const moneda = cfg.Moneda || 'ARS';
+    const session = getSession(clientId);
+    const order = session.pendingOrder;
+
+    if (!order) {
+      await answerCallbackQuery(id, 'Pedido no encontrado.');
+      return;
+    }
+
+    await answerCallbackQuery(id, 'Pago confirmado');
+
+    axios.get(`${SHEETS_URL}?accion=registrarCompra&chatId=${clientId}&monto=${order.totalFinal}`);
+
+    const txt =
+      `🎉 <b>Pago aprobado</b>\n\n` +
+      `${cfg.TextoConfirmacionPedido || 'Tu pedido fue confirmado y ya lo estamos preparando.'}\n\n` +
+      `Total abonado: <b>${order.totalFinal} ${moneda}</b>`;
+
+    await sendMessage(clientId, txt);
+
+    clearCart(session);
+    await sendMainMenu(clientId);
+
+    await sendMessage(chatIdV, 'Pago confirmado y pedido marcado como en preparación.');
     return;
   }
 
   await answerCallbackQuery(id, '');
 }
 
-// --- ROUTES EXPRESS ---
-app.get('/', (req, res) => {
-  res.json({ ok: true, message: 'EzerBot backend activo' });
-});
-
+// --- RUTAS ---
+app.get('/', (_, res) => res.json({ ok: true }));
 app.post('/webhook', async (req, res) => {
-  const update = req.body;
-
   try {
-    if (update.message && update.message.text) {
-      await handleTextMessage(update.message);
-    } else if (update.callback_query) {
-      await handleCallbackQuery(update.callback_query);
-    }
+    if (req.body.message) await handleTextMessage(req.body.message);
+    if (req.body.callback_query) await handleCallbackQuery(req.body.callback_query);
   } catch (err) {
-    console.error('Error manejando update:', err);
+    console.error(err);
   }
-
   res.sendStatus(200);
 });
 
-// --- ARRANQUE LOCAL (Render usa el mismo PORT) ---
+// --- START ---
 const PORT = process.env.PORT || 10000;
-app.listen(PORT, () => {
-  console.log('EzerBot escuchando en puerto', PORT);
-});
+app.listen(PORT, () => console.log('EzerBot ejecutándose en Render'));
