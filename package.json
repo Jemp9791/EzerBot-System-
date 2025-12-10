@@ -1,13 +1,15 @@
 {
-  "name": "ezerbot-system",
+  "name": "ezerbot",
   "version": "1.0.0",
+  "description": "EzerBot para Telegram con catálogo y sistema de compras",
   "main": "index.js",
+  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "body-parser": "^1.20.3",
-    "axios": "^1.7.7"
+    "express": "^4.18.2",
+    "axios": "^1.6.2",
+    "node-telegram-bot-api": "^0.61.0"
   }
 }
