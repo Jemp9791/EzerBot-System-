@@ -41,8 +41,8 @@ let catalogCache = null;
 let catalogCacheTime = 0;
 const CACHE_MS = 2 * 60 * 1000; // 2 minutos
 
-const carts = {};         // { chatId: [ ... ] }
-const pendingQty = {};    // { chatId: producto }
+const carts = {};          // { chatId: [ ... ] }
+const pendingQty = {};     // { chatId: producto }
 const productsByCode = {}; // { codigo: producto }
 
 // =======================
@@ -91,12 +91,64 @@ async function fetchCatalog() {
   const url = BACKEND_URL + '?accion=catalogo';
   const res = await axios.get(url);
   const data = res.data || {};
-  const items = Array.isArray(data.items) ? data.items : [];
+  const rawItems = Array.isArray(data.items) ? data.items : [];
 
+  // NORMALIZAR: acepte formato viejo o nuevo de Apps Script
+  const items = rawItems.map((it, idx) => {
+    const codigo = (
+      it.codigo ||
+      it.CODIGO ||
+      it.cod ||
+      ''
+    ).toString().trim() || ('P' + (idx + 1));
+
+    const nombre = (
+      it.nombre ||
+      it.NOMBRE ||
+      ''
+    ).toString().trim() || ('Producto ' + (idx + 1));
+
+    const precioRaw = (it.precio !== undefined ? it.precio : (it.PRECIO !== undefined ? it.PRECIO : 0));
+    const precio = Number(precioRaw) || 0;
+
+    const unidad = (
+      it.unidad ||
+      it.UNIDAD ||
+      ''
+    ).toString().trim(); // "kg" o "unidad"
+
+    const descripcion = (
+      it.descripcion ||
+      it.DESCRIPCION ||
+      ''
+    ).toString().trim();
+
+    const imagenUrl = (
+      it.imagenUrl ||
+      it.IMAGEN ||
+      ''
+    ).toString().trim() || LOGO_URL;
+
+    const categoria = (
+      it.categoria ||
+      it.CATEGORIA ||
+      ''
+    ).toString().trim() || 'General';
+
+    return {
+      codigo,
+      nombre,
+      precio,
+      unidad,
+      descripcion,
+      imagenUrl,
+      categoria
+    };
+  });
+
+  // reconstruir índice por código
   for (const it of items) {
-    if (it && it.codigo) {
-      productsByCode[String(it.codigo).trim()] = it;
-    }
+    productsByCode[it.codigo] = it;
   }
 
   catalogCache = { items };
@@ -122,7 +174,6 @@ function iconoCategoria(catRaw) {
 // =======================
 
 async function sendBienvenida(chatId, nombre) {
-  const nombreMostrar = nombre || '¡Hola!';
   const caption =
     '🧀 Bienvenid@ a *' + NEGOCIO.nombre + '*\n\n' +
     'Soy tu asistente virtual. Desde acá podés:\n' +
@@ -258,15 +309,17 @@ async function mostrarProductosPorCategoria(chatId, categoria) {
 
       if (unidad === 'kg') {
         textoUnidad = 'Precio por kilo. Te vamos a pedir los gramos que querés.';
-      } else {
+      } else if (unidad === 'unidad') {
         textoUnidad = 'Precio por unidad.';
+      } else {
+        textoUnidad = '';
       }
 
       const caption =
         '🛍 *' + it.nombre + '*\n' +
         '🔖 Código: `' + (it.codigo || '-') + '` \n' +
         '💰 Precio: ' + precio + ' ARS\n' +
-        '📦 ' + textoUnidad + '\n\n' +
+        (textoUnidad ? '📦 ' + textoUnidad + '\n\n' : '\n') +
         (it.descripcion || '');
 
       const keyboard = {
