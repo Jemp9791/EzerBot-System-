@@ -9,7 +9,7 @@ const BOT_TOKEN =
   "8130447159:AAHxzp5S1lcgYOemw5dgF5V1DGh141dHmkA";
 
 const BACKEND_URL =
-  "https://script.google.com/macros/s/AKfycbyxm5E2Y7t0hgqh48-AVWpiru2MBXM3E-53T5WgnljMZb_CXZx-F-akgIJVJ4j76MjE/exec";
+  "https://script.google.com/macros/s/AKfycbxznmXVhDFd45kwrtsO0lORoGDn7AcHVdQIYQkgYy_63jaJCrjumzphVK_N39T_zjK_/exec";
 
 const WEBHOOK_PATH = "/webhook";
 const PORT = process.env.PORT || 10000;
