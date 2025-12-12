@@ -56,6 +56,138 @@ function normalize(s) {
     .replace(/[\u0300-\u036f]/g, "");
 }
 
+
+/***********************
+ * 1) Pegar este bloque (helpers) cerca de tus helpers/funciones
+ ***********************/
+
+// Normaliza texto
+function norm(s = "") {
+  return String(s).toLowerCase()
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+// Detecta categorías sugeridas por palabras clave (venta humana)
+function inferSuggestionTargetsByKeywords(productName = "") {
+  const n = norm(productName);
+
+  // Importante: devolvemos "categorías objetivo" (NO productos)
+  // para que el bot solo diga "si querés, mirá esta categoría".
+  const rules = [
+    { keys: ["prepizza", "pizza", "pizz"], cats: ["Quesos", "Fiambres", "Panificados", "Promos"] },
+    { keys: ["fiambre", "jamon", "salame", "mortad", "bondiola", "lomito", "longan"], cats: ["Panificados", "Quesos", "Aderezos", "Promos"] },
+    { keys: ["queso", "muzz", "cremoso", "provol", "sardo", "gruy"], cats: ["Panificados", "Dulces", "Fiambres", "Promos"] },
+    { keys: ["leche", "yogur", "crema"], cats: ["Panificados", "Dulces", "Promos"] },
+    { keys: ["dulce", "mermel", "membr"], cats: ["Panificados", "Quesos", "Promos"] },
+    { keys: ["pan"], cats: ["Quesos", "Fiambres", "Dulces", "Promos"] },
+  ];
+
+  for (const r of rules) {
+    if (r.keys.some(k => n.includes(k))) return r.cats;
+  }
+  // fallback general
+  return ["Promos", "Panificados"];
+}
+
+// Devuelve categorías existentes en catálogo (para no sugerir categorías que no existen)
+function getExistingCategories(productos = []) {
+  const set = new Set();
+  for (const p of (productos || [])) {
+    const c = (p.categoria || p.category || "General");
+    set.add(String(c));
+  }
+  return [...set];
+}
+
+// Filtra sugerencias a categorías reales
+function getSuggestedCategories(productoElegido, productos) {
+  const existing = new Set(getExistingCategories(productos).map(norm));
+  const targets = inferSuggestionTargetsByKeywords(productoElegido?.nombre || productoElegido?.name || "");
+  const out = [];
+  for (const t of targets) {
+    if (existing.has(norm(t))) out.push(t);
+  }
+  // Si ninguna coincide, sugerimos General/Promos si existen
+  if (out.length === 0) {
+    const ex = getExistingCategories(productos);
+    if (ex.some(x => norm(x) === "promos")) out.push("Promos");
+    else out.push(ex[0] || "General");
+  }
+  // Máximo 2-3 categorías para que quede vendedor, sin spamear
+  return out.slice(0, 3);
+}
+
+/**
+ * ✅ Sugerencia SOLO VENDEDORA: no agrega nada al carrito.
+ * Te manda botones para ir a esas categorías.
+ *
+ * Requiere que tengas una función para mostrar categoría por callback:
+ * - Si ya tenés callback "CAT|<cat>|<page>" o parecido, ajustá el callback_data acá.
+ */
+async function sendUpsellOnly(bot, chatId, productoElegido, productos, config) {
+  try {
+    const negocio = config?.NegocioNombre || config?.NegocioNombre?.value || "Tu tienda";
+    const cats = getSuggestedCategories(productoElegido, productos);
+
+    // Mensaje vendedor, humano y cercano
+    const frases = [
+      `💛 ¿Querés que te sugiera algo para acompañar?`,
+      `🤝 Para que quede redondo, te recomiendo mirar esto:`,
+      `✨ Si querés completar la compra, fijate estas opciones:`
+    ];
+    const intro = frases[Math.floor(Math.random() * frases.length)];
+
+    const lines = cats.map(c => `• ${c}`);
+    const text = `${intro}\n\n${lines.join("\n")}\n\n👉 Tocá una opción y te llevo directo.`;
+
+    // Botones: llevan al catálogo por categoría (NO compra automática)
+    // AJUSTÁ callback_data si tu handler usa otro formato
+    const buttons = cats.map(c => ([{
+      text: `🛒 Ver ${c}`,
+      callback_data: `CAT|${c}|0`  // <-- si tu handler es distinto, cambiá esto
+    }]));
+
+    await bot.sendMessage(chatId, `🏪 ${negocio}\n\n${text}`, {
+      reply_markup: { inline_keyboard: buttons }
+    });
+
+  } catch (e) {
+    // Silencioso: si falla no rompe el flujo de compra
+    console.log("sendUpsellOnly error:", e?.message || e);
+  }
+}
+
+/***********************
+ * 2) Reemplazar donde HOY sugerís y se agrega solo
+ ***********************/
+
+/*
+BUSCÁ en tu index.js la parte que corre DESPUÉS de agregar al carrito.
+Suele estar cerca de algo como:
+- addToCart(...)
+- "Se agregó al carrito"
+- "¿Querés algo más?"
+y probablemente tenés algo tipo:
+  autoSuggestAndAdd(...)
+  crossSellAdd(...)
+  addSuggestedItemToCart(...)
+o similar.
+
+👉 ELIMINÁ la parte que agrega el sugerido al carrito.
+👉 Y poné esto:
+*/
+
+// EJEMPLO DE REEMPLAZO (adaptalo a tu bloque real):
+// Después de agregar el producto elegido al carrito, hacé:
+/// await sendUpsellOnly(bot, chatId, productoElegido, productos, config);
+
+// O si no tenés async en esa función, hacelo con .then:
+/// sendUpsellOnly(bot, chatId, productoElegido, productos, config);
+
+
 // ============================
 // In-memory store (simple)
 // ============================
