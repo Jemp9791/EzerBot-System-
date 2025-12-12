@@ -86,14 +86,27 @@ bot.on("callback_query", async (q) => {
 // ===============================
 async function mostrarCategorias(chatId) {
   const r = await GAS("catalogo");
-  const cats = [...new Set(r.items.map(i => i.categoria || "General"))];
+
+  if (!r || !Array.isArray(r.items) || r.items.length === 0) {
+    return bot.sendMessage(
+      chatId,
+      "😕 En este momento no puedo mostrar el catálogo.\nProbá de nuevo en unos segundos."
+    );
+  }
+
+  const categorias = [
+    ...new Set(r.items.map(p => p.categoria || "General"))
+  ];
 
   await bot.sendMessage(chatId, "📦 Elegí una categoría:", {
     reply_markup: {
-      inline_keyboard: cats.map(c => [{ text: c, callback_data: "CAT_" + c }])
+      inline_keyboard: categorias.map(c => [
+        { text: `📂 ${c}`, callback_data: "CAT_" + c }
+      ])
     }
   });
 }
+
 
 async function mostrarProductos(chatId, categoria, page) {
   const r = await GAS("catalogo");
