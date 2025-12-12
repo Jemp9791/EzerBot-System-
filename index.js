@@ -87,11 +87,13 @@ bot.on("callback_query", async (q) => {
 async function mostrarCategorias(chatId) {
   const r = await GAS("catalogo");
 
-  if (!r || !Array.isArray(r.items) || r.items.length === 0) {
-    return bot.sendMessage(
-      chatId,
-      "😕 En este momento no puedo mostrar el catálogo.\nProbá de nuevo en unos segundos."
-    );
+if (!r || !Array.isArray(r.items)) {
+  return bot.sendMessage(chatId, "⚠️ No pude cargar los productos. Intentá nuevamente.");
+}
+
+const items = r.items.filter(
+  p => (p.categoria || "General") === categoria
+);
   }
 
   const categorias = [
