@@ -7,7 +7,7 @@
 import TelegramBot from "node-telegram-bot-api";
 import http from "http";
 
-const BOT_TOKEN = process.env.BOT_TOKEN || "PEGAR_TOKEN_ACA";
+const BOT_TOKEN = process.env.BOT_TOKEN || "8130447159:AAHxzp5S1lcgYOemw5dgF5V1DGh141dHmkA";
 const BACKEND_URL =
   process.env.BACKEND_URL ||
   "https://script.google.com/macros/s/AKfycbxznmXVhDFd45kwrtsO0lORoGDn7AcHVdQIYQkgYy_63jaJCrjumzphVK_N39T_zjK_/exec";
