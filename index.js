@@ -1,169 +1,145 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 
-// ===============================
-// CONFIG (mejor por ENV en Render)
-// ===============================
-const TOKEN =
-  process.env.TELEGRAM_TOKEN ||
-  "PONE_ACA_TU_TOKEN"; // <- ideal: en Render ENV
+const TOKEN = process.env.TELEGRAM_TOKEN;                 // <-- en Render ENV
+const BACKEND = process.env.GAS_BACKEND;                  // <-- en Render ENV
+const URL_BASE = process.env.URL_BASE;                    // <-- en Render ENV
+const LOGO = process.env.LOGO_URL;                        // <-- en Render ENV
 
-const BACKEND =
-  process.env.GAS_BACKEND ||
-  "PONE_ACA_TU_URL_DE_GAS"; // <- tu WebApp GAS /exec
+if (!TOKEN) throw new Error("Falta TELEGRAM_TOKEN en Environment");
+if (!BACKEND) throw new Error("Falta GAS_BACKEND en Environment");
+if (!URL_BASE) throw new Error("Falta URL_BASE en Environment");
+if (!LOGO) throw new Error("Falta LOGO_URL en Environment");
 
-const LOGO =
-  process.env.LOGO_URL ||
-  "https://i.postimg.cc/q7WvjsYm/20251206-210311.jpg";
+const PORT = process.env.PORT || 10000;
 
-const URL_BASE =
-  process.env.URL_BASE ||
-  "https://ezerbot-system.onrender.com"; // tu render URL
-
-const PORT = Number(process.env.PORT || 10000);
-
-// ===============================
-// APP
-// ===============================
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// ===============================
-// BOT (SIN webHook interno)
-// ===============================
+// Bot sin “webHook: {port: ...}” (eso suele traer conflictos). Webhook lo manejamos con Express.
 const bot = new TelegramBot(TOKEN, { polling: false });
 
-// ===============================
-// HELPERS
-// ===============================
-function mainMenuInline() {
-  return {
-    reply_markup: {
-      inline_keyboard: [
-        [
-          { text: "🛍️ Catálogo", callback_data: "CATALOGO" },
-          { text: "🛒 Mi carrito", callback_data: "CARRITO" },
-        ],
-        [{ text: "🏆 Mis sellos", callback_data: "SELLOS" }],
-        [{ text: "💬 Hablar con el vendedor", callback_data: "HABLAR" }],
-        [
-          { text: "ℹ️ Info del local", callback_data: "INFO" },
-          { text: "📣 Compartir bot", callback_data: "COMPARTIR" },
-        ],
-      ],
-    },
-  };
-}
+/* ---------------------------
+   Helpers
+---------------------------- */
 
-// esto “intenta” borrar teclado viejo (reply keyboard) que haya quedado pegado
-function removeOldKeyboard() {
-  return { reply_markup: { remove_keyboard: true } };
+const MAIN_MENU = {
+  reply_markup: {
+    inline_keyboard: [
+      [
+        { text: "🛍️ Catálogo", callback_data: "CATALOGO" },
+        { text: "🛒 Mi carrito", callback_data: "CARRITO" },
+      ],
+      [{ text: "🎁 Mis sellos", callback_data: "SELLOS" }],
+      [{ text: "💬 Hablar con el vendedor", callback_data: "HABLAR" }],
+      [
+        { text: "ℹ️ Info del local", callback_data: "INFO" },
+        { text: "📣 Compartir bot", callback_data: "COMPARTIR" },
+      ],
+    ],
+  },
+};
+
+function mdEscape(s = "") {
+  // Markdown simple (para no romper por símbolos raros)
+  return String(s).replace(/[_*[\]()~`>#+=|{}.!-]/g, "\\$&");
 }
 
 async function GAS(action, params = {}) {
   const url = new URL(BACKEND);
   url.searchParams.set("accion", action);
-  for (const k of Object.keys(params)) url.searchParams.set(k, params[k]);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, String(v)));
 
-  // Node 22: fetch nativo (NO node-fetch)
-  const resp = await fetch(url.toString(), { method: "GET" });
-
-  const text = await resp.text();
-
-  // A veces GAS devuelve HTML (error). Lo detectamos.
-  if (!text || text.trim().startsWith("<")) {
-    throw new Error(
-      `GAS no devolvió JSON. Primeros 120 chars: ${text.slice(0, 120)}`
-    );
-  }
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), 15000);
 
   try {
-    return JSON.parse(text);
+    const r = await fetch(url.toString(), { signal: controller.signal });
+    const text = await r.text();
+
+    // Intento parsear JSON aunque venga con basura
+    let json;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return { ok: false, error: "Respuesta no JSON del GAS", raw: text.slice(0, 400) };
+    }
+    return json;
   } catch (e) {
-    throw new Error(
-      `No pude parsear JSON de GAS. Primeros 200 chars: ${text.slice(0, 200)}`
-    );
+    return { ok: false, error: "Falla consultando GAS", detail: String(e?.message || e) };
+  } finally {
+    clearTimeout(t);
   }
 }
 
-function safeCatName(c) {
-  return (c || "").toString().trim() || "General";
+async function showMenu(chatId, firstName = "amiga") {
+  const caption =
+    `Hola ${mdEscape(firstName)} 👋\n` +
+    `Soy el asistente de *TODO QUESO CLUB* 🧀\n\n` +
+    `Desde acá podés:\n` +
+    `• Ver el catálogo\n` +
+    `• Armar tu pedido\n` +
+    `• Sumar sellos\n` +
+    `• Hablar con nosotros\n\n` +
+    `👇 *Elegí una opción*`;
+
+  await bot.sendPhoto(chatId, LOGO, { caption, parse_mode: "MarkdownV2", ...MAIN_MENU });
 }
 
-function catEmoji(cat) {
-  const t = cat.toLowerCase();
-  if (t.includes("fiambre")) return "🥓";
-  if (t.includes("láct") || t.includes("lact") || t.includes("leche")) return "📦";
-  if (t.includes("pan") || t.includes("panif")) return "🥖";
-  if (t.includes("promo") || t.includes("oferta")) return "🔥";
-  if (t.includes("ques")) return "🧀";
-  if (t.includes("beb")) return "🥤";
-  return "🛍️";
-}
-
-function chunkPairs(arr) {
-  // Botones en 2 columnas
+function buildCategoriesKeyboard(cats) {
+  // 2 columnas prolijo
   const rows = [];
-  for (let i = 0; i < arr.length; i += 2) rows.push(arr.slice(i, i + 2));
-  return rows;
+  for (let i = 0; i < cats.length; i += 2) {
+    const row = [];
+    row.push({ text: cats[i], callback_data: `CAT_${cats[i]}` });
+    if (cats[i + 1]) row.push({ text: cats[i + 1], callback_data: `CAT_${cats[i + 1]}` });
+    rows.push(row);
+  }
+  rows.push([{ text: "🏠 Menú", callback_data: "MENU" }]);
+  return { reply_markup: { inline_keyboard: rows } };
 }
 
-// ===============================
-// START / SALUDO
-// ===============================
-bot.onText(/\/start(\s+.*)?|hola|hola!|buenas/i, async (msg) => {
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
+/* ---------------------------
+   Commands
+---------------------------- */
+
+bot.onText(/\/start|\/menu/i, async (msg) => {
   const chatId = msg.chat.id;
-  const nombre = msg.chat.first_name || "amigo";
-
+  const nombre = msg.chat.first_name || "amiga";
   try {
-    // 1) Intento borrar teclado viejo “pegado”
-    await bot.sendMessage(chatId, "✅ Listo.", removeOldKeyboard());
-
-    // 2) Presentación + menú inline (SOLO este menú)
-    await bot.sendPhoto(chatId, LOGO, {
-      caption:
-        `Hola ${nombre} 👋\n` +
-        `Soy el asistente de *TODO QUESO CLUB* 🧀\n\n` +
-        `Desde acá podés:\n` +
-        `• Ver el catálogo\n` +
-        `• Armar tu pedido\n` +
-        `• Sumar sellos\n` +
-        `• Hablar con nosotros\n\n` +
-        `👇 *Elegí una opción*`,
-      parse_mode: "Markdown",
-      ...mainMenuInline(),
-    });
+    await showMenu(chatId, nombre);
   } catch (e) {
-    console.error("ERROR /start:", e);
-    await bot.sendMessage(
-      chatId,
-      "⚠️ Tuve un problema iniciando. Probá de nuevo en 10 segundos."
-    );
+    console.error("start/menu error:", e);
   }
 });
 
-// ===============================
-// CALLBACKS
-// ===============================
-bot.on("callback_query", async (query) => {
-  const chatId = query.message?.chat?.id;
-  const data = query.data || "";
+/* ---------------------------
+   Callback Queries
+---------------------------- */
 
-  // siempre respondo el callback para que Telegram no “cuelgue” el botón
-  try {
-    await bot.answerCallbackQuery(query.id);
-  } catch (_) {}
+bot.on("callback_query", async (q) => {
+  const chatId = q.message?.chat?.id;
+  const data = q.data;
 
-  if (!chatId) return;
+  // Siempre “ack” para que Telegram no quede pensando
+  try { await bot.answerCallbackQuery(q.id); } catch {}
 
   try {
-    if (data === "MENU") return mostrarMenu(chatId);
-    if (data === "INFO") return infoLocal(chatId);
+    if (!chatId) return;
+
+    if (data === "MENU") return showMenu(chatId, q.from?.first_name || "amiga");
     if (data === "CATALOGO") return mostrarCategorias(chatId);
-    if (data === "COMPARTIR") return compartirBot(chatId);
-    if (data === "SELLOS") return mostrarSellos(chatId);
+    if (data === "INFO") return infoLocal(chatId);
     if (data === "HABLAR") return hablarVendedor(chatId);
-    if (data === "CARRITO") return verCarrito(chatId);
+    if (data === "SELLOS") return mostrarSellos(chatId);
+    if (data === "COMPARTIR") return compartirBot(chatId);
+    if (data === "CARRITO") return bot.sendMessage(chatId, "🛒 Tu carrito lo activamos en el próximo paso 😉\nPor ahora podés mirar el catálogo y consultar.");
 
     if (data.startsWith("CAT_")) {
       const categoria = data.slice(4);
@@ -171,367 +147,256 @@ bot.on("callback_query", async (query) => {
     }
 
     if (data.startsWith("PAGE_")) {
-      const parts = data.split("_");
-      // PAGE_{categoriaBase64}_{page}
-      const page = Number(parts.at(-1));
-      const catB64 = parts.slice(1, -1).join("_");
-      const categoria = Buffer.from(catB64, "base64").toString("utf8");
+      const parts = data.split("|"); // PAGE_|categoria|page
+      const categoria = parts[1];
+      const page = Number(parts[2] || 0);
       return mostrarProductos(chatId, categoria, page);
     }
 
-    if (data.startsWith("SHARE_")) {
-      const codigo = data.slice(6);
-      return shareProducto(chatId, codigo);
-    }
-
-    // Si llega algo desconocido, vuelvo al menú
-    return mostrarMenu(chatId);
   } catch (e) {
-    console.error("ERROR callback:", data, e);
-    await bot.sendMessage(chatId, "⚠️ Me trabé con esa acción. Tocá *Menú*.", {
-      parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-    });
+    console.error("callback error:", e);
+    try { await bot.sendMessage(chatId, "⚠️ Se me trabó un segundo. Probá de nuevo o tocá 🏠 Menú."); } catch {}
   }
 });
 
-// ===============================
-// MENÚ (inline, limpio)
-// ===============================
-async function mostrarMenu(chatId) {
-  await bot.sendMessage(chatId, "🏠 *Menú principal*:", {
+/* ---------------------------
+   Flows
+---------------------------- */
+
+async function mostrarCategorias(chatId) {
+  const r = await GAS("catalogo");
+  const items = Array.isArray(r?.items) ? r.items : [];
+
+  if (!items.length) {
+    return bot.sendMessage(
+      chatId,
+      "⚠️ No pude leer el catálogo.\nRevisá que el GAS devuelva `items` (array) en la acción `catalogo`.\n\nTocá 🏠 Menú y probá otra vez."
+    );
+  }
+
+  const cats = [...new Set(items.map(p => (p.categoria || "General").trim()))]
+    .filter(Boolean)
+    .slice(0, 40);
+
+  // Emojis “vendedor” Todo Queso
+  const mapEmoji = (c) => {
+    const x = c.toLowerCase();
+    if (x.includes("fiambre")) return "🥓 " + c;
+    if (x.includes("láct") || x.includes("lact") || x.includes("leche")) return "🧈 " + c;
+    if (x.includes("pan") || x.includes("panif")) return "🥖 " + c;
+    if (x.includes("promo")) return "🔥 " + c;
+    if (x.includes("ques")) return "🧀 " + c;
+    return "📦 " + c;
+  };
+
+  const labeled = cats.map(mapEmoji);
+
+  await bot.sendMessage(chatId, "📂 *Elegí una categoría:*", {
     parse_mode: "Markdown",
-    ...mainMenuInline(),
+    ...buildCategoriesKeyboard(labeled),
   });
 }
 
-// ===============================
-// INFO LOCAL
-// ===============================
+async function mostrarProductos(chatId, categoriaLabel, page = 0) {
+  const r = await GAS("catalogo");
+  const itemsAll = Array.isArray(r?.items) ? r.items : [];
+
+  if (!itemsAll.length) {
+    return bot.sendMessage(chatId, "⚠️ No pude leer el catálogo. Tocá 🏠 Menú.");
+  }
+
+  // categoriaLabel viene con emoji. Sacamos emoji y espacios iniciales
+  const categoria = categoriaLabel.replace(/^[^\wÁÉÍÓÚÜÑáéíóúüñ]+/g, "").trim();
+
+  const items = itemsAll.filter(p => (p.categoria || "General").trim() === categoria);
+
+  const perPage = 3;
+  const maxPages = Math.max(1, Math.ceil(items.length / perPage));
+  const safePage = Math.min(Math.max(0, page), maxPages - 1);
+
+  const slice = items.slice(safePage * perPage, safePage * perPage + perPage);
+
+  if (!slice.length) {
+    return bot.sendMessage(chatId, "No encontré productos en esa categoría. Tocá 🏠 Menú.");
+  }
+
+  // En vez de “agregar al carrito” (que te rompe por kg/unidad), solo sugerimos y guiamos.
+  for (const p of slice) {
+    const nombre = p.nombre || "Producto";
+    const desc = p.descripcion || "";
+    const precio = p.precio ? `💲 ${p.precio} ARS` : "";
+    const img = p.imagenUrl || LOGO;
+
+    await bot.sendPhoto(chatId, img, {
+      caption: `*${mdEscape(nombre)}*\n${mdEscape(desc)}\n${mdEscape(precio)}`.trim(),
+      parse_mode: "MarkdownV2",
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "🛒 ¿Cómo lo pido?", callback_data: "HABLAR" }],
+          [{ text: "🏠 Menú", callback_data: "MENU" }],
+        ],
+      },
+    });
+
+    // Sugerencia “tipo vendedor” SIN sumar unidades
+    const sug = sugerenciaVenta(nombre, categoria);
+    if (sug) {
+      await bot.sendMessage(chatId, `💡 ${sug}\n\n👉 Si querés, buscá eso en *Catálogo* (categoría: *${mdEscape(sugCategoria(sug))}*).`, {
+        parse_mode: "MarkdownV2",
+        reply_markup: { inline_keyboard: [[{ text: "🛍️ Volver a Catálogo", callback_data: "CATALOGO" }]] },
+      });
+    }
+  }
+
+  // Paginación abajo (prolijo, 1 sola fila)
+  const navRow = [];
+  if (safePage > 0) navRow.push({ text: "⬅️ Anterior", callback_data: `PAGE_|${categoriaLabel}|${safePage - 1}` });
+  navRow.push({ text: `📄 ${safePage + 1}/${maxPages}`, callback_data: "NOOP" });
+  if (safePage < maxPages - 1) navRow.push({ text: "Siguiente ➡️", callback_data: `PAGE_|${categoriaLabel}|${safePage + 1}` });
+
+  await bot.sendMessage(chatId, `📌 *${mdEscape(categoria)}* — Navegación`, {
+    parse_mode: "MarkdownV2",
+    reply_markup: { inline_keyboard: [navRow, [{ text: "🏠 Menú", callback_data: "MENU" }]] },
+  });
+}
+
+function sugerenciaVenta(nombre, categoria) {
+  const n = (nombre || "").toLowerCase();
+  const c = (categoria || "").toLowerCase();
+
+  // Reglas simples “Todo Queso vendedor”
+  if (c.includes("ques") || n.includes("ques")) {
+    return "Ya que llevás queso 🧀, te recomiendo sumar *pan fresco* o *pan lactal* para acompañar. Queda espectacular.";
+  }
+  if (c.includes("fiambre") || n.includes("jam") || n.includes("salame") || n.includes("mortad")) {
+    return "Con fiambres 🥓 va perfecto *pan fresco* y *mayonesa/mostaza*. ¿Te lo busco en el catálogo?";
+  }
+  if (c.includes("láct") || c.includes("lact") || n.includes("leche") || n.includes("yogur")) {
+    return "Si llevás lácteos 🧈, suele ir bien *azúcar* o *mermelada* y algo de *pan*. ¿Querés que te lo ubique en el catálogo?";
+  }
+  if (c.includes("pan") || n.includes("pan")) {
+    return "Con pan 🥖, mucha gente suma *queso cremoso* o *dulce de batata/membrillo*. ¿Te tentó?";
+  }
+  if (c.includes("promo")) {
+    return "En promos 🔥, si querés cerrar el pedido, sumá *pan* o algún *queso* para que rinda más.";
+  }
+  return "";
+}
+
+// Solo para mostrar un “texto categoría” en sugerencia (básico)
+function sugCategoria(sug) {
+  const s = sug.toLowerCase();
+  if (s.includes("pan")) return "Panificados";
+  if (s.includes("mermelada") || s.includes("batata") || s.includes("membrillo")) return "Panificados";
+  if (s.includes("queso")) return "Quesos";
+  if (s.includes("fiambre")) return "Fiambres";
+  return "Catálogo";
+}
+
 async function infoLocal(chatId) {
-  try {
-    const cfg = await GAS("config");
-    const msg =
-      `🏪 *${cfg?.NegocioNombre || "Todo Queso"}*\n` +
-      `📍 ${cfg?.Dirección || "-"}\n` +
-      `🕒 ${cfg?.Horarios || "-"}\n` +
-      `📞 ${cfg?.TeléfonoNegocio || "-"}\n` +
-      `📸 Instagram: ${cfg?.Instagram || "-"}`;
-
-    await bot.sendPhoto(chatId, LOGO, {
-      caption: msg,
-      parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-    });
-  } catch (e) {
-    console.error("ERROR infoLocal:", e);
-    await bot.sendMessage(chatId, "⚠️ No pude leer la configuración del local.", {
-      reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-    });
+  const cfg = await GAS("config");
+  if (!cfg || cfg.ok === false) {
+    return bot.sendMessage(chatId, "⚠️ No pude leer la info del local. Probá más tarde.");
   }
+
+  const msg =
+    `🏪 *${mdEscape(cfg.NegocioNombre || "Todo Queso Club")}*\n` +
+    `📍 ${mdEscape(cfg.Dirección || "—")}\n` +
+    `🕒 ${mdEscape(cfg.Horarios || "—")}\n` +
+    `📞 ${mdEscape(cfg.TeléfonoNegocio || "—")}\n` +
+    `📸 Instagram: ${mdEscape(cfg.Instagram || "—")}`;
+
+  await bot.sendPhoto(chatId, LOGO, { caption: msg, parse_mode: "MarkdownV2", reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] } });
 }
 
-// ===============================
-// HABLAR CON VENDEDOR
-// ===============================
 async function hablarVendedor(chatId) {
-  try {
-    const cfg = await GAS("config");
-    const w = cfg?.WhatsAppLink || "https://wa.me/5490000000000";
+  const cfg = await GAS("config");
+  const w = cfg?.WhatsAppLink || "https://wa.me/5493484230184";
 
-    await bot.sendMessage(
-      chatId,
-      `💬 *¿Necesitás ayuda?*\nEscribinos por WhatsApp y te respondemos 😊`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "📞 Abrir WhatsApp", url: w }],
-            [{ text: "🏠 Menú", callback_data: "MENU" }],
-          ],
-        },
-      }
-    );
-  } catch (e) {
-    console.error("ERROR hablarVendedor:", e);
-    await bot.sendMessage(chatId, "⚠️ No pude cargar WhatsApp ahora.", {
-      reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-    });
-  }
+  await bot.sendMessage(
+    chatId,
+    "💬 *¿Querés que te ayude como vendedor?*\nAbrime WhatsApp y lo armamos rápido 👇",
+    {
+      parse_mode: "Markdown",
+      reply_markup: { inline_keyboard: [[{ text: "📞 Abrir WhatsApp", url: w }], [{ text: "🏠 Menú", callback_data: "MENU" }]] },
+    }
+  );
 }
 
-// ===============================
-// COMPARTIR BOT
-// ===============================
 async function compartirBot(chatId) {
+  // Cambiá esto por tu @ real si querés
   const share = "https://t.me/Ezer_IA_Bot";
-
   await bot.sendMessage(
     chatId,
-    `📣 *Compartí este bot*\nAsí tus contactos también ven promos y suman sellos.\n\n🔗 ${share}`,
+    "📣 *Compartí el bot*\nPasáselo a alguien y que chusmee el catálogo 😄",
     {
       parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🔗 Abrir enlace", url: share }],
-          [{ text: "🏠 Menú", callback_data: "MENU" }],
-        ],
-      },
+      reply_markup: { inline_keyboard: [[{ text: "🔗 Abrir link", url: share }], [{ text: "🏠 Menú", callback_data: "MENU" }]] },
     }
   );
 }
 
-// ===============================
-// SELLOS
-// ===============================
 async function mostrarSellos(chatId) {
-  try {
-    const r = await GAS("estadoCliente", { chatId });
+  const r = await GAS("estadoCliente", { chatId });
+  if (!r || r.ok === false) return bot.sendMessage(chatId, "⚠️ No pude leer tus sellos ahora. Probá luego.");
 
-    if (!r?.tieneTarjeta) {
-      return bot.sendMessage(
-        chatId,
-        "Todavía no tenés tarjeta 😊\nCuando hagas tu primera compra, se crea automáticamente.",
-        { reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] } }
-      );
-    }
-
-    await bot.sendPhoto(chatId, r.tarjetaImagenUrl || LOGO, {
-      caption: `🏆 *Tus sellos:* ${r.sellosTotalesAcumulados || 0}\n⭐ Nivel: ${r.nivelActual || "-"}`,
-      parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-    });
-  } catch (e) {
-    console.error("ERROR sellos:", e);
-    await bot.sendMessage(chatId, "⚠️ No pude leer tus sellos ahora.", {
+  if (!r.tieneTarjeta) {
+    return bot.sendMessage(chatId, "Todavía no tenés tarjeta. Cuando compres te la creamos automática 😄", {
       reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
     });
   }
+
+  await bot.sendPhoto(chatId, r.tarjetaImagenUrl || LOGO, {
+    caption: `🎉 *Tus sellos:* ${mdEscape(r.sellosTotalesAcumulados)}\n⭐ Nivel: ${mdEscape(r.nivelActual || "—")}`,
+    parse_mode: "MarkdownV2",
+    reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
+  });
 }
 
-// ===============================
-// CATÁLOGO: CATEGORÍAS (2 por fila)
-// ===============================
-async function mostrarCategorias(chatId) {
-  try {
-    const r = await GAS("catalogo");
-    const items = Array.isArray(r?.items) ? r.items : [];
+/* ---------------------------
+   Webhook endpoints
+---------------------------- */
 
-    if (!items.length) {
-      return bot.sendMessage(chatId, "⚠️ No pude leer el catálogo (items vacío).", {
-        reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-      });
-    }
-
-    const categoriasUnicas = [...new Set(items.map((p) => safeCatName(p.categoria)))];
-
-    const botones = categoriasUnicas.map((c) => ({
-      text: `${catEmoji(c)} ${c}`,
-      callback_data: "CAT_" + c,
-    }));
-
-    const rows = chunkPairs(botones);
-
-    // agrego botón menú abajo
-    rows.push([{ text: "🏠 Menú", callback_data: "MENU" }]);
-
-    await bot.sendMessage(chatId, "📂 *Elegí una categoría:*", {
-      parse_mode: "Markdown",
-      reply_markup: { inline_keyboard: rows },
-    });
-  } catch (e) {
-    console.error("ERROR mostrarCategorias:", e);
-    await bot.sendMessage(chatId, "⚠️ No pude leer el catálogo.", {
-      reply_markup: { inline_keyboard: [[{ text: "🏠 Menú", callback_data: "MENU" }]] },
-    });
-  }
-}
-
-// ===============================
-// CATÁLOGO: PRODUCTOS PAGINADOS (3 por página)
-// ===============================
-async function mostrarProductos(chatId, categoria, page = 0) {
-  try {
-    const r = await GAS("catalogo");
-    const itemsAll = Array.isArray(r?.items) ? r.items : [];
-
-    const items = itemsAll.filter((p) => safeCatName(p.categoria) === safeCatName(categoria));
-
-    const porPagina = 3;
-    const totalPages = Math.max(1, Math.ceil(items.length / porPagina));
-    const safePage = Math.min(Math.max(0, page), totalPages - 1);
-
-    const inicio = safePage * porPagina;
-    const lista = items.slice(inicio, inicio + porPagina);
-
-    if (!lista.length) {
-      return bot.sendMessage(chatId, "No hay productos en esta categoría.", {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "📂 Volver a categorías", callback_data: "CATALOGO" }],
-            [{ text: "🏠 Menú", callback_data: "MENU" }],
-          ],
-        },
-      });
-    }
-
-    await bot.sendMessage(
-      chatId,
-      `🧾 *${categoria}* — Página ${safePage + 1}/${totalPages}`,
-      {
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "📂 Volver a categorías", callback_data: "CATALOGO" }],
-            [{ text: "🏠 Menú", callback_data: "MENU" }],
-          ],
-        },
-      }
-    );
-
-    for (const p of lista) {
-      const nombre = p.nombre || "Producto";
-      const precio = p.precio || "";
-      const desc = p.descripcion ? `\n${p.descripcion}` : "";
-      const codigo = p.codigo || "";
-
-      await bot.sendPhoto(chatId, p.imagenUrl || LOGO, {
-        caption: `*${nombre}*\n💲 ${precio} ARS${desc}\n🆔 Código: *${codigo || "SIN"}*`,
-        parse_mode: "Markdown",
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "📣 Compartir", callback_data: "SHARE_" + (codigo || nombre) }],
-          ],
-        },
-      });
-    }
-
-    // paginación abajo (limpio)
-    const catB64 = Buffer.from(String(categoria), "utf8").toString("base64");
-    const nav = [];
-    if (safePage > 0) nav.push({ text: "⬅️ Anterior", callback_data: `PAGE_${catB64}_${safePage - 1}` });
-    if (safePage < totalPages - 1) nav.push({ text: "Siguiente ➡️", callback_data: `PAGE_${catB64}_${safePage + 1}` });
-
-    const keyboard = [];
-    if (nav.length) keyboard.push(nav);
-    keyboard.push([{ text: "📂 Categorías", callback_data: "CATALOGO" }, { text: "🏠 Menú", callback_data: "MENU" }]);
-
-    await bot.sendMessage(chatId, "Navegación:", { reply_markup: { inline_keyboard: keyboard } });
-  } catch (e) {
-    console.error("ERROR mostrarProductos:", e);
-    await bot.sendMessage(chatId, "⚠️ No pude mostrar productos ahora.", {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "📂 Categorías", callback_data: "CATALOGO" }],
-          [{ text: "🏠 Menú", callback_data: "MENU" }],
-        ],
-      },
-    });
-  }
-}
-
-// ===============================
-// SHARE PRODUCTO (solo sugerir dónde ir, sin sumar unidades)
-// ===============================
-async function shareProducto(chatId, codigo) {
-  await bot.sendMessage(
-    chatId,
-    `📣 *Compartí esta promo*\nPasale el bot a alguien y decile qué producto querés:\n\n🆔 ${codigo}\n\n💡 Si querés, buscá *Panificados* o *Lácteos* para acompañar 😉`,
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🛍️ Ir al catálogo", callback_data: "CATALOGO" }],
-          [{ text: "🏠 Menú", callback_data: "MENU" }],
-        ],
-      },
-    }
-  );
-}
-
-// ===============================
-// CARRITO (mínimo, sin romper nada)
-// ===============================
-async function verCarrito(chatId) {
-  await bot.sendMessage(
-    chatId,
-    "🛒 Tu carrito por ahora se arma desde el catálogo (en esta etapa lo estamos dejando simple para que no se rompa).\n\nTocá *Catálogo* para seguir viendo productos.",
-    {
-      parse_mode: "Markdown",
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: "🛍️ Catálogo", callback_data: "CATALOGO" }],
-          [{ text: "🏠 Menú", callback_data: "MENU" }],
-        ],
-      },
-    }
-  );
-}
-
-// ===============================
-// WEBHOOK ROUTE
-// ===============================
 app.post("/webhook", (req, res) => {
   try {
     bot.processUpdate(req.body);
     res.sendStatus(200);
   } catch (e) {
-    console.error("ERROR processUpdate:", e);
+    console.error("processUpdate error:", e);
     res.sendStatus(500);
   }
 });
 
-// health
-app.get("/", (_, res) => res.status(200).send({ ok: true, service: "EzerBot", status: "running" }));
+app.get("/", (_, res) => res.json({ ok: true, msg: "EzerBot corriendo" }));
 
-// debug real (para que NO diga Cannot GET /debug)
 app.get("/debug", async (_, res) => {
   try {
-    const info = await bot.getWebhookInfo();
-    let catalogoOk = false;
-    let catalogoCount = 0;
-
-    try {
-      const r = await GAS("catalogo");
-      const items = Array.isArray(r?.items) ? r.items : [];
-      catalogoOk = items.length > 0;
-      catalogoCount = items.length;
-    } catch (e) {
-      catalogoOk = false;
-    }
-
-    res.status(200).send({
+    const info = await bot.getWebHookInfo();
+    res.json({
       ok: true,
-      webhook: info,
       url_base: URL_BASE,
-      webhook_should_be: `${URL_BASE}/webhook`,
-      catalogoOk,
-      catalogoCount,
-      node: process.version,
+      webhook_expected: `${URL_BASE}/webhook`,
+      webhook_info: info,
     });
   } catch (e) {
-    res.status(500).send({ ok: false, error: String(e?.message || e) });
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
-// ===============================
-// START SERVER + SET WEBHOOK
-// ===============================
+/* ---------------------------
+   Start server + setWebhook
+---------------------------- */
+
 app.listen(PORT, async () => {
   console.log("Servidor activo en puerto", PORT);
 
   const hookUrl = `${URL_BASE}/webhook`;
-
   try {
+    // Limpia webhook viejo y setea el nuevo (clave para que no “se muera”)
+    await bot.deleteWebHook({ drop_pending_updates: true });
     await bot.setWebHook(hookUrl);
-    const info = await bot.getWebhookInfo();
     console.log("Webhook seteado:", hookUrl);
-    console.log("Webhook info:", info);
   } catch (e) {
-    console.error("ERROR setWebHook:", e);
+    console.error("ERROR setWebhook:", e?.response?.body || e);
   }
 });
-
-// logs útiles
-process.on("unhandledRejection", (e) => console.error("unhandledRejection:", e));
-process.on("uncaughtException", (e) => console.error("uncaughtException:", e));
