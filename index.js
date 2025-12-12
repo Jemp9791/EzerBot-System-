@@ -120,7 +120,7 @@ function getSuggestedCategories(productoElegido, productos) {
   return out.slice(0, 3);
 }
 
-/**
+/*
  * ✅ Sugerencia SOLO VENDEDORA: no agrega nada al carrito.
  * Te manda botones para ir a esas categorías.
  *
