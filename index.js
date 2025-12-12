@@ -354,7 +354,7 @@ function cartTotals(cart) {
   return { subtotal };
 }
 
-/*
+
 
   // si ya existe, acumula
   const idx = cart.findIndex((x) => x.codigo === producto.codigo);
