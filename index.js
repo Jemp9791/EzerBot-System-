@@ -354,11 +354,7 @@ function cartTotals(cart) {
   return { subtotal };
 }
 
-function addToCart(chatId, producto, qty) {
-  const cart = getCart(chatId);
-  const precio = toNumber(producto.precio, 0);
-  const unidad = producto.unidad || "unidad";
-  const subtotal = Math.round(precio * qty);
+/*
 
   // si ya existe, acumula
   const idx = cart.findIndex((x) => x.codigo === producto.codigo);
