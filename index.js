@@ -1,9 +1,9 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 
-const BOT_TOKEN = process.env.BOT_TOKEN;
-const GAS_URL = process.env.GAS_URL;
-const WEBHOOK_URL = process.env.WEBHOOK_URL; // OBLIGATORIO: https://tuapp.onrender.com (sin /webhook)
+const BOT_TOKEN = process.env.8130447159:AAHxzp5S1lcgYOemw5dgF5V1DGh141dHmkA;
+const GAS_URL = process.env.https://script.google.com/macros/s/AKfycbwfYMqsIWzGDB8UiQx30XoV8K4yes54tJo2Rcb512Ku2ce9vgOL7OgOflE6fc90rnb0/exec;
+const WEBHOOK_URL = process.env.https://ezerbot-system.onrender.com; // OBLIGATORIO: https://tuapp.onrender.com (sin /webhook)
 
 const PORT = process.env.PORT || 3000;
 
