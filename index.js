@@ -10,7 +10,6 @@ const PORT = process.env.PORT || 3000;
 if (!BOT_TOKEN || !GAS_URL) {
   throw new Error("Faltan variables de entorno");
 }
-
 const app = express();
 app.use(express.json());
 
