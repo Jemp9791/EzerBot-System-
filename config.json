@@ -1,0 +1,62 @@
+{
+  "negocio": {
+    "nombre": "Todo Queso",
+    "logo": "https://i.postimg.cc/26WcGXBd/Copia-de-Orange-Bold-Colorful-Turkey-Sandwich-Instagram-Story-(Video).png",
+    "direccion": "Garín",
+    "horarios": "Lun a Sáb 08:30–14:00 / 16:30–21:00",
+    "telefono": "3484230184",
+    "instagram": "https://instagram.com/todoqueso.club"
+  },
+
+  "envios": {
+    "activo": true,
+    "costo": 1500,
+    "zona": "Garín y alrededores"
+  },
+
+  "catalogo": [
+    {
+      "codigo": "TQ01",
+      "nombre": "PICADA P/4",
+      "precio": 30000,
+      "unidad": "unidad",
+      "categoria": "Promos",
+      "imagen": "https://i.postimg.cc/26WcGXBd/Copia-de-Orange-Bold-Colorful-Turkey-Sandwich-Instagram-Story-(Video).png",
+      "descripcion": "Picada para 4 personas con cerveza. Solo con reserva previa."
+    },
+    {
+      "codigo": "TQ02",
+      "nombre": "QUESO FRESCO PUNTA DE AGUA",
+      "precio": 9000,
+      "unidad": "kg",
+      "categoria": "Quesos",
+      "imagen": "https://i.postimg.cc/Cxr5wcr9/punta-de-agua.jpg",
+      "descripcion": "Queso fresco Punta de Agua en oferta."
+    },
+    {
+      "codigo": "TQ03",
+      "nombre": "PAN FRESCO",
+      "precio": 2200,
+      "unidad": "kg",
+      "categoria": "Panificados",
+      "imagen": "https://i.postimg.cc/FFJJKXjN/PAN.jpg",
+      "descripcion": "Pan fresco del día."
+    }
+  ],
+
+  "promos": [
+    {
+      "titulo": "🔥 Promo Picada + Cerveza",
+      "texto": "Picada para 4 personas con 2 cervezas Corona. Solo con reserva previa.",
+      "codigo": "TQ01"
+    }
+  ],
+
+  "mensajes": {
+    "bienvenida": "😊 Hola, soy el asistente de Todo Queso. Decime qué estás buscando y te ayudo.",
+    "catalogo_vacio": "⏳ Todavía no cargó el catálogo. Probá de nuevo en unos segundos.",
+    "promos_vacias": "🔥 Todavía no hay promos cargadas.",
+    "carrito_vacio": "🛒 Tu carrito está vacío. ¿Querés que te muestre el catálogo?",
+    "despedida": "🙏 Gracias por escribir a Todo Queso."
+  }
+      }
