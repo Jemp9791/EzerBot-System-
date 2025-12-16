@@ -1,18 +1,15 @@
 /**
- * EzerBot System - index.js (single file)
- * - Telegram webhook bot for Render
- * - Reads Config + Catalogo from Google Apps Script (GAS_URL) with fallbacks
- * - Warm WhatsApp-like UX
- * - Cart + kg/unidad + shipping + checkout
+ * EzerBot System - index.js (ESM)
+ * Works with package.json: { "type": "module" }
  *
- * ENV required:
- *   BOT_TOKEN   = Telegram bot token
- *   GAS_URL     = https://script.google.com/macros/s/XXXX/exec
- *   PUBLIC_URL  = https://ezerbot-system.onrender.com   (NO trailing slash)
+ * ENV required on Render:
+ *   BOT_TOKEN
+ *   GAS_URL
+ *   PUBLIC_URL   (https://ezerbot-system.onrender.com   sin barra final)
  */
 
-const express = require("express");
-const TelegramBot = require("node-telegram-bot-api");
+import express from "express";
+import TelegramBot from "node-telegram-bot-api";
 
 const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
 const GAS_URL = (process.env.GAS_URL || "").trim();
@@ -27,12 +24,11 @@ if (!PUBLIC_URL || !PUBLIC_URL.startsWith("https://")) {
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
-// Telegram bot (webhook mode)
 const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
 
 // ---------- In-memory store ----------
-const stateByChat = new Map(); // chatId -> { mode, pending, lastProductCode, ... }
-const carts = new Map();       // chatId -> [{codigo,nombre,unidad,precio,precioporkg,qtyKg,qtyUn,subtotal}]
+const stateByChat = new Map();
+const carts = new Map();
 const cache = {
   config: { data: null, loadedAt: 0 },
   catalogo: { data: null, loadedAt: 0 },
@@ -40,7 +36,7 @@ const cache = {
 const CACHE_TTL_MS = 60 * 1000;
 
 // ---------- Helpers ----------
-function nowISO() { return new Date().toISOString(); }
+const nowISO = () => new Date().toISOString();
 
 function asNumber(x, def = 0) {
   const n = Number(String(x).replace(",", "."));
@@ -53,68 +49,37 @@ function moneyARS(n) {
     return `$${Math.round(n)} ARS`;
   }
 }
-function norm(s) {
-  return String(s || "").trim();
-}
-function lower(s) {
-  return norm(s).toLowerCase();
-}
+function norm(s) { return String(s || "").trim(); }
+function lower(s) { return norm(s).toLowerCase(); }
 function safeText(s, max = 3800) {
   const t = String(s || "");
   return t.length > max ? t.slice(0, max - 3) + "..." : t;
 }
-
 function getChatState(chatId) {
-  if (!stateByChat.has(chatId)) stateByChat.set(chatId, { mode: "MENU", pending: null });
+  if (!stateByChat.has(chatId)) stateByChat.set(chatId, { pending: null });
   return stateByChat.get(chatId);
 }
 function getCart(chatId) {
   if (!carts.has(chatId)) carts.set(chatId, []);
   return carts.get(chatId);
 }
-function clearCart(chatId) {
-  carts.set(chatId, []);
-}
+function clearCart(chatId) { carts.set(chatId, []); }
 
 // ---------- GAS fetch with fallbacks ----------
 async function fetchJSON(url) {
   const res = await fetch(url, { method: "GET" });
   const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    // Some GAS returns plain text; wrap it
-    return { ok: false, raw: text };
-  }
+  try { return JSON.parse(text); } catch { return { ok: false, raw: text }; }
 }
-
 async function gasTry(paths) {
   let lastErr = null;
   for (const u of paths) {
-    try {
-      const data = await fetchJSON(u);
-      if (data && (data.ok === true || data.ok === undefined || typeof data === "object")) return data;
-    } catch (e) {
-      lastErr = e;
-    }
+    try { return await fetchJSON(u); } catch (e) { lastErr = e; }
   }
   if (lastErr) throw lastErr;
   return null;
 }
 
-/**
- * Expected possibilities (we support all):
- * - Config:
- *   { ok:true, config:{KEY:"VAL", ...} }
- *   { ok:true, data:{KEY:"VAL"} }
- *   { ok:true, rows:[{key:"LOGO_URL", value:"..."}, ...] }
- *   { ok:true, configRows:[{key,value}] }
- *
- * - Catalogo:
- *   { ok:true, productos:[{codigo,nombre,precio,unidad,precioporkg,codigobarras,descripcion,imagen,categoria}, ...] }
- *   { ok:true, catalogo:[...] }
- *   { ok:true, data:[...] }
- */
 function parseConfig(any) {
   if (!any || typeof any !== "object") return {};
   if (any.config && typeof any.config === "object") return any.config;
@@ -132,23 +97,10 @@ function parseConfig(any) {
   }
   return {};
 }
-
 function parseCatalogo(any) {
   if (!any || typeof any !== "object") return [];
-  const arr =
-    any.productos ||
-    any.catalogo ||
-    any.data ||
-    any.items ||
-    any.Catalogo ||
-    any.CATALOGO;
-
-  if (Array.isArray(arr)) return arr;
-
-  // Some wrong responses: configRawPreview might contain productos
-  if (typeof any === "object" && Array.isArray(any.productos)) return any.productos;
-
-  return [];
+  const arr = any.productos || any.catalogo || any.data || any.items || any.Catalogo || any.CATALOGO;
+  return Array.isArray(arr) ? arr : [];
 }
 
 async function loadConfig(force = false) {
@@ -163,14 +115,11 @@ async function loadConfig(force = false) {
     `${base}?sheet=Config`,
     `${base}?tab=Config`,
     `${base}?get=Config`,
-    `${base}`, // fallback (some GAS returns both or config)
+    `${base}`,
   ];
 
   const raw = await gasTry(tries);
-
-  // If fallback returned catalogo, config may be missing. We'll still parse config if possible.
   const cfg = parseConfig(raw);
-
   cache.config.data = cfg;
   cache.config.loadedAt = Date.now();
   return cfg;
@@ -188,12 +137,11 @@ async function loadCatalogo(force = false) {
     `${base}?sheet=Catalogo`,
     `${base}?tab=Catalogo`,
     `${base}?get=Catalogo`,
-    `${base}`, // fallback
+    `${base}`,
   ];
 
   const raw = await gasTry(tries);
   const list = parseCatalogo(raw);
-
   cache.catalogo.data = list;
   cache.catalogo.loadedAt = Date.now();
   return list;
@@ -201,45 +149,31 @@ async function loadCatalogo(force = false) {
 
 // ---------- Config getters ----------
 function cfgGet(cfg, key, def = "") {
-  // keys may come in different case; normalize
-  const k = key;
-  if (cfg[k] != null && cfg[k] !== "") return String(cfg[k]);
+  if (cfg?.[key] != null && cfg[key] !== "") return String(cfg[key]);
   const up = key.toUpperCase();
-  if (cfg[up] != null && cfg[up] !== "") return String(cfg[up]);
+  if (cfg?.[up] != null && cfg[up] !== "") return String(cfg[up]);
   const lowKey = key.toLowerCase();
-  // search case-insensitive
-  for (const kk of Object.keys(cfg)) {
+  for (const kk of Object.keys(cfg || {})) {
     if (kk.toLowerCase() === lowKey) return String(cfg[kk]);
   }
   return def;
 }
-
-function vendorWhatsapp(cfg) {
-  // support multiple key names
-  const w =
-    cfgGet(cfg, "WHATSAPP_VENDEDOR") ||
-    cfgGet(cfg, "WHATSAPP") ||
-    cfgGet(cfg, "TEL_WHATSAPP") ||
-    cfgGet(cfg, "CELULAR") ||
-    "";
-  return norm(w);
-}
-
-function logoUrl(cfg) {
-  return norm(cfgGet(cfg, "LOGO_URL") || cfgGet(cfg, "LOGO") || cfgGet(cfg, "IMG_LOGO") || "");
-}
-
 function brandName(cfg) {
   return norm(cfgGet(cfg, "NOMBRE_LOCAL") || cfgGet(cfg, "NOMBRE") || cfgGet(cfg, "MARCA") || "Todo Queso");
 }
-
+function logoUrl(cfg) {
+  return norm(cfgGet(cfg, "LOGO_URL") || cfgGet(cfg, "LOGO") || cfgGet(cfg, "IMG_LOGO") || "");
+}
+function vendorWhatsapp(cfg) {
+  const w = cfgGet(cfg, "WHATSAPP_VENDEDOR") || cfgGet(cfg, "WHATSAPP") || cfgGet(cfg, "TEL_WHATSAPP") || cfgGet(cfg, "CELULAR") || "";
+  return norm(w);
+}
 function shippingCost(cfg) {
-  // supports "ENVIO_COSTO", "COSTO_ENVIO"
   const val = cfgGet(cfg, "ENVIO_COSTO") || cfgGet(cfg, "COSTO_ENVIO") || "0";
   return Math.max(0, asNumber(val, 0));
 }
 
-// ---------- UI builders ----------
+// ---------- UI ----------
 function mainMenuKeyboard() {
   return {
     keyboard: [
@@ -251,16 +185,8 @@ function mainMenuKeyboard() {
     resize_keyboard: true,
   };
 }
-
-function inlineButton(text, cb) {
-  return { text, callback_data: cb };
-}
-
-function chunk(arr, n) {
-  const out = [];
-  for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n));
-  return out;
-}
+const inlineButton = (text, cb) => ({ text, callback_data: cb });
+function chunk(arr, n) { const out = []; for (let i = 0; i < arr.length; i += n) out.push(arr.slice(i, i + n)); return out; }
 
 function categoriesFromCatalogo(list) {
   const set = new Set();
@@ -270,13 +196,12 @@ function categoriesFromCatalogo(list) {
   }
   return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
 }
-
 function findProduct(list, code) {
   const c = norm(code);
   return list.find(p => norm(p.codigo ?? p.CODIGO) === c);
 }
 
-// ---------- Bot logic ----------
+// ---------- Bot flows ----------
 async function sendWelcome(chatId) {
   const cfg = await loadConfig(false);
   const brand = brandName(cfg);
@@ -284,15 +209,14 @@ async function sendWelcome(chatId) {
 
   const saludo =
     cfgGet(cfg, "SALUDO_INICIAL") ||
-    `Hola 😊 Soy el asistente de *${brand}*.\n\nDecime qué querés hacer y te guío paso a paso 👇`;
+    `Hola 😊 Soy el asistente de *${brand}*.\n\nEstoy acá para ayudarte a comprar fácil, como por WhatsApp 👇`;
 
   const extra =
     cfgGet(cfg, "SALUDO_EXTRA") ||
-    `• Ver el catálogo\n• Armar tu pedido\n• Finalizar compra\n• Hablar con un vendedor`;
+    `Elegí una opción:\n• 🛍️ Catálogo\n• 🛒 Mi carrito\n• ✅ Finalizar compra\n• 💬 Hablar con el vendedor`;
 
   const msg = `${saludo}\n\n${extra}`;
 
-  // If logo exists, send as photo first (Telegram photo with caption)
   if (logo) {
     try {
       await bot.sendPhoto(chatId, logo, {
@@ -301,15 +225,9 @@ async function sendWelcome(chatId) {
         reply_markup: mainMenuKeyboard(),
       });
       return;
-    } catch {
-      // fallback to text only
-    }
+    } catch {}
   }
-
-  await bot.sendMessage(chatId, msg, {
-    parse_mode: "Markdown",
-    reply_markup: mainMenuKeyboard(),
-  });
+  await bot.sendMessage(chatId, msg, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 }
 
 async function showCategories(chatId) {
@@ -319,20 +237,14 @@ async function showCategories(chatId) {
   if (!cats.length) {
     await bot.sendMessage(
       chatId,
-      "⚠️ No encuentro categorías/productos cargados todavía.\n\nRevisá que tu GAS devuelva productos con: `categoria`, `codigo`, `nombre`, `precio` o `precioporkg`, `imagen`.",
+      "⚠️ No encuentro categorías/productos.\nProbá 🔄 *Recargar catálogo* y revisá que tu GAS devuelva `productos` con `categoria`.",
       { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
     );
     return;
   }
 
-  const buttons = chunk(
-    cats.map(c => inlineButton(`📁 ${c}`, `CAT:${c}`)),
-    2
-  );
-
-  await bot.sendMessage(chatId, "📁 Elegí una categoría:", {
-    reply_markup: { inline_keyboard: buttons },
-  });
+  const buttons = chunk(cats.map(c => inlineButton(`📁 ${c}`, `CAT:${c}`)), 2);
+  await bot.sendMessage(chatId, "📁 Elegí una categoría:", { reply_markup: { inline_keyboard: buttons } });
 }
 
 async function showCategoryPage(chatId, category, page = 1) {
@@ -357,7 +269,7 @@ async function showCategoryPage(chatId, category, page = 1) {
   const img = norm(p.imagen ?? p.IMAGEN);
   const desc = norm(p.descripcion ?? p.DESCRIPCION);
 
-  const showPrice = unidad === "kg" ? precioKg || precio : precio;
+  const showPrice = unidad === "kg" ? (precioKg || precio) : precio;
 
   const caption =
     `*${nombre}*\n` +
@@ -378,16 +290,12 @@ async function showCategoryPage(chatId, category, page = 1) {
     ],
   };
 
-  // send photo if possible
   if (img) {
     try {
       await bot.sendPhoto(chatId, img, { caption: safeText(caption, 900), parse_mode: "Markdown", reply_markup: keyboard });
       return;
-    } catch {
-      // fall back to text
-    }
+    } catch {}
   }
-
   await bot.sendMessage(chatId, caption, { parse_mode: "Markdown", reply_markup: keyboard });
 }
 
@@ -395,7 +303,7 @@ async function askQuantity(chatId, productCode) {
   const list = await loadCatalogo(false);
   const p = findProduct(list, productCode);
   if (!p) {
-    await bot.sendMessage(chatId, "⚠️ No encuentro ese producto. Probá recargar catálogo.", { reply_markup: mainMenuKeyboard() });
+    await bot.sendMessage(chatId, "⚠️ No encuentro ese producto. Probá 🔄 Recargar catálogo.", { reply_markup: mainMenuKeyboard() });
     return;
   }
 
@@ -406,13 +314,13 @@ async function askQuantity(chatId, productCode) {
   if (unidad === "kg") {
     await bot.sendMessage(
       chatId,
-      `¿Cuánto querés de *${norm(p.nombre ?? p.NOMBRE)}*?\n\n✅ Respondé con:\n- gramos (ej: 250)\n- o kilos (ej: 0.5)\n\n(Te lo calculo y lo agrego al carrito)`,
+      `¿Cuánto querés de *${norm(p.nombre ?? p.NOMBRE)}*?\n\n✅ Respondé con:\n- gramos (ej: 250)\n- o kilos (ej: 0.5)`,
       { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
     );
   } else {
     await bot.sendMessage(
       chatId,
-      `¿Cuántas unidades de *${norm(p.nombre ?? p.NOMBRE)}* querés?\n\nRespondé con un número (ej: 1, 2, 3).`,
+      `¿Cuántas unidades de *${norm(p.nombre ?? p.NOMBRE)}* querés?\nRespondé con un número (ej: 1, 2, 3).`,
       { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
     );
   }
@@ -420,23 +328,17 @@ async function askQuantity(chatId, productCode) {
 
 function parseKgInput(text) {
   const t = lower(text).replace(",", ".").trim();
-  // if user writes "250" treat as grams if >= 10
   const n = asNumber(t, NaN);
   if (!Number.isFinite(n) || n <= 0) return null;
-
-  // Heuristic:
-  // - if n >= 10 -> grams
-  // - else -> kilos
   if (n >= 10) return { kg: n / 1000, grams: n };
   return { kg: n, grams: Math.round(n * 1000) };
 }
 
 async function addToCart(chatId, productCode, qtyText) {
-  const cfg = await loadConfig(false);
   const list = await loadCatalogo(false);
   const p = findProduct(list, productCode);
   if (!p) {
-    await bot.sendMessage(chatId, "⚠️ No encuentro ese producto. Probá recargar catálogo.", { reply_markup: mainMenuKeyboard() });
+    await bot.sendMessage(chatId, "⚠️ No encuentro ese producto. Probá 🔄 Recargar catálogo.", { reply_markup: mainMenuKeyboard() });
     return;
   }
 
@@ -446,23 +348,21 @@ async function addToCart(chatId, productCode, qtyText) {
   const precio = asNumber(p.precio ?? p.PRECIO, 0);
   const precioKg = asNumber(p.precioporkg ?? p.PRECIOPORKILO ?? p.precioporkg, 0);
 
-  let line = { codigo, nombre, unidad, precio, precioporkg: precioKg || precio, qtyKg: 0, qtyUn: 0, subtotal: 0 };
+  const line = { codigo, nombre, unidad, precio, precioporkg: precioKg || precio, qtyKg: 0, qtyUn: 0, subtotal: 0 };
 
   if (unidad === "kg") {
     const parsed = parseKgInput(qtyText);
     if (!parsed) {
-      await bot.sendMessage(chatId, "⚠️ No entendí la cantidad. Ejemplos: 250 (gramos) o 0.5 (kilos).");
+      await bot.sendMessage(chatId, "⚠️ No entendí la cantidad. Ej: 250 (gramos) o 0.5 (kilos).", { reply_markup: mainMenuKeyboard() });
       return;
     }
-    const kg = parsed.kg;
-    const unitPrice = line.precioporkg || precioKg || precio;
-    line.qtyKg = kg;
-    line.subtotal = Math.round(unitPrice * kg);
+    line.qtyKg = parsed.kg;
+    line.subtotal = Math.round((line.precioporkg || precioKg || precio) * parsed.kg);
     getCart(chatId).push(line);
 
     await bot.sendMessage(
       chatId,
-      `✅ Agregado: *${nombre}*\nCantidad: *${parsed.grams}g* (${kg.toFixed(3)} kg)\nSubtotal: *${moneyARS(line.subtotal)}*`,
+      `✅ Agregado: *${nombre}*\nCantidad: *${parsed.grams}g*\nSubtotal: *${moneyARS(line.subtotal)}*`,
       { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
     );
   } else {
@@ -478,13 +378,7 @@ async function addToCart(chatId, productCode, qtyText) {
     );
   }
 
-  // Gentle upsell/suggestion
-  const sugerencia = cfgGet(cfg, "SUGERENCIA_POST_AGREGAR");
-  if (sugerencia) {
-    await bot.sendMessage(chatId, safeText(sugerencia, 1000), { reply_markup: mainMenuKeyboard() });
-  } else {
-    await bot.sendMessage(chatId, "¿Sumamos algo más? 😋 Tocá *Catálogo* para seguir.", { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
-  }
+  await bot.sendMessage(chatId, "¿Sumamos algo más? 😋 Tocá 🛍️ *Catálogo* para seguir.", { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 }
 
 async function showCart(chatId) {
@@ -495,7 +389,7 @@ async function showCart(chatId) {
   }
 
   let total = 0;
-  let lines = cart.map((it, idx) => {
+  const lines = cart.map((it, idx) => {
     total += it.subtotal;
     if (it.unidad === "kg") {
       return `${idx + 1}) ${it.nombre} (${it.codigo})\n   Cantidad: ${Math.round(it.qtyKg * 1000)}g\n   Subtotal: ${moneyARS(it.subtotal)}`;
@@ -513,7 +407,7 @@ async function showCart(chatId) {
 async function startCheckout(chatId) {
   const cart = getCart(chatId);
   if (!cart.length) {
-    await bot.sendMessage(chatId, "🛒 Tu carrito está vacío. Primero agregá algo desde *Catálogo*.", { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
+    await bot.sendMessage(chatId, "🛒 Tu carrito está vacío. Primero agregá algo desde 🛍️ *Catálogo*.", { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
     return;
   }
 
@@ -533,22 +427,21 @@ async function finishCheckout(chatId, deliveryType, addressText) {
   const cfg = await loadConfig(false);
   const cart = getCart(chatId);
 
-  let total = cart.reduce((a, b) => a + (b.subtotal || 0), 0);
+  const total = cart.reduce((a, b) => a + (b.subtotal || 0), 0);
   const envio = deliveryType === "ENVIO" ? shippingCost(cfg) : 0;
   const totalFinal = total + envio;
 
   const alias = cfgGet(cfg, "ALIAS_MP") || cfgGet(cfg, "ALIAS") || cfgGet(cfg, "ALIAS_TRANSFERENCIA") || "";
   const cbu = cfgGet(cfg, "CBU") || "";
   const brand = brandName(cfg);
+  const ticket = `TQ-${Math.floor(100000 + Math.random() * 900000)}`;
 
-  let detalle = cart.map((it) => {
+  const detalle = cart.map(it => {
     if (it.unidad === "kg") return `• ${it.nombre} (${Math.round(it.qtyKg * 1000)}g) — ${moneyARS(it.subtotal)}`;
     return `• ${it.nombre} (x${it.qtyUn}) — ${moneyARS(it.subtotal)}`;
   }).join("\n");
 
-  const ticket = `TQ-${Math.floor(100000 + Math.random() * 900000)}`;
-
-  const mensaje =
+  const msg =
 `🧾 *${brand}*
 Ticket N° *${ticket}*
 📅 ${new Date().toLocaleString("es-AR")}
@@ -559,13 +452,9 @@ ${deliveryType === "ENVIO" ? `🚚 Envío: ${moneyARS(envio)}\n📍 Dirección: 
 💰 *TOTAL: ${moneyARS(totalFinal)}*
 
 ${alias ? `💳 Alias: *${alias}*\n` : ""}${cbu ? `🏦 CBU: *${cbu}*\n` : ""}
-📩 Enviá el comprobante para preparar tu pedido 🙌`;
+📩 Enviá el comprobante y lo preparamos 🙌`;
 
-  await bot.sendMessage(chatId, mensaje, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
-
-  // reset cart after checkout (optional behavior)
-  const autoClear = lower(cfgGet(cfg, "VACIAR_CARRITO_POST_CHECKOUT", "no")) === "si";
-  if (autoClear) clearCart(chatId);
+  await bot.sendMessage(chatId, msg, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 }
 
 async function infoLocal(chatId) {
@@ -589,10 +478,7 @@ async function infoLocal(chatId) {
 📘 Facebook: ${fb || "NO"}`;
 
   if (logo) {
-    try {
-      await bot.sendPhoto(chatId, logo, { caption: safeText(texto, 900), parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
-      return;
-    } catch {}
+    try { await bot.sendPhoto(chatId, logo, { caption: safeText(texto, 900), parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }); return; } catch {}
   }
   await bot.sendMessage(chatId, texto, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 }
@@ -606,24 +492,20 @@ async function hablarVendedor(chatId) {
     return;
   }
 
-  // normalize number: keep digits
   const phone = w.replace(/[^\d]/g, "");
   const msg = encodeURIComponent(cfgGet(cfg, "MENSAJE_WHATSAPP_VENDEDOR", "Hola 😊 Quiero hacer un pedido."));
   const link = `https://wa.me/${phone}?text=${msg}`;
 
   await bot.sendMessage(chatId, "💬 Hablá con nosotros por WhatsApp 👇", {
-    reply_markup: {
-      inline_keyboard: [[{ text: "📲 Abrir WhatsApp", url: link }]],
-    },
+    reply_markup: { inline_keyboard: [[{ text: "📲 Abrir WhatsApp", url: link }]] },
   });
 }
 
 async function compartirBot(chatId) {
   const cfg = await loadConfig(false);
   const brand = brandName(cfg);
-  const username = (await bot.getMe()).username;
-  const link = `https://t.me/${username}`;
-
+  const me = await bot.getMe();
+  const link = `https://t.me/${me.username}`;
   const texto = cfgGet(cfg, "MENSAJE_COMPARTIR") || `Compartí este bot de *${brand}* con tus amigos 🙌`;
 
   await bot.sendMessage(chatId, texto, {
@@ -633,57 +515,26 @@ async function compartirBot(chatId) {
 }
 
 async function answerFreeText(chatId, text) {
-  const cfg = await loadConfig(false);
   const t = lower(text);
-
-  // Common intents (human WhatsApp style)
-  if (["hola", "holaa", "buenas", "buen día", "buen dia", "buenas tardes", "buenas noches", "que tal", "qué tal", "menu", "menú", "inicio"].includes(t)) {
+  if (["hola", "holaa", "buenas", "buen dia", "buen día", "menu", "menú", "inicio", "que tal", "qué tal"].includes(t)) {
     await sendWelcome(chatId);
     return;
   }
-  if (t.includes("horario") || t.includes("hora")) {
-    const horarios = cfgGet(cfg, "HORARIOS") || cfgGet(cfg, "HORARIO");
-    if (horarios) {
-      await bot.sendMessage(chatId, `🕒 Horarios: ${horarios}`, { reply_markup: mainMenuKeyboard() });
-      return;
-    }
-  }
-  if (t.includes("direccion") || t.includes("dirección") || t.includes("donde") || t.includes("ubicacion") || t.includes("ubicación")) {
-    const dir = cfgGet(cfg, "DIRECCION") || cfgGet(cfg, "DOMICILIO");
-    if (dir) {
-      await bot.sendMessage(chatId, `📍 Dirección: ${dir}`, { reply_markup: mainMenuKeyboard() });
-      return;
-    }
-  }
-  if (t.includes("envio") || t.includes("envío")) {
-    const c = shippingCost(cfg);
-    await bot.sendMessage(chatId, `🚚 Envío: ${c ? moneyARS(c) : "A confirmar"}.\nSi querés, tocá *Finalizar compra* y te lo calculo en el total.`, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
-    return;
-  }
-
-  // Default: guide user back (always respond)
-  await bot.sendMessage(
-    chatId,
-    "Dale 😊 Decime qué necesitás o tocá una opción del menú 👇",
-    { reply_markup: mainMenuKeyboard() }
-  );
+  await bot.sendMessage(chatId, "Dale 😊 Tocá una opción del menú 👇", { reply_markup: mainMenuKeyboard() });
 }
 
 // ---------- Telegram handlers ----------
 bot.onText(/\/start/i, async (msg) => {
-  const chatId = msg.chat.id;
-  await sendWelcome(chatId);
+  await sendWelcome(msg.chat.id);
 });
 
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = msg.text;
-
-  // ignore non-text
   if (!text) return;
 
-  // menu buttons
   const t = norm(text);
+
   if (t === "🛍️ Catálogo") return showCategories(chatId);
   if (t === "🛒 Mi carrito") return showCart(chatId);
   if (t === "✅ Finalizar compra") return startCheckout(chatId);
@@ -697,20 +548,20 @@ bot.on("message", async (msg) => {
     return showCategories(chatId);
   }
 
-  // pending states (quantity / address)
   const st = getChatState(chatId);
+
   if (st.pending?.type === "QTY") {
     const code = st.pending.code;
     st.pending = null;
     return addToCart(chatId, code, t);
   }
-  if (st.pending?.type === "ADDRESS" && st.pending.deliveryType === "ENVIO") {
+
+  if (st.pending?.type === "ADDRESS") {
     const addr = t;
     st.pending = null;
     return finishCheckout(chatId, "ENVIO", addr);
   }
 
-  // default free text answer
   return answerFreeText(chatId, t);
 });
 
@@ -729,9 +580,8 @@ bot.on("callback_query", async (q) => {
   }
 
   if (data.startsWith("PAGE:")) {
-    const parts = data.split(":");
-    const cat = parts[1];
-    const page = Number(parts[2] || "1");
+    const [, cat, pageStr] = data.split(":");
+    const page = Number(pageStr || "1");
     return showCategoryPage(chatId, cat, page);
   }
 
@@ -740,45 +590,26 @@ bot.on("callback_query", async (q) => {
     return askQuantity(chatId, code);
   }
 
-  if (data.startsWith("SHARE:")) {
-    const code = data.slice(6);
-    const list = await loadCatalogo(false);
-    const p = findProduct(list, code);
-    const brand = brandName(await loadConfig(false));
-    const txt = p ? `${brand} — ${norm(p.nombre ?? p.NOMBRE)} (${code})` : `${brand} — Producto ${code}`;
-    await bot.sendMessage(chatId, `📣 ${txt}`, { reply_markup: mainMenuKeyboard() });
-    return;
-  }
-
   if (data.startsWith("DELIVERY:")) {
     const choice = data.split(":")[1];
-    const st = getChatState(chatId);
-    st.pending = null;
-
-    if (choice === "RETIRO") {
-      return finishCheckout(chatId, "RETIRO", "");
-    }
-
+    if (choice === "RETIRO") return finishCheckout(chatId, "RETIRO", "");
     if (choice === "ENVIO") {
-      st.pending = { type: "ADDRESS", deliveryType: "ENVIO" };
       const cfg = await loadConfig(false);
       const costo = shippingCost(cfg);
+      const st = getChatState(chatId);
+      st.pending = { type: "ADDRESS" };
       await bot.sendMessage(
         chatId,
-        `Perfecto 🚚\nCosto de envío: *${costo ? moneyARS(costo) : "A confirmar"}*\n\nAhora pasame tu *dirección completa* (calle, número, barrio).`,
+        `Perfecto 🚚\nCosto de envío: *${costo ? moneyARS(costo) : "A confirmar"}*\n\nPasame tu *dirección completa* (calle, número, barrio).`,
         { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
       );
-      return;
     }
   }
 });
 
 // ---------- Express routes ----------
-app.get("/", (req, res) => {
-  res.json({ ok: true, service: "ezerbot-system", bootedAt: nowISO() });
-});
+app.get("/", (req, res) => res.json({ ok: true, service: "ezerbot-system", bootedAt: nowISO() }));
 
-// Debug status for YOU (browser)
 app.get("/debug", async (req, res) => {
   let lastError = null;
   let cfg = {};
@@ -802,27 +633,17 @@ app.get("/debug", async (req, res) => {
   });
 });
 
-// Telegram webhook endpoint
-app.post("/webhook", (req, res) => {
-  bot.processUpdate(req.body);
-  res.sendStatus(200);
-});
+app.post("/webhook", (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); });
 
 // ---------- Boot ----------
 async function boot() {
-  // preload (best effort)
   try { await loadConfig(true); } catch {}
   try { await loadCatalogo(true); } catch {}
 
-  // set webhook (critical)
   const hookUrl = `${PUBLIC_URL}/webhook`;
   const info = await bot.getWebHookInfo();
+  if (info?.url !== hookUrl) await bot.setWebHook(hookUrl);
 
-  if (info?.url !== hookUrl) {
-    await bot.setWebHook(hookUrl);
-  }
-
-  // start server
   const port = process.env.PORT || 10000;
   app.listen(port, () => {
     console.log("Server up on", port);
