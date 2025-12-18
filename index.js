@@ -6,8 +6,8 @@
  * - Unidades o gramos según "UNIDAD" del producto
  * - Carrito + checkout + envío domicilio / retiro local
  * - Métodos de pago: efectivo + transferencia (lee AliasPago / CBUPago)
- * - Ticket tipo POS + aviso al vendedor (ADMIN_CHAT_ID)
- * - Estilo de conversación tipo WhatsApp
+ * - Ticket tipo POS (se mantiene el formato que ya tenés)
+ * - Aviso al vendedor (ADMIN_CHAT_ID)
  */
 
 import TelegramBot from "node-telegram-bot-api";
@@ -157,22 +157,24 @@ async function fetchConfig() {
   // -------- ENVÍOS --------
   if (!json.envios) json.envios = {};
 
-  const rawEnvio =
-    json.envios.activo ??
+  const rawEnvioTop =
     json.UsaEnvíoDomicilio ??
     json.UsaEnvioDomicilio ??
     json.UsaEnvio ??
     json.UsaEnvios;
+  const rawEnvio =
+    json.envios.activo !== undefined ? json.envios.activo : rawEnvioTop;
 
   json.envios.activo =
     String(rawEnvio || "").toUpperCase() === "SI" || rawEnvio === true;
 
-  const rawRetiro =
-    json.envios.usaRetiro ?? json.UsaRetiroLocal ?? json.UsaRetiro ?? "";
+  const rawRetiroTop =
+    json.UsaRetiroLocal ?? json.UsaRetiro ?? json.envios.usaRetiro;
 
-  // Por defecto SI (para que salga el botón aunque no esté configurado)
   json.envios.usaRetiro =
-    rawRetiro === "" ? true : String(rawRetiro).toUpperCase() === "SI";
+    rawRetiroTop === undefined || rawRetiroTop === ""
+      ? true
+      : String(rawRetiroTop).toUpperCase() === "SI" || rawRetiroTop === true;
 
   json.envios.costo =
     json.envios.costo ||
@@ -187,18 +189,28 @@ async function fetchConfig() {
 
   // -------- PAGOS --------
   if (!json.pagos) json.pagos = {};
-  json.pagos.alias = json.AliasPago || "";
-  json.pagos.cbu = json.CBUPago || "";
+  json.pagos.alias =
+    json.pagos.alias || json.AliasPago || json.pagos.AliasPago || "";
+  json.pagos.cbu =
+    json.pagos.cbu || json.CBUPago || json.pagos.CBUPago || "";
 
   if (!Array.isArray(json.pagos.metodos) || !json.pagos.metodos.length) {
     const metodos = [];
     metodos.push({ id: "EFECTIVO", label: "Efectivo" });
 
     const permitirOnline =
-      String(json.PermitirPagoOnline || "").toUpperCase() === "SI";
-    if (permitirOnline && json.TipoPagoOnline) {
-      const id = String(json.TipoPagoOnline).toUpperCase();
-      const label = id === "TRANSFERENCIA" ? "Transferencia" : json.TipoPagoOnline;
+      String(
+        json.PermitirPagoOnline ||
+          (json.pagos && json.pagos.PermitirPagoOnline) ||
+          ""
+      ).toUpperCase() === "SI";
+
+    const tipoOnline =
+      json.TipoPagoOnline || (json.pagos && json.pagos.TipoPagoOnline);
+
+    if (permitirOnline && tipoOnline) {
+      const id = String(tipoOnline).toUpperCase();
+      const label = id === "TRANSFERENCIA" ? "Transferencia" : tipoOnline;
       metodos.push({ id, label });
     }
     json.pagos.metodos = metodos;
@@ -350,17 +362,37 @@ function inlineProductKeyboard(cat, index, total) {
 function inlineCheckoutDeliveryKeyboard(config) {
   const env = config.envios || {};
   const rows = [];
-  if (env.usaRetiro !== false) {
+
+  const rawRetiro =
+    config.UsaRetiroLocal ?? config.UsaRetiro ?? env.usaRetiro;
+  const showRetiro =
+    rawRetiro === undefined ||
+    rawRetiro === "" ||
+    String(rawRetiro).toUpperCase() === "SI" ||
+    rawRetiro === true;
+
+  const rawEnvio =
+    config.UsaEnvíoDomicilio ??
+    config.UsaEnvioDomicilio ??
+    config.UsaEnvio ??
+    config.UsaEnvios ??
+    env.activo;
+  const showEnvio =
+    String(rawEnvio || "").toUpperCase() === "SI" || rawEnvio === true;
+
+  if (showRetiro) {
     rows.push([{ text: "🏬 Retiro en el local", callback_data: "ship:retiro" }]);
   }
-  if (env.activo) {
+  if (showEnvio) {
     const labelEnvio =
       env.costo && Number(env.costo) > 0
         ? `🚚 Envío a domicilio (+$${money(env.costo)})`
         : "🚚 Envío a domicilio";
     rows.push([{ text: labelEnvio, callback_data: "ship:envio" }]);
   }
+
   rows.push([{ text: "❌ Cancelar", callback_data: "checkout:cancel" }]);
+
   return { reply_markup: { inline_keyboard: rows } };
 }
 
@@ -837,21 +869,26 @@ bot.on("message", async (msg) => {
           PUBLIC_URL
         );
         const mensaje =
-          config.textos?.compartirBot +
+          (config.textos?.compartirBot ||
+            "Compartí este Ezerbot con tus amigos y ganá sellos extras. 🧀") +
           `\n\nLink directo del bot:\nhttps://t.me/${me.username}`;
+
         await bot.sendMessage(chatId, mensaje, {
           reply_markup: {
             inline_keyboard: [
-              [{ text: "📲 Compartir por WhatsApp", url: links.wa }],
+              [{ text: "📲 WhatsApp", url: links.wa }],
+              [{ text: "📨 Telegram", url: links.tg }],
+              [{ text: "✉️ Email", url: links.mail }],
             ],
           },
         });
       } catch (e) {
         console.error("Error en Compartir bot:", e?.message || e);
+        const me = await bot.getMe();
         await bot.sendMessage(
           chatId,
           "Podés compartir este link con tus contactos:\nhttps://t.me/" +
-            (await bot.getMe()).username
+            me.username
         );
       }
       return;
