@@ -1,18 +1,18 @@
-// index.js
-const TelegramBot = require('node-telegram-bot-api');
+// index.js  (versión ES Module)
+import TelegramBot from 'node-telegram-bot-api';
 
-// Usá el mismo BOT_TOKEN que ya tenías en Render
-const token = process.env.BOT_TOKEN || 'PONE_ACA_TU_TOKEN_SI_PROBAS_LOCAL';
+// Usa tu token desde las variables de entorno en Render
+const token = process.env.BOT_TOKEN || 'PONE_ACA_TU_TOKEN_SI PROBÁS LOCAL';
 
 const bot = new TelegramBot(token, { polling: true });
 
-// Alias para transferencia (el que ya tenés en Config)
+// Alias para transferencia (lo que tenés en Config)
 const ALIAS_TRANSFERENCIA = 'jennyocampos.mp';
 
 // Estado simple por usuario
 const userStates = {};
 
-// Helper para iniciar el flujo
+// Inicia el flujo de entrega
 function startFlow(chatId) {
   userStates[chatId] = {
     step: 'choose_delivery',
@@ -37,36 +37,38 @@ function startFlow(chatId) {
   );
 }
 
-// /start y saludos básicos
+// /start y saludos
 bot.on('message', (msg) => {
   const chatId = msg.chat.id;
   const text = (msg.text || '').toString().trim().toLowerCase();
 
-  // Si es /start o un saludo simple, reiniciamos flujo
-  if (text === '/start' || text === 'hola' || text === 'buenas' || text === 'buenos días' || text === 'buenas tardes' || text === 'buenas noches') {
-    return startFlow(chatId);
+  if (
+    text === '/start' ||
+    text === 'hola' ||
+    text === 'buenas' ||
+    text === 'buenos días' ||
+    text === 'buenas tardes' ||
+    text === 'buenas noches'
+  ) {
+    startFlow(chatId);
+    return;
   }
 
-  // Si no hay estado, ignoramos (o podrías llamar a startFlow)
   const state = userStates[chatId];
   if (!state) return;
 
-  // Lógica según el paso actual
   if (state.step === 'ask_address') {
     state.address = msg.text.trim();
     state.step = 'ask_name';
-
     bot.sendMessage(chatId, '🧾 Tu nombre:');
   } else if (state.step === 'ask_name') {
     state.name = msg.text.trim();
     state.step = 'ask_phone';
-
     bot.sendMessage(chatId, '📞 Tu teléfono:');
   } else if (state.step === 'ask_phone') {
     state.phone = msg.text.trim();
     state.step = 'choose_payment';
 
-    // Preguntamos método de pago
     bot.sendMessage(
       chatId,
       'Perfecto. Ahora elegí el método de pago:',
@@ -82,13 +84,13 @@ bot.on('message', (msg) => {
   }
 });
 
-// Manejo de botones inline
+// Botones inline
 bot.on('callback_query', (query) => {
   const chatId = query.message.chat.id;
   const data = query.data;
   const state = userStates[chatId] || {};
 
-  // Elegir tipo de entrega
+  // Tipo de entrega
   if (data === 'envio_domicilio') {
     state.deliveryType = 'envio';
     state.step = 'ask_address';
@@ -96,34 +98,31 @@ bot.on('callback_query', (query) => {
 
     bot.answerCallbackQuery(query.id);
     bot.sendMessage(chatId, '📍 Decime tu dirección completa:');
-  } else if (data === 'retiro_local') {
+    return;
+  }
+
+  if (data === 'retiro_local') {
     state.deliveryType = 'retiro';
     state.step = 'ask_name';
     userStates[chatId] = state;
 
     bot.answerCallbackQuery(query.id);
     bot.sendMessage(chatId, '🧾 Tu nombre:');
+    return;
   }
 
-  // Elegir método de pago
+  // Método de pago
   if (data === 'pago_efectivo' || data === 'pago_transferencia') {
-    if (!state.step || state.step !== 'choose_payment') {
-      // Si por alguna razón llegó acá sin estar en ese paso, ignoramos
+    if (state.step !== 'choose_payment') {
       bot.answerCallbackQuery(query.id);
       return;
     }
 
     bot.answerCallbackQuery(query.id);
 
-    if (data === 'pago_efectivo') {
-      state.paymentType = 'Efectivo';
-    } else {
-      state.paymentType = 'Transferencia';
-    }
-
+    state.paymentType = (data === 'pago_efectivo') ? 'Efectivo' : 'Transferencia';
     userStates[chatId] = state;
 
-    // Armamos resumen final
     let deliveryText = '';
     if (state.deliveryType === 'envio') {
       deliveryText = 'Envío a domicilio 🚚';
@@ -139,7 +138,6 @@ bot.on('callback_query', (query) => {
     if (state.deliveryType === 'envio' && state.address) {
       resumen += `Dirección: ${state.address}\n`;
     }
-
     if (state.name) {
       resumen += `Nombre: ${state.name}\n`;
     }
@@ -151,16 +149,15 @@ bot.on('callback_query', (query) => {
 
     if (state.paymentType === 'Transferencia') {
       resumen += `Alias para transferir: \`${ALIAS_TRANSFERENCIA}\`\n`;
-      resumen += '📌 Una vez hecha la transferencia, enviá el comprobante por acá así confirmamos el pedido.';
+      resumen += '📌 Cuando hagas la transferencia, mandá el comprobante por acá así confirmamos el pedido.';
     } else {
       resumen += '💵 Pagás en efectivo al retirar o al recibir el pedido.';
     }
 
     bot.sendMessage(chatId, resumen, { parse_mode: 'Markdown' });
 
-    // Opcional: limpiar estado
-    // delete userStates[chatId];
+    // Si querés, acá se podría hacer: delete userStates[chatId];
   }
 });
 
-console.log('Bot de prueba (entrega + pago) iniciado...');
+console.log('Bot (entrega + pago) iniciado en modo ESM…');
