@@ -6,7 +6,7 @@
  * - Unidades o gramos según "UNIDAD" del producto
  * - Carrito + checkout + envío domicilio / retiro local
  * - Métodos de pago: efectivo + transferencia (lee AliasPago / CBUPago)
- * - Ticket tipo POS (se mantiene el formato que ya tenés)
+ * - Ticket tipo POS (se mantiene el flujo de pedido + confirmación)
  * - Aviso al vendedor (ADMIN_CHAT_ID)
  */
 
@@ -158,15 +158,13 @@ async function fetchConfig() {
   if (!json.envios) json.envios = {};
 
   const rawEnvioTop =
-    json.UsaEnvíoDomicilio ??
+    json["UsaEnvíoDomicilio"] ??
     json.UsaEnvioDomicilio ??
     json.UsaEnvio ??
     json.UsaEnvios;
-  const rawEnvio =
-    json.envios.activo !== undefined ? json.envios.activo : rawEnvioTop;
 
   json.envios.activo =
-    String(rawEnvio || "").toUpperCase() === "SI" || rawEnvio === true;
+    String(rawEnvioTop || "").toUpperCase() === "SI" || rawEnvioTop === true;
 
   const rawRetiroTop =
     json.UsaRetiroLocal ?? json.UsaRetiro ?? json.envios.usaRetiro;
@@ -178,10 +176,15 @@ async function fetchConfig() {
 
   json.envios.costo =
     json.envios.costo ||
-    Number(json.CostoEnvíoBase || json.CostoEnvioBase || 0);
+    Number(
+      json["CostoEnvíoBase"] ??
+        json.CostoEnvioBase ??
+        json.CostoEnvio ??
+        0
+    );
   json.envios.textoEnvio =
     json.envios.textoEnvio ||
-    json.TextoEnvíoDomicilio ||
+    json["TextoEnvíoDomicilio"] ||
     json.TextoEnvioDomicilio ||
     "";
   json.envios.textoRetiro =
@@ -328,8 +331,8 @@ function mainMenuKeyboard(config) {
   return {
     reply_markup: {
       keyboard: [
-        [{ text: "🛍️ Catálogo" }, { text: "🔥 Promos" }],
-        [{ text: "🛒 Ver carrito" }, { text: "✅ Finalizar compra" }],
+        [{ text: "🛍️ Catálogo" }, { text: "🛒 Ver carrito" }],
+        [{ text: "✅ Finalizar compra" }],
         [{ text: "📍 Horarios y dirección" }, { text: "📣 Compartir bot" }],
       ],
       resize_keyboard: true,
@@ -361,25 +364,10 @@ function inlineProductKeyboard(cat, index, total) {
 
 function inlineCheckoutDeliveryKeyboard(config) {
   const env = config.envios || {};
+  const showRetiro = env.usaRetiro !== false; // por defecto TRUE
+  const showEnvio = !!env.activo;
+
   const rows = [];
-
-  const rawRetiro =
-    config.UsaRetiroLocal ?? config.UsaRetiro ?? env.usaRetiro;
-  const showRetiro =
-    rawRetiro === undefined ||
-    rawRetiro === "" ||
-    String(rawRetiro).toUpperCase() === "SI" ||
-    rawRetiro === true;
-
-  const rawEnvio =
-    config.UsaEnvíoDomicilio ??
-    config.UsaEnvioDomicilio ??
-    config.UsaEnvio ??
-    config.UsaEnvios ??
-    env.activo;
-  const showEnvio =
-    String(rawEnvio || "").toUpperCase() === "SI" || rawEnvio === true;
-
   if (showRetiro) {
     rows.push([{ text: "🏬 Retiro en el local", callback_data: "ship:retiro" }]);
   }
@@ -390,7 +378,6 @@ function inlineCheckoutDeliveryKeyboard(config) {
         : "🚚 Envío a domicilio";
     rows.push([{ text: labelEnvio, callback_data: "ship:envio" }]);
   }
-
   rows.push([{ text: "❌ Cancelar", callback_data: "checkout:cancel" }]);
 
   return { reply_markup: { inline_keyboard: rows } };
@@ -853,7 +840,7 @@ bot.on("message", async (msg) => {
 
     // Botones del teclado principal
     if (text === "🛍️ Catálogo") return await showCategories(chatId, config);
-    if (text === "🔥 Promos") return await showPromos(chatId, config, user);
+    if (text === "🔥 Promos") return await showPromos(chatId, config, user); // sin botón, pero por si lo escribís
     if (text === "🛒 Ver carrito") return await showCart(chatId, config, user);
     if (text === "✅ Finalizar compra")
       return await startCheckout(chatId, config, user);
@@ -1181,4 +1168,4 @@ async function start() {
 start().catch((e) => {
   console.error("Error iniciando:", e?.message || e);
   process.exit(1);
-});
+}); 
