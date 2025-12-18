@@ -1,12 +1,16 @@
-// index.js  (versión ES Module)
-import TelegramBot from 'node-telegram-bot-api';
+// index.js (ESM) — Bot entrega + pago + mini servidor HTTP para Render
 
-// Usa tu token desde las variables de entorno en Render
-const token = process.env.BOT_TOKEN || 'PONE_ACA_TU_TOKEN_SI PROBÁS LOCAL';
+import TelegramBot from 'node-telegram-bot-api';
+import http from 'http';
+
+// Usa tu token desde variables de entorno en Render
+const token = process.env.BOT_TOKEN || 'PONE_ACA_TU_TOKEN_SI PROBAS LOCAL';
+
+// --- BOT TELEGRAM ---
 
 const bot = new TelegramBot(token, { polling: true });
 
-// Alias para transferencia (lo que tenés en Config)
+// Alias para transferencia (el mismo que tenés en Config)
 const ALIAS_TRANSFERENCIA = 'jennyocampos.mp';
 
 // Estado simple por usuario
@@ -37,7 +41,7 @@ function startFlow(chatId) {
   );
 }
 
-// /start y saludos
+// /start y saludos básicos
 bot.on('message', (msg) => {
   const chatId = msg.chat.id;
   const text = (msg.text || '').toString().trim().toLowerCase();
@@ -155,9 +159,20 @@ bot.on('callback_query', (query) => {
     }
 
     bot.sendMessage(chatId, resumen, { parse_mode: 'Markdown' });
-
-    // Si querés, acá se podría hacer: delete userStates[chatId];
   }
 });
 
 console.log('Bot (entrega + pago) iniciado en modo ESM…');
+
+// --- MINI SERVIDOR HTTP PARA RENDER ---
+
+const PORT = process.env.PORT || 10000;
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('EzerBot está corriendo ✅');
+});
+
+server.listen(PORT, () => {
+  console.log(`Servidor HTTP de salud escuchando en el puerto ${PORT}`);
+});
