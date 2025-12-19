@@ -1,9 +1,9 @@
 // index.js - EzerBot Todo Queso
-// Versión: flujo envío/retiro + pagos + menú principal funcionando
+// Versión: flujo envío/retiro + pagos + menú principal funcionando (CommonJS)
 
-import TelegramBot from "node-telegram-bot-api";
-import dotenv from "dotenv";
-import http from "http";
+const TelegramBot = require("node-telegram-bot-api");
+const dotenv = require("dotenv");
+const http = require("http");
 
 dotenv.config();
 
@@ -32,13 +32,13 @@ function getSession(chatId) {
     sessions[chatId] = {
       state: null,
       temp: {},
-      cart: [], // para futuro carrito real
+      cart: [],
     };
   }
   return sessions[chatId];
 }
 
-// --- Config "quemada" desde tu hoja Config (ya la tenés así) ---
+// --- Config "quemada" desde la hoja Config de Todo Queso ---
 const CONFIG = {
   NegocioNombre: "Todo Queso",
   LogoURL: "https://i.postimg.cc/q7WvjsYm/20251206-210311.jpg",
@@ -76,22 +76,17 @@ function mainMenuKeyboard() {
 
 // --- Saludo / bienvenida ---
 async function sendWelcome(chatId) {
-  // Logo + descripción
   await bot.sendPhoto(chatId, CONFIG.LogoURL, {
     caption: `🧀 *${CONFIG.NegocioNombre}*\n\n${CONFIG.Descripcion}`,
     parse_mode: "Markdown",
   });
 
-  // Info básica del local
   await bot.sendMessage(
     chatId,
     `📍 *Dirección:* ${CONFIG.Direccion}\n⏰ *Horarios:* ${CONFIG.Horarios}\n📞 *Teléfono:* +${CONFIG.TelefonoNegocio}\n📸 *Instagram:* ${CONFIG.Instagram}`,
-    {
-      parse_mode: "Markdown",
-    }
+    { parse_mode: "Markdown" }
   );
 
-  // Explicación breve
   await bot.sendMessage(
     chatId,
     "👉 Podés ver el *catálogo*, armar tu *carrito* y *finalizar tu compra* desde acá. Elegí una opción del menú de abajo para empezar 👇",
@@ -103,7 +98,7 @@ async function sendWelcome(chatId) {
   session.temp = {};
 }
 
-// --- Flujo de FINALIZAR COMPRA (envío / retiro + datos + forma de pago) ---
+// --- Flujo de FINALIZAR COMPRA (envío / retiro + datos + pago) ---
 
 function askDeliveryType(chatId) {
   const session = getSession(chatId);
@@ -119,7 +114,12 @@ function askDeliveryType(chatId) {
   }
 
   bot.sendMessage(chatId, "Elegí cómo querés recibir tu pedido 👇", {
-    reply_markup: { keyboard: buttons.concat(mainMenuKeyboard().reply_markup.keyboard), resize_keyboard: true },
+    reply_markup: {
+      keyboard: buttons.concat(
+        mainMenuKeyboard().reply_markup.keyboard
+      ),
+      resize_keyboard: true,
+    },
   });
 }
 
@@ -180,7 +180,6 @@ async function handlePayment(chatId, text) {
   } else if (text.startsWith("🏦")) {
     session.temp.payment = CONFIG.TipoPagoOnline;
   } else {
-    // si manda otra cosa, lo ignoro
     return;
   }
 
@@ -217,8 +216,6 @@ async function handlePayment(chatId, text) {
 // --- Otros botones del menú ---
 
 async function handleCatalog(chatId) {
-  // Por ahora respuesta simple para que no quede mudo.
-  // Después acá volvemos a conectar el catálogo real con carrusel.
   await bot.sendMessage(
     chatId,
     "🛍️ Acá va a estar el *catálogo completo* con fotos y promos.\nPor ahora estoy terminando de conectarlo, pero ya podés usar el flujo de *envío / retiro* y formas de pago.",
@@ -235,7 +232,6 @@ async function handleCart(chatId) {
       mainMenuKeyboard()
     );
   } else {
-    // Placeholder
     await bot.sendMessage(
       chatId,
       "🧺 Tenés productos en el carrito (vista detallada pendiente de conectar).",
@@ -245,7 +241,6 @@ async function handleCart(chatId) {
 }
 
 async function handleStamps(chatId) {
-  // Placeholder: más adelante lo conectamos a Fideliza/Fideliza360
   await bot.sendMessage(
     chatId,
     "🎟️ Próximamente vas a poder ver acá tus *sellos y niveles* de Todo Queso Club.\nPor ahora seguimos sumando compras normalmente 🧀",
@@ -262,7 +257,7 @@ async function handleStoreInfo(chatId) {
 }
 
 async function handleShareBot(chatId) {
-  const botLink = "https://t.me/Ezer_IA_Bot"; // cambiá esto si tu @ del bot es otro
+  const botLink = "https://t.me/Ezer_IA_Bot"; // cambiá si tu @ es otro
 
   const text =
     "Compartí este *EzerBot* con tus amigos y ganá sellos extras 🧀\n\n" +
@@ -302,13 +297,11 @@ bot.onText(/\/start/i, async (msg) => {
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
   const text = (msg.text || "").trim();
-
-  // Ignoramos mensajes sin texto
   if (!text) return;
 
   const session = getSession(chatId);
 
-  // Atajos globales: menú principal SIEMPRE tiene prioridad
+  // Botones del menú principal
   if (text === "🛍️ Catálogo") {
     session.state = null;
     session.temp = {};
@@ -339,12 +332,12 @@ bot.on("message", async (msg) => {
     return handleShareBot(chatId);
   }
 
-  // Si escribe "hola" o cualquier cosa al principio, reenviamos bienvenida
+  // Saludo
   if (/^hola$/i.test(text)) {
     return sendWelcome(chatId);
   }
 
-  // Manejo del flujo de FINALIZAR COMPRA
+  // Flujo de finalización de compra
   switch (session.state) {
     case "ASK_DELIVERY_TYPE":
       return handleDeliveryType(chatId, text);
@@ -357,7 +350,6 @@ bot.on("message", async (msg) => {
     case "ASK_PAYMENT":
       return handlePayment(chatId, text);
     default:
-      // Si no estamos en ningún flujo, simplemente recordamos el menú
       return bot.sendMessage(
         chatId,
         "Usá el menú de abajo para seguir: Catálogo, Ver carrito, Finalizar compra, Mis sellos o Compartir bot 😊",
@@ -370,4 +362,4 @@ bot.on("polling_error", (err) => {
   console.error("Polling error", err);
 });
 
-console.log("EzerBot Todo Queso iniciado con éxito 🧀");
+console.log("EzerBot Todo Queso iniciado con éxito 🧀"); 
