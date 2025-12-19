@@ -2,10 +2,10 @@
 // Versión: flujo envío/retiro + pagos + menú principal funcionando (CommonJS)
 
 const TelegramBot = require("node-telegram-bot-api");
-const dotenv = require("dotenv");
+
 const http = require("http");
 
-dotenv.config();
+
 
 // --- Mini server para que Render vea un puerto abierto ---
 http
