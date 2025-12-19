@@ -885,3 +885,9 @@ bot.on('message', async (msg) => {
 });
 
 console.log('EzerBot Todo Queso iniciado con éxito');
+import http from "http";
+
+http.createServer((req, res) => {
+  res.write("OK");
+  res.end();
+}).listen(process.env.PORT || 3000);
