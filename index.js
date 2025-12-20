@@ -246,17 +246,8 @@ function inlineCategoriesKeyboard(categories) {
   return { reply_markup: { inline_keyboard: rows } };
 }
 
-function inlineCatalogPageKeyboard(cat, page, totalPages, items) {
+function inlineCatalogNavKeyboard(cat, page, totalPages) {
   const rows = [];
-  for (const p of items) {
-    rows.push([
-      {
-        text: `➕ ${p.nombre} ($${money(p.precio)})`,
-        callback_data: `add:${p.codigo}`,
-      },
-      { text: "📤 Compartir", callback_data: `share:${p.codigo}` },
-    ]);
-  }
   const nav = [];
   if (page > 1) nav.push({ text: "⬅️", callback_data: `page:${cat}:${page - 1}` });
   nav.push({ text: `📄 ${page}/${totalPages}`, callback_data: "noop" });
@@ -327,7 +318,7 @@ function inlineShareKeyboard(links) {
     [{ text: "✉️ Email", url: links.mail }],
     [{ text: "📨 Telegram", url: links.tg }],
   ];
-  if (links.web) rows.push([{ text: "🌐 Abrir página", url: links.web }]);
+  if (links.web) rows.push([{ text: "🌐 Web", url: links.web }]);
   return { reply_markup: { inline_keyboard: rows } };
 }
 
@@ -376,8 +367,7 @@ async function sendWelcome(chatId, config, username) {
 }
 
 /**
- * Info del negocio: ahora NO manda datos de dirección/horarios,
- * solo recuerda que están en el flyer/pantalla inicial.
+ * Info del negocio: sin datos de dirección/horarios (van en el flyer inicial)
  */
 async function showBusinessInfo(chatId, config) {
   const negocio = config.negocio || {};
@@ -408,6 +398,9 @@ async function showCategories(chatId, config) {
   );
 }
 
+/**
+ * Página de catálogo con IMÁGENES
+ */
 async function showCatalogPage(chatId, config, cat, page = 1) {
   const map = getCatalogByCategory(config);
   const items = map.get(cat) || [];
@@ -417,18 +410,57 @@ async function showCatalogPage(chatId, config, cat, page = 1) {
     });
     return;
   }
-  const perPage = Number(config.ui?.itemsPorPagina || 6);
+
+  const perPage = Number(config.ui?.itemsPorPagina || 4); // menos para que no sature
   const totalPages = Math.max(1, Math.ceil(items.length / perPage));
   const p = Math.min(Math.max(1, Number(page || 1)), totalPages);
   const slice = items.slice((p - 1) * perPage, (p - 1) * perPage + perPage);
 
+  for (const prod of slice) {
+    const captionLines = [];
+    captionLines.push(`*${prod.nombre}*`);
+    captionLines.push(`💵 $${money(prod.precio)}`);
+    if (prod.descripcion) captionLines.push(safeText(prod.descripcion, 120));
+    const caption = captionLines.join("\n");
+
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: `➕ Agregar`,
+              callback_data: `add:${prod.codigo}`,
+            },
+            {
+              text: "📤 Compartir",
+              callback_data: `share:${prod.codigo}`,
+            },
+          ],
+        ],
+      },
+      parse_mode: "Markdown",
+    };
+
+    if (prod.imagen || prod.image) {
+      const photoUrl = prod.imagen || prod.image;
+      try {
+        await bot.sendPhoto(chatId, photoUrl, {
+          caption,
+          ...keyboard,
+        });
+      } catch (e) {
+        console.error("Error enviando foto:", e?.message || e);
+        await bot.sendMessage(chatId, caption, keyboard);
+      }
+    } else {
+      await bot.sendMessage(chatId, caption, keyboard);
+    }
+  }
+
   await bot.sendMessage(
     chatId,
-    `*${cat}* — elegí qué querés agregar al carrito:`,
-    {
-      parse_mode: "Markdown",
-      ...inlineCatalogPageKeyboard(cat, p, totalPages, slice),
-    }
+    `📄 Página ${p}/${totalPages} — ${cat}`,
+    inlineCatalogNavKeyboard(cat, p, totalPages)
   );
 }
 
@@ -456,22 +488,55 @@ async function showPromos(chatId, config) {
     return;
   }
 
-  const rows = [];
-  for (const p of promoItems.slice(0, 12)) {
-    rows.push([
-      {
-        text: `➕ ${p.nombre} ($${money(p.precio)})`,
-        callback_data: `add:${p.codigo}`,
-      },
-    ]);
-  }
-  rows.push([{ text: "🛒 Ver carrito", callback_data: "cart:view" }]);
-  rows.push([{ text: "⬅️ Menú", callback_data: "menu:main" }]);
+  // mostramos promos como si fuera una categoría con imágenes
+  const fakeConfig = { ...config, ui: { ...(config.ui || {}), itemsPorPagina: 4 } };
+  const fakeCatMap = new Map();
+  fakeCatMap.set("Promos", promoItems);
+  const originalGetCat = getCatalogByCategory;
+  // directamente enviamos la primera página manual:
+  const perPage = 4;
+  const totalPages = Math.max(1, Math.ceil(promoItems.length / perPage));
+  const slice = promoItems.slice(0, perPage);
 
-  await bot.sendMessage(chatId, "🔥 *Promos disponibles*:", {
-    parse_mode: "Markdown",
-    reply_markup: { inline_keyboard: rows },
-  });
+  for (const prod of slice) {
+    const captionLines = [];
+    captionLines.push(`🔥 *Promo*: ${prod.nombre}`);
+    captionLines.push(`💵 $${money(prod.precio)}`);
+    if (prod.descripcion) captionLines.push(safeText(prod.descripcion, 120));
+    const caption = captionLines.join("\n");
+
+    const keyboard = {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "➕ Agregar", callback_data: `add:${prod.codigo}` },
+            { text: "📤 Compartir", callback_data: `share:${prod.codigo}` },
+          ],
+        ],
+      },
+      parse_mode: "Markdown",
+    };
+
+    if (prod.imagen || prod.image) {
+      const photoUrl = prod.imagen || prod.image;
+      try {
+        await bot.sendPhoto(chatId, photoUrl, {
+          caption,
+          ...keyboard,
+        });
+      } catch {
+        await bot.sendMessage(chatId, caption, keyboard);
+      }
+    } else {
+      await bot.sendMessage(chatId, caption, keyboard);
+    }
+  }
+
+  await bot.sendMessage(
+    chatId,
+    `📄 Página 1/${totalPages} — Promos`,
+    inlineCatalogNavKeyboard("Promos", 1, totalPages)
+  );
 }
 
 async function showCart(chatId, config, user) {
@@ -597,7 +662,7 @@ async function askPayment(chatId, config) {
 }
 
 /**
- * Ticket POS (para cliente y vendedor)
+ * Ticket POS (cliente / vendedor)
  */
 function buildOrderSummary(config, user, chatId, username, opts = {}) {
   const negocio = config.negocio || {};
@@ -659,7 +724,6 @@ function buildOrderSummary(config, user, chatId, username, opts = {}) {
 }
 
 async function finalizeOrder(chatId, config, user, username) {
-  // sellos
   if (config.sellos?.activo) {
     const suma = Number(config.sellos?.sumaPorCompra || 1);
     user.stamps = Number(user.stamps || 0) + (Number.isFinite(suma) ? suma : 1);
@@ -676,7 +740,7 @@ async function finalizeOrder(chatId, config, user, username) {
     }
   }
 
-  // TICKET POS para cliente
+  // Ticket cliente
   const ticketCliente = buildOrderSummary(config, user, chatId, username, {
     tipo: "cliente",
   });
@@ -684,7 +748,7 @@ async function finalizeOrder(chatId, config, user, username) {
     parse_mode: "Markdown",
   });
 
-  // TICKET POS para vendedor (ADMIN)
+  // Ticket vendedor
   if (ADMIN_CHAT_ID) {
     try {
       const ticketVendedor = buildOrderSummary(
@@ -742,7 +806,7 @@ bot.on("message", async (msg) => {
     const user = getUser(DB, userId);
     const text = (msg.text || "").trim();
 
-    // flujo de checkout
+    // flujo checkout
     if (user.checkout?.paso) {
       if (user.checkout.paso === "esperando_direccion") {
         user.checkout.direccion = text;
