@@ -1,18 +1,5 @@
 /**
  * EzerBot System — index.js (UN SOLO ARCHIVO)
- * - Bot de Telegram para Todo Queso
- * - Lee TODO desde CONFIG_URL (config.json en GitHub / Pages)
- * - Catálogo por categorías + paginado tipo carrusel
- * - Carrito + checkout + envío/retiro + métodos de pago
- * - Tarjeta virtual de sellos
- * - Botones para compartir el bot
- *
- * VARIABLES DE ENTORNO (Render > Environment):
- * - TELEGRAM_BOT_TOKEN  (o BOT_TOKEN)  → token del bot
- * - CONFIG_URL          → URL directa al config.json
- * - PUBLIC_URL          → ej: https://ezerbot-system.onrender.com  (para webhook)
- * - ADMIN_CHAT_ID       → (opcional) chatId del vendedor para recibir pedidos
- * - PORT                → Render la define solo
  */
 
 import TelegramBot from "node-telegram-bot-api";
@@ -23,24 +10,18 @@ import { fileURLToPath } from "node:url";
 
 // -------------------- ENV --------------------
 
-const BOT_TOKEN = (
-  process.env.TELEGRAM_BOT_TOKEN ||
-  process.env.BOT_TOKEN ||
-  ""
-).trim();
-
+const BOT_TOKEN = (process.env.BOT_TOKEN || "").trim();
 const CONFIG_URL = (process.env.CONFIG_URL || "").trim();
-const PUBLIC_URL = (process.env.PUBLIC_URL || "").trim(); // ej: https://ezerbot-system.onrender.com
+const PUBLIC_URL = (process.env.PUBLIC_URL || "").trim();
 const ADMIN_CHAT_ID = (process.env.ADMIN_CHAT_ID || "").trim();
 const PORT = Number(process.env.PORT || 10000);
 
 if (!BOT_TOKEN) {
-  console.error("Falta TELEGRAM_BOT_TOKEN o BOT_TOKEN en variables de entorno.");
+  console.error("Falta BOT_TOKEN");
   process.exit(1);
 }
-
 if (!CONFIG_URL) {
-  console.error("Falta CONFIG_URL en variables de entorno.");
+  console.error("Falta CONFIG_URL");
   process.exit(1);
 }
 
@@ -74,23 +55,21 @@ const DB = loadData();
 
 // -------------------- HELPERS --------------------
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
 const money = (n) => {
   const num = Number(n || 0);
   return num.toLocaleString("es-AR", { maximumFractionDigits: 0 });
 };
 
-function safeText(s, max = 4000) {
+const safeText = (s, max = 4000) => {
   const t = String(s ?? "");
   return t.length > max ? t.slice(0, max - 3) + "..." : t;
-}
+};
 
 function getUser(db, userId) {
   const key = String(userId);
   if (!db.users[key]) {
     db.users[key] = {
-      cart: [], // [{codigo, qty}]
+      cart: [],
       stamps: 0,
       profile: { nombre: "", telefono: "" },
       checkout: { paso: "", envioTipo: "", zona: "", direccion: "", pago: "" },
@@ -121,21 +100,22 @@ function clearCart(user) {
   user.cart = [];
 }
 
+/**
+ * Enlaces para compartir el bot
+ */
 function buildShareLinks(botUsername, negocioNombre, publicUrl) {
-  const baseUrl = `https://t.me/${botUsername}`;
+  const botUrl = `https://t.me/${botUsername}`;
   const text = encodeURIComponent(
-    `Te comparto el bot de ${negocioNombre} 🤖✨\n\nAbrilo acá: ${baseUrl}`
+    `Te comparto el bot de ${negocioNombre} 🤖✨\n\nAbrilo acá: ${botUrl}`
   );
-
   const wa = `https://wa.me/?text=${text}`;
   const tg = `https://t.me/share/url?url=${encodeURIComponent(
-    baseUrl
+    botUrl
   )}&text=${text}`;
   const mail = `mailto:?subject=${encodeURIComponent(
     `Bot de ${negocioNombre}`
   )}&body=${text}`;
   const web = publicUrl ? publicUrl : "";
-
   return { wa, tg, mail, web };
 }
 
@@ -143,21 +123,17 @@ function buildShareLinks(botUsername, negocioNombre, publicUrl) {
 
 let CONFIG_CACHE = null;
 let CONFIG_CACHE_AT = 0;
-const CONFIG_TTL_MS = 30_000; // 30s
+const CONFIG_TTL_MS = 30000;
 
 async function fetchConfig() {
   const now = Date.now();
   if (CONFIG_CACHE && now - CONFIG_CACHE_AT < CONFIG_TTL_MS) return CONFIG_CACHE;
 
   const url = new URL(CONFIG_URL);
-  const res = await fetch(url.toString(), {
-    headers: { "cache-control": "no-cache" },
-  });
-  if (!res.ok) throw new Error(`No pude leer config.json (HTTP ${res.status})`);
+  const res = await fetch(url.toString(), { headers: { "cache-control": "no-cache" } });
+  if (!res.ok) throw new Error(`No pude leer config.json (${res.status})`);
 
   const json = await res.json();
-
-  // Normalización mínima
   if (!json.negocio) json.negocio = {};
   if (!Array.isArray(json.catalogo)) json.catalogo = [];
   if (!Array.isArray(json.promos)) json.promos = [];
@@ -211,7 +187,7 @@ function calcCartTotals(config, user) {
 
 function calcShipping(config, subtotal, checkout) {
   const env = config.envios || { activo: false };
-  if (!env.activo) return { costo: 0, label: "Retiro/Envío no configurado" };
+  if (!env.activo) return { costo: 0, label: "Envío no configurado" };
 
   if (checkout.envioTipo === "retiro") {
     return { costo: 0, label: "Retiro en el local" };
@@ -219,18 +195,13 @@ function calcShipping(config, subtotal, checkout) {
 
   const gratisDesde = Number(env.gratisDesde || 0);
   if (gratisDesde > 0 && subtotal >= gratisDesde) {
-    return {
-      costo: 0,
-      label: `Envío gratis (desde $${money(gratisDesde)})`,
-    };
+    return { costo: 0, label: `Envío gratis (desde $${money(gratisDesde)})` };
   }
 
   const zonas = Array.isArray(env.zonas) ? env.zonas : [];
   if (checkout.zona && zonas.length) {
     const z = zonas.find((x) => String(x.nombre) === String(checkout.zona));
-    if (z) {
-      return { costo: Number(z.costo || 0), label: `Envío (${z.nombre})` };
-    }
+    if (z) return { costo: Number(z.costo || 0), label: `Envío (${z.nombre})` };
   }
 
   const costoFijo = Number(env.costo || env.costoBase || 0);
@@ -246,10 +217,10 @@ async function ensureWebhook() {
   const hookPath = `/telegram/${BOT_TOKEN}`;
   const hookUrl = `${PUBLIC_URL.replace(/\/$/, "")}${hookPath}`;
   await bot.setWebHook(hookUrl);
-  console.log("Webhook configurado:", hookUrl);
+  console.log("Webhook:", hookUrl);
 }
 
-// -------------------- UI (BOTONES) --------------------
+// -------------------- UI --------------------
 
 function mainMenuKeyboard(config) {
   return {
@@ -257,7 +228,7 @@ function mainMenuKeyboard(config) {
       keyboard: [
         [{ text: "🛍️ Catálogo" }],
         [{ text: "🛒 Mi carrito" }, { text: "✅ Finalizar compra" }],
-        [{ text: "🎫 Tarjeta de sellos" }, { text: "📍 Horarios y dirección" }],
+        [{ text: "🎫 Tarjeta de sellos" }],
         [{ text: "📣 Compartir el bot" }],
       ],
       resize_keyboard: true,
@@ -286,16 +257,13 @@ function inlineCatalogPageKeyboard(cat, page, totalPages, items) {
       { text: "📤 Compartir", callback_data: `share:${p.codigo}` },
     ]);
   }
-
   const nav = [];
   if (page > 1) nav.push({ text: "⬅️", callback_data: `page:${cat}:${page - 1}` });
   nav.push({ text: `📄 ${page}/${totalPages}`, callback_data: "noop" });
   if (page < totalPages) nav.push({ text: "➡️", callback_data: `page:${cat}:${page + 1}` });
   rows.push(nav);
-
   rows.push([{ text: "🛒 Ver carrito", callback_data: "cart:view" }]);
   rows.push([{ text: "⬅️ Categorías", callback_data: "cats:list" }]);
-
   return { reply_markup: { inline_keyboard: rows } };
 }
 
@@ -314,10 +282,7 @@ function inlineCartKeyboard(user) {
   return { reply_markup: { inline_keyboard: rows } };
 }
 
-/**
- * SIEMPRE mostramos ambos botones: Envío + Retiro.
- */
-function inlineCheckoutDeliveryKeyboard() {
+function inlineCheckoutDeliveryKeyboard(config) {
   const rows = [];
   rows.push([
     { text: "🚚 Envío a domicilio", callback_data: "ship:envio" },
@@ -348,8 +313,8 @@ function inlinePaymentKeyboard(config) {
     : [];
   const rows = [];
   for (const m of methods) {
-    const label = m.label || m.nombre || "Pago";
-    const id = String(m.id || label);
+    const id = m.id || m.label || m.nombre || "pago";
+    const label = m.label || m.nombre || id;
     rows.push([{ text: label, callback_data: `pay:${id}` }]);
   }
   rows.push([{ text: "⬅️ Cancelar", callback_data: "checkout:cancel" }]);
@@ -366,7 +331,7 @@ function inlineShareKeyboard(links) {
   return { reply_markup: { inline_keyboard: rows } };
 }
 
-// -------------------- LOGICA “VENDEDOR” (TEXTO LIBRE) --------------------
+// -------------------- SMART SUGGEST --------------------
 
 function smartSuggest(config, text) {
   const t = String(text || "").toLowerCase().trim();
@@ -376,7 +341,6 @@ function smartSuggest(config, text) {
     { keys: ["promo", "promos", "oferta", "ofertas"], action: "PROMOS" },
     { keys: ["catalogo", "catálogo", "menu", "menú"], action: "CAT" },
     { keys: ["carrito"], action: "CART" },
-    { keys: ["horario", "direccion", "dirección", "ubicacion", "ubicación"], action: "INFO" },
     { keys: ["sello", "sellos", "tarjeta"], action: "STAMPS" },
     { keys: ["finalizar", "comprar", "checkout", "pagar"], action: "CHECKOUT" },
   ];
@@ -404,25 +368,23 @@ async function sendWelcome(chatId, config, username) {
   const negocio = config.negocio || {};
   const bienvenida =
     config.textos?.bienvenida ||
-    `👋 Hola, soy el asistente de *${negocio.nombre || "tu negocio favorito"}*.\n\nTe ayudo a armar tu pedido, ver el catálogo y sumar sellos en tu tarjeta.`;
-
+    `👋 Hola, soy el asistente de *${negocio.nombre || "tu negocio favorito"}*.\n\nTocá los botones de abajo para ver el catálogo, armar tu pedido y sumar sellos.`;
   await bot.sendMessage(chatId, bienvenida, {
     parse_mode: "Markdown",
     ...mainMenuKeyboard(config),
   });
 }
 
+/**
+ * Info del negocio: ahora NO manda datos de dirección/horarios,
+ * solo recuerda que están en el flyer/pantalla inicial.
+ */
 async function showBusinessInfo(chatId, config) {
-  const n = config.negocio || {};
-  const lines = [];
-  lines.push(`🏪 *${n.nombre || "Negocio"}*`);
-  if (n.direccion) lines.push(`📍 ${n.direccion}`);
-  if (n.horarios) lines.push(`🕒 ${n.horarios}`);
-  if (n.telefono) lines.push(`📞 ${n.telefono}`);
-  if (n.instagram) lines.push(`📸 ${n.instagram}`);
-  if (n.whatsapp) lines.push(`💬 WhatsApp: ${n.whatsapp}`);
-
-  await bot.sendMessage(chatId, lines.join("\n"), {
+  const negocio = config.negocio || {};
+  const txt =
+    `🏪 *${negocio.nombre || "Negocio"}*\n\n` +
+    "Toda la info del local (logo, horarios, dirección y redes) aparece en la pantalla de bienvenida y en el flyer inicial. 🧀";
+  await bot.sendMessage(chatId, txt, {
     parse_mode: "Markdown",
     ...mainMenuKeyboard(config),
   });
@@ -455,23 +417,24 @@ async function showCatalogPage(chatId, config, cat, page = 1) {
     });
     return;
   }
-
   const perPage = Number(config.ui?.itemsPorPagina || 6);
   const totalPages = Math.max(1, Math.ceil(items.length / perPage));
   const p = Math.min(Math.max(1, Number(page || 1)), totalPages);
   const slice = items.slice((p - 1) * perPage, (p - 1) * perPage + perPage);
 
-  const header = `*${cat}* — elegí qué querés agregar al carrito:`;
-  await bot.sendMessage(chatId, header, {
-    parse_mode: "Markdown",
-    ...inlineCatalogPageKeyboard(cat, p, totalPages, slice),
-  });
+  await bot.sendMessage(
+    chatId,
+    `*${cat}* — elegí qué querés agregar al carrito:`,
+    {
+      parse_mode: "Markdown",
+      ...inlineCatalogPageKeyboard(cat, p, totalPages, slice),
+    }
+  );
 }
 
 async function showPromos(chatId, config) {
   const promoItems = [];
   const promos = Array.isArray(config.promos) ? config.promos : [];
-
   if (promos.length) {
     for (const pr of promos) {
       const code = pr.codigo || pr;
@@ -505,7 +468,7 @@ async function showPromos(chatId, config) {
   rows.push([{ text: "🛒 Ver carrito", callback_data: "cart:view" }]);
   rows.push([{ text: "⬅️ Menú", callback_data: "menu:main" }]);
 
-  await bot.sendMessage(chatId, "🔥 *Promos disponibles* (tocá para agregar):", {
+  await bot.sendMessage(chatId, "🔥 *Promos disponibles*:", {
     parse_mode: "Markdown",
     reply_markup: { inline_keyboard: rows },
   });
@@ -547,7 +510,6 @@ async function showStamps(chatId, config, user) {
     );
     return;
   }
-
   const meta = Number(sellos.meta || 10);
   const premio = sellos.premio || "un beneficio especial";
   const actuales = Number(user.stamps || 0);
@@ -568,7 +530,7 @@ async function showStamps(chatId, config, user) {
   });
 }
 
-// -------------------- CHECKOUT --------------------
+// -------------------- CHECKOUT + TICKET POS --------------------
 
 async function startCheckout(chatId, config, user) {
   const { subtotal, lines } = calcCartTotals(config, user);
@@ -595,34 +557,29 @@ async function startCheckout(chatId, config, user) {
     "✅ *Finalizar compra*\nElegí cómo querés recibir tu pedido:",
     {
       parse_mode: "Markdown",
-      ...inlineCheckoutDeliveryKeyboard(),
+      ...inlineCheckoutDeliveryKeyboard(config),
     }
   );
 }
 
-async function askAddress(chatId) {
-  await bot.sendMessage(
+const askAddress = (chatId) =>
+  bot.sendMessage(
     chatId,
     "📍 Pasame tu *dirección completa* (calle + número + entre calles / referencia).",
     { parse_mode: "Markdown" }
   );
-}
 
-async function askName(chatId) {
-  await bot.sendMessage(
-    chatId,
-    "🧾 Decime tu *nombre* para el pedido.",
-    { parse_mode: "Markdown" }
-  );
-}
+const askName = (chatId) =>
+  bot.sendMessage(chatId, "🧾 Decime tu *nombre* para el pedido.", {
+    parse_mode: "Markdown",
+  });
 
-async function askPhone(chatId) {
-  await bot.sendMessage(
+const askPhone = (chatId) =>
+  bot.sendMessage(
     chatId,
     "📞 Pasame tu *teléfono* (así coordinamos si hace falta).",
     { parse_mode: "Markdown" }
   );
-}
 
 async function askPayment(chatId, config) {
   const methods = Array.isArray(config.pagos?.metodos)
@@ -631,18 +588,18 @@ async function askPayment(chatId, config) {
   if (!methods.length) {
     await bot.sendMessage(
       chatId,
-      "💳 No hay métodos de pago configurados todavía. (Configurá `pagos.metodos` en config.json)",
+      "💳 No hay métodos de pago configurados todavía (configuralos en config.json).",
       mainMenuKeyboard(config)
     );
     return;
   }
-
-  await bot.sendMessage(chatId, "💳 Elegí método de pago:", {
-    ...inlinePaymentKeyboard(config),
-  });
+  await bot.sendMessage(chatId, "💳 Elegí método de pago:", inlinePaymentKeyboard(config));
 }
 
-function buildOrderSummary(config, user, chatId, username) {
+/**
+ * Ticket POS (para cliente y vendedor)
+ */
+function buildOrderSummary(config, user, chatId, username, opts = {}) {
   const negocio = config.negocio || {};
   const { subtotal, lines } = calcCartTotals(config, user);
   const ship = calcShipping(config, subtotal, user.checkout);
@@ -650,45 +607,62 @@ function buildOrderSummary(config, user, chatId, username) {
 
   const profileName = user.profile?.nombre || "";
   const profilePhone = user.profile?.telefono || "";
+  const pago = user.checkout.pago || "-";
+  const envioTipo =
+    user.checkout.envioTipo === "envio"
+      ? "Envío a domicilio"
+      : "Retiro en el local";
 
   const parts = [];
-  parts.push(`🧾 *Pedido — ${negocio.nombre || "Negocio"}*`);
-  const clienteLinea = profileName || (username ? `@${username}` : "");
-  if (clienteLinea) parts.push(`👤 Cliente: ${clienteLinea}`);
+  parts.push("🧾 *Ticket de compra*");
+  parts.push(`*${negocio.nombre || "Negocio"}*`);
+  parts.push("────────────────────");
+  parts.push(
+    `👤 Cliente: ${
+      profileName || (username ? `@${username}` : "sin nombre")
+    }`
+  );
   if (profilePhone) parts.push(`📞 Tel: ${profilePhone}`);
-
-  parts.push("");
+  parts.push(`🆔 ChatID: ${chatId}`);
+  parts.push("────────────────────");
   parts.push("*Detalle:*");
   for (const it of lines) {
     parts.push(`• ${it.qty} × ${it.p.nombre} — $${money(it.line)}`);
   }
-  parts.push("");
-  parts.push(`Subtotal: *$${money(subtotal)}*`);
-  parts.push(`${ship.label}: *$${money(ship.costo)}*`);
-  parts.push(`TOTAL: *$${money(total)}*`);
-  parts.push("");
-
+  parts.push("────────────────────");
+  parts.push(`Subtotal:      *$${money(subtotal)}*`);
+  parts.push(`${ship.label}:  *$${money(ship.costo)}*`);
+  parts.push(`TOTAL:         *$${money(total)}*`);
+  parts.push("────────────────────");
+  parts.push(`🚚 Entrega: *${envioTipo}*`);
   if (user.checkout.envioTipo === "envio") {
     if (user.checkout.zona) parts.push(`🗺️ Zona: ${user.checkout.zona}`);
-    parts.push(`📍 Dirección: ${user.checkout.direccion || "-"}`);
-  } else {
-    parts.push("🏪 Entrega: Retiro en el local");
+    if (user.checkout.direccion)
+      parts.push(`📍 Dirección: ${user.checkout.direccion}`);
   }
+  parts.push(`💳 Pago: *${pago}*`);
 
-  if (user.checkout.pago) parts.push(`💳 Pago: ${user.checkout.pago}`);
-
-  parts.push("");
-  parts.push(`🆔 ChatID cliente: ${chatId}`);
+  if (opts.tipo === "vendedor" && pago.toLowerCase().includes("transfer")) {
+    parts.push("");
+    parts.push(
+      "⚠️ Pago por *transferencia* — esperar confirmación antes de preparar el pedido."
+    );
+  }
+  if (opts.tipo === "cliente" && pago.toLowerCase().includes("transfer")) {
+    parts.push("");
+    parts.push(
+      "ℹ️ Elegiste *transferencia*. Recordá enviar el comprobante al vendedor."
+    );
+  }
 
   return parts.join("\n");
 }
 
 async function finalizeOrder(chatId, config, user, username) {
-  // Sellos
+  // sellos
   if (config.sellos?.activo) {
     const suma = Number(config.sellos?.sumaPorCompra || 1);
-    user.stamps =
-      Number(user.stamps || 0) + (Number.isFinite(suma) ? suma : 1);
+    user.stamps = Number(user.stamps || 0) + (Number.isFinite(suma) ? suma : 1);
     const meta = Number(config.sellos?.meta || 10);
     if (meta > 0 && user.stamps >= meta) {
       const premio = config.sellos?.premio || "un beneficio";
@@ -702,43 +676,52 @@ async function finalizeOrder(chatId, config, user, username) {
     }
   }
 
-  const summary = buildOrderSummary(config, user, chatId, username);
+  // TICKET POS para cliente
+  const ticketCliente = buildOrderSummary(config, user, chatId, username, {
+    tipo: "cliente",
+  });
+  await bot.sendMessage(chatId, ticketCliente, {
+    parse_mode: "Markdown",
+  });
 
+  // TICKET POS para vendedor (ADMIN)
   if (ADMIN_CHAT_ID) {
     try {
-      await bot.sendMessage(ADMIN_CHAT_ID, summary, { parse_mode: "Markdown" });
+      const ticketVendedor = buildOrderSummary(
+        config,
+        user,
+        chatId,
+        username,
+        { tipo: "vendedor" }
+      );
+      await bot.sendMessage(ADMIN_CHAT_ID, ticketVendedor, {
+        parse_mode: "Markdown",
+      });
     } catch (e) {
-      console.error("No pude enviar al ADMIN_CHAT_ID:", e?.message || e);
+      console.error("No pude enviar ticket al ADMIN:", e?.message || e);
     }
   }
 
   const confirmText =
     config.textos?.pedidoConfirmado ||
-    "✅ ¡Listo! Ya tomé tu pedido.\n\nEn un momento te confirmamos la preparación y coordinación. 🙌";
+    "✅ ¡Listo! Te envié tu ticket de compra.\nCuando el vendedor confirme el pago, va a preparar tu pedido. 🙌";
 
-  await bot.sendMessage(chatId, safeText(confirmText), {
+  await bot.sendMessage(chatId, confirmText, {
+    parse_mode: "Markdown",
     ...mainMenuKeyboard(config),
   });
 
   clearCart(user);
-  user.checkout = {
-    paso: "",
-    envioTipo: "",
-    zona: "",
-    direccion: "",
-    pago: "",
-  };
+  user.checkout = { paso: "", envioTipo: "", zona: "", direccion: "", pago: "" };
   saveData(DB);
 }
 
 // -------------------- HANDLERS --------------------
 
-// /start
 bot.onText(/\/start/, async (msg) => {
   try {
     const config = await fetchConfig();
-    const chatId = msg.chat.id;
-    await sendWelcome(chatId, config, msg.from?.username);
+    await sendWelcome(msg.chat.id, config, msg.from?.username);
   } catch (e) {
     console.error(e);
     bot.sendMessage(
@@ -748,20 +731,18 @@ bot.onText(/\/start/, async (msg) => {
   }
 });
 
-// Mensajes de texto / botones de menú
 bot.on("message", async (msg) => {
   try {
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     if (!userId) return;
-
-    if (msg.text && msg.text.startsWith("/start")) return; // ya manejado
+    if (msg.text && msg.text.startsWith("/start")) return;
 
     const config = await fetchConfig();
     const user = getUser(DB, userId);
     const text = (msg.text || "").trim();
 
-    // Flujo de checkout (dirección, nombre, teléfono)
+    // flujo de checkout
     if (user.checkout?.paso) {
       if (user.checkout.paso === "esperando_direccion") {
         user.checkout.direccion = text;
@@ -786,13 +767,11 @@ bot.on("message", async (msg) => {
       }
     }
 
-    // Botones del menú principal
+    // teclado principal
     if (text === "🛍️ Catálogo") return await showCategories(chatId, config);
     if (text === "🛒 Mi carrito") return await showCart(chatId, config, user);
     if (text === "✅ Finalizar compra")
       return await startCheckout(chatId, config, user);
-    if (text === "📍 Horarios y dirección")
-      return await showBusinessInfo(chatId, config);
     if (text === "🎫 Tarjeta de sellos")
       return await showStamps(chatId, config, user);
 
@@ -810,16 +789,13 @@ bot.on("message", async (msg) => {
       );
     }
 
-    // Texto libre (buscador inteligente)
+    // smart
     if (text) {
       const s = smartSuggest(config, text);
-
       if (s?.type === "intent") {
         if (s.action === "PROMOS") return await showPromos(chatId, config);
         if (s.action === "CAT") return await showCategories(chatId, config);
         if (s.action === "CART") return await showCart(chatId, config, user);
-        if (s.action === "INFO")
-          return await showBusinessInfo(chatId, config);
         if (s.action === "STAMPS")
           return await showStamps(chatId, config, user);
         if (s.action === "CHECKOUT")
@@ -852,8 +828,7 @@ bot.on("message", async (msg) => {
 
       const fallback =
         config.textos?.fallback ||
-        "🙂 Decime qué estás buscando (por ejemplo: *picada*, *queso*, *promo*) o tocá una opción del menú.";
-
+        "🙂 Decime qué estás buscando (ej: *picada*, *queso*, *pan*) o tocá una opción del menú.";
       await bot.sendMessage(chatId, fallback, {
         parse_mode: "Markdown",
         ...mainMenuKeyboard(config),
@@ -870,20 +845,17 @@ bot.on("message", async (msg) => {
   }
 });
 
-// Callbacks (botones inline)
 bot.on("callback_query", async (q) => {
   try {
     const data = q.data || "";
     const msg = q.message;
     if (!msg) return;
-
     const chatId = msg.chat.id;
     const userId = q.from?.id;
     if (!userId) return;
 
     const config = await fetchConfig();
     const user = getUser(DB, userId);
-
     const ack = async () => {
       try {
         await bot.answerCallbackQuery(q.id);
@@ -918,16 +890,13 @@ bot.on("callback_query", async (q) => {
       await ack();
       const codigo = data.slice(4);
       const p = findProduct(config, codigo);
-      if (!p) {
+      if (!p)
         return await bot.sendMessage(
           chatId,
           "Ese producto no existe (revisá el config)."
         );
-      }
-
       addToCart(user, codigo, 1);
       saveData(DB);
-
       await bot.sendMessage(
         chatId,
         `✅ Agregado: *${p.nombre}*\n¿Querés seguir mirando el catálogo o ir al carrito?`,
@@ -954,28 +923,26 @@ bot.on("callback_query", async (q) => {
           "No encontré ese producto para compartir."
         );
       }
-
-      const baseBot = `https://t.me/${(await bot.getMe()).username}`;
+      const negocioNombre = config.negocio?.nombre || "el negocio";
       const text = encodeURIComponent(
-        `Mirá este producto de ${config.negocio?.nombre || "el negocio"}:\n\n${
-          p.nombre
-        } - $${money(p.precio)}\n${baseBot}`
+        `Mirá este producto de ${negocioNombre}:\n\n${p.nombre} - $${money(
+          p.precio
+        )}`
       );
-
       const wa = `https://wa.me/?text=${text}`;
+      const me = await bot.getMe();
+      const botUrl = `https://t.me/${me.username}`;
       const tg = `https://t.me/share/url?url=${encodeURIComponent(
-        baseBot
+        botUrl
       )}&text=${text}`;
       const mail = `mailto:?subject=${encodeURIComponent(
         "Te comparto un producto"
       )}&body=${text}`;
-
       const rows = [
         [{ text: "📲 WhatsApp", url: wa }],
         [{ text: "✉️ Email", url: mail }],
         [{ text: "📨 Telegram", url: tg }],
       ];
-
       await bot.sendMessage(
         chatId,
         "Elegí cómo querés compartir este producto:",
@@ -1095,20 +1062,15 @@ bot.on("callback_query", async (q) => {
         ? config.pagos.metodos
         : [];
       const method =
-        methods.find(
-          (m) => String(m.id || m.label || m.nombre) === String(payId)
-        ) || null;
-
+        methods.find((m) => String(m.id || m.label) === String(payId)) ||
+        null;
       user.checkout.pago =
         method?.label || method?.nombre || String(payId);
       saveData(DB);
 
-      const summary = buildOrderSummary(
-        config,
-        user,
-        chatId,
-        q.from?.username
-      );
+      const summary = buildOrderSummary(config, user, chatId, q.from?.username, {
+        tipo: "cliente",
+      });
       await bot.sendMessage(chatId, summary, { parse_mode: "Markdown" });
 
       const rows = [
@@ -1123,12 +1085,7 @@ bot.on("callback_query", async (q) => {
 
     if (data === "order:confirm") {
       await ack();
-      return await finalizeOrder(
-        chatId,
-        config,
-        user,
-        q.from?.username
-      );
+      return await finalizeOrder(chatId, config, user, q.from?.username);
     }
 
     if (data === "search:ask") {
@@ -1152,55 +1109,46 @@ bot.on("callback_query", async (q) => {
   }
 });
 
-// -------------------- WEBHOOK SERVER (Render) --------------------
+// -------------------- WEBHOOK SERVER --------------------
 
 async function start() {
   const config = await fetchConfig();
   console.log(
-    `Config OK: negocio="${config.negocio?.nombre || "-"}", catálogo=${
+    `Config OK: negocio="${config.negocio?.nombre || "-"}", productos=${
       config.catalogo?.length || 0
-    }, promos=${(config.promos || []).length || 0}`
+    }`
   );
 
   if (PUBLIC_URL) {
     await ensureWebhook();
     const hookPath = `/telegram/${BOT_TOKEN}`;
-
     const server = http.createServer((req, res) => {
       if (req.method === "POST" && req.url === hookPath) {
         let body = "";
-        req.on("data", (chunk) => (body += chunk));
+        req.on("data", (c) => (body += c));
         req.on("end", async () => {
           try {
             const update = JSON.parse(body);
             await bot.processUpdate(update);
-            res.writeHead(200);
-            res.end("OK");
-          } catch {
-            res.writeHead(200);
-            res.end("OK");
-          }
+          } catch {}
+          res.writeHead(200);
+          res.end("OK");
         });
         return;
       }
-
       if (req.method === "GET" && req.url === "/") {
-        res.writeHead(200, {
-          "content-type": "text/plain; charset=utf-8",
-        });
+        res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
         res.end("EzerBot System OK");
         return;
       }
-
       res.writeHead(404);
       res.end("Not Found");
     });
-
     server.listen(PORT, () =>
       console.log(`Escuchando en puerto ${PORT} (webhook)`)
     );
   } else {
-    console.log("Bot activo en modo polling.");
+    console.log("Bot activo (polling).");
   }
 }
 
