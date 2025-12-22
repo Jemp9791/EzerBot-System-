@@ -1,11 +1,13 @@
 {
   "name": "ezerbot-systema",
   "version": "1.0.0",
+  "description": "Bot EzerBot + POS para Todo Queso",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "node-telegram-bot-api": "^0.66.0"
   }
-}
+} 
