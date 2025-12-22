@@ -1,698 +1,740 @@
-// index.js (ESM) — Bot Todo Queso: catálogo + carrito + entrega/pago + sellos + mini servidor HTTP
+// index.js — EzerBot Todo Queso: catálogo + carrito + sellos + checkout + Render
 
 import TelegramBot from 'node-telegram-bot-api';
 import http from 'http';
 
-// === CONFIG BÁSICA ===
+// =====================
+// CONFIG BÁSICA
+// =====================
 
-// Token: en Render usar env BOT_TOKEN
-const token = process.env.BOT_TOKEN || 'PONE_ACA_TU_TOKEN_PARA_PROBAR_LOCAL';
+const token = process.env.BOT_TOKEN;
+if (!token) {
+  console.error('Falta BOT_TOKEN en variables de entorno');
+  process.exit(1);
+}
 
-// Chat del vendedor (vos)
-const OWNER_CHAT_ID = 7454984023; // tu chat ID
+const CONFIG_URL = process.env.CONFIG_URL;
+const CATALOG_URL = process.env.CATALOG_URL;
 
-// Link público del bot para compartir
-const BOT_PUBLIC_LINK = 'https://t.me/EzerBot'; // cambialo por tu @real si hace falta
-
-// Alias para transferencias
+// Alias de transferencia (también lo podés leer desde Config si lo agregás allí)
 const ALIAS_TRANSFERENCIA = 'jennyocampos.mp';
 
-// Logo del local (URL de imagen)
-const LOGO_URL = 'https://i.ibb.co/kqhf4cP/todoqueso-logo.png'; // poné acá la URL real de tu logo
+// =====================
+// ESTADO EN MEMORIA
+// =====================
 
-// Datos del negocio (aparecen en el saludo inicial)
-const BUSINESS_INFO =
-  '🧀 *Todo Queso Club*\n' +
-  '📍 Carlos Pellegrini 526, Garín\n' +
-  '🕒 Lunes a Sábado 08:30–14:00 / 16:30–21:00\n' +
-  '📱 3484 230184\n' +
-  '📸 Instagram: @todoqueso.club';
+let CONFIG = null; // Datos del local
+let CATALOG = []; // Productos
+let CATEGORIES = []; // Categorías únicas
 
-// === ESTRUCTURAS EN MEMORIA ===
+const userStates = {}; // checkout (entrega+pago)
+const userCart = {}; // carrito por chatId
+const userCatalogState = {}; // navegación de catálogo por usuario
+const userStamps = {}; // sellos por usuario (de momento en memoria)
 
-// Catálogo de ejemplo (podés editar nombres, precios, imágenes, etc.)
-const catalog = {
-  PROMOS: [
-    {
-      id: 'promo_picada_2',
-      name: 'Picada para 2',
-      price: 35000,
-      description: 'Selección de fiambres y quesos + pan fresco.',
-      image:
-        'https://i.ibb.co/6R2p99p/picada-para-2.jpg',
-      unitType: 'unidad'
-    }
-  ],
-  QUESOS: [
-    {
-      id: 'cremon',
-      name: 'CREMON',
-      price: 11500,
-      description: 'Queso Cremón barra 1 kg.',
-      image:
-        'https://i.ibb.co/8Y6gk8m/cremon.jpg',
-      unitType: 'gramos' // permite pensar en porciones
-    },
-    {
-      id: 'muzza_barraza',
-      name: 'MUZZA BARRAZA',
-      price: 8500,
-      description: 'Muzzarella Barraza por kg.',
-      image:
-        'https://i.ibb.co/FJfmgSq/muzza-barraza.jpg',
-      unitType: 'gramos'
-    }
-  ],
-  PANIFICADOS: [
-    {
-      id: 'pan_fresco',
-      name: 'PAN FRESCO',
-      price: 2200,
-      description: 'Pan fresco del día (por unidad).',
-      image:
-        'https://i.ibb.co/6gqYTDY/pan-fresco.jpg',
-      unitType: 'unidad'
-    }
-  ],
-  LACTEOS: [],
-  FIAMBRES: []
-};
+// =====================
+// CARGA DE SHEETS (Config + Catálogo)
+// =====================
 
-// Estado por usuario
-const sessions = {}; // { [chatId]: Session }
+async function loadConfig() {
+  if (!CONFIG_URL) return;
+  try {
+    const res = await fetch(CONFIG_URL);
+    if (!res.ok) throw new Error('Respuesta no OK en CONFIG_URL');
+    const data = await res.json();
+    CONFIG = data;
+    console.log('Config cargada desde Sheets');
+  } catch (err) {
+    console.error('Error al cargar CONFIG desde Sheets:', err.message);
+  }
+}
 
-let lastOrderId = 1;
+async function loadCatalog() {
+  if (!CATALOG_URL) return;
+  try {
+    const res = await fetch(CATALOG_URL);
+    if (!res.ok) throw new Error('Respuesta no OK en CATALOG_URL');
+    const data = await res.json();
 
-// === TIPOS ===
-// Session = {
-// step: string | null,
-// cart: CartItem[],
-// stamps: number,
-// currentCategory: string | null,
-// currentIndex: number,
-// delivery: { type: 'envio'|'retiro'|null, address: string|null, name: string|null, phone: string|null },
-// pendingOrder: Order | null
-// }
-// CartItem = { id, name, price, qty }
-// Order = { id, chatId, items, subtotal, delivery, paymentType }
+    // Filtramos sólo productos activos si tienen flag "activo"
+    CATALOG = (Array.isArray(data) ? data : []).filter(
+      (p) => p.activo === undefined || p.activo === true
+    );
 
-// === INICIALIZAR BOT ===
+    const cats = new Set();
+    CATALOG.forEach((p) => {
+      if (p.categoria) cats.add(p.categoria);
+    });
+    CATEGORIES = Array.from(cats);
+    console.log(`Catálogo cargado: ${CATALOG.length} productos / ${CATEGORIES.length} categorías`);
+  } catch (err) {
+    console.error('Error al cargar CATALOG desde Sheets:', err.message);
+  }
+}
+
+// Cargamos al inicio y refrescamos cada 10 minutos
+await loadConfig();
+await loadCatalog();
+setInterval(() => {
+  loadConfig();
+  loadCatalog();
+}, 10 * 60 * 1000);
+
+// =====================
+// UTILIDADES
+// =====================
+
+function getCart(chatId) {
+  if (!userCart[chatId]) userCart[chatId] = [];
+  return userCart[chatId];
+}
+
+function addToCart(chatId, productId) {
+  const cart = getCart(chatId);
+  const product = CATALOG.find((p) => p.id === productId);
+  if (!product) return;
+
+  const item = cart.find((i) => i.id === productId);
+  if (item) {
+    item.cantidad += 1;
+  } else {
+    cart.push({
+      id: product.id,
+      nombre: product.nombre,
+      precio: Number(product.precio) || 0,
+      cantidad: 1,
+    });
+  }
+}
+
+function cartSummaryText(chatId) {
+  const cart = getCart(chatId);
+  if (!cart.length) return '🛒 Tu carrito está vacío. Agregá algo del catálogo 🙂';
+
+  let total = 0;
+  let text = '🛒 *Tu carrito*\n\n';
+  cart.forEach((item) => {
+    const subtotal = item.precio * item.cantidad;
+    total += subtotal;
+    text += `• ${item.cantidad} × ${item.nombre} — $${subtotal.toLocaleString('es-AR')}\n`;
+  });
+  text += `\n*Subtotal:* $${total.toLocaleString('es-AR')}`;
+  return text;
+}
+
+function getStamps(chatId) {
+  if (!userStamps[chatId]) userStamps[chatId] = 0;
+  return userStamps[chatId];
+}
+
+function addStamp(chatId) {
+  userStamps[chatId] = getStamps(chatId) + 1;
+}
+
+function stampsCardText(chatId) {
+  const max = 10;
+  const current = Math.min(getStamps(chatId), max);
+  const filled = '🟩'.repeat(current);
+  const empty = '⬜'.repeat(max - current);
+
+  const premio =
+    (CONFIG && CONFIG.premioSellos) ||
+    'Picada premium Todo Queso (configurable)';
+
+  return (
+    '🎟 *Tarjeta de sellos*\n' +
+    `${filled}${empty}\n\n` +
+    `Sellos: ${current} / ${max}\n` +
+    `Premio al completar: ${premio}\n\n` +
+    'Tip: cada compra confirmada suma 1 sello automático.'
+  );
+}
+
+// =====================
+// BOT TELEGRAM
+// =====================
 
 const bot = new TelegramBot(token, { polling: true });
 
-console.log('Bot Todo Queso iniciado…');
-
-// === FUNCIONES DE SESIÓN ===
-
-function getSession(chatId) {
-  if (!sessions[chatId]) {
-    sessions[chatId] = {
-      step: null,
-      cart: [],
-      stamps: 0,
-      currentCategory: null,
-      currentIndex: 0,
-      delivery: { type: null, address: null, name: null, phone: null },
-      pendingOrder: null
-    };
-  }
-  return sessions[chatId];
-}
-
-// === MENÚ PRINCIPAL ===
-
-function mainMenuKeyboard() {
-  return {
-    keyboard: [
-      ['🛒 Catálogo', '🧾 Mi carrito'],
-      ['🎫 Tarjeta de sellos'],
-      ['📍 Horarios y dirección', '📣 Compartir el bot']
-    ],
-    resize_keyboard: true
-  };
-}
+// -------- SALUDO INICIAL + MENÚ ----------
 
 async function sendWelcome(chatId) {
-  try {
-    await bot.sendPhoto(chatId, LOGO_URL, {
-      caption:
-        BUSINESS_INFO +
-        '\n\nElegí una opción del menú para empezar 👇',
-      parse_mode: 'Markdown',
-      reply_markup: mainMenuKeyboard()
-    });
-  } catch (e) {
-    // Si falla la foto, al menos mandamos el texto
-    await bot.sendMessage(
-      chatId,
-      BUSINESS_INFO + '\n\nElegí una opción del menú 👇',
-      {
+  if (!CONFIG) await loadConfig();
+
+  const nombre =
+    (CONFIG && CONFIG.nombreComercio) || 'Todo Queso Club';
+  const direccion =
+    (CONFIG && CONFIG.direccion) || 'Dirección no configurada';
+  const telefono =
+    (CONFIG && CONFIG.telefono) || 'Teléfono no configurado';
+  const instagram =
+    (CONFIG && CONFIG.instagram) || '@todoqueso.club';
+  const horarios =
+    (CONFIG && CONFIG.horariosTexto) ||
+    'Lunes a Sábado 08:30–14:00 / 16:30–21:00';
+  const logoUrl = CONFIG && CONFIG.logoUrl;
+
+  const infoTexto =
+    `🧀 *${nombre}*\n` +
+    `📍 ${direccion}\n` +
+    `⏰ ${horarios}\n` +
+    `📞 ${telefono}\n` +
+    `📸 Instagram: ${instagram}\n\n` +
+    'Elegí una opción del menú para empezar 👇';
+
+  if (logoUrl) {
+    try {
+      await bot.sendPhoto(chatId, logoUrl, {
+        caption: infoTexto,
         parse_mode: 'Markdown',
-        reply_markup: mainMenuKeyboard()
-      }
-    );
-  }
-}
-
-// === CATÁLOGO / CARRUSEL ===
-
-function categoryKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: 'Promos', callback_data: 'cat_PROMOS' }],
-      [{ text: 'Quesos', callback_data: 'cat_QUESOS' }],
-      [{ text: 'Panificados', callback_data: 'cat_PANIFICADOS' }],
-      [{ text: 'Lácteos', callback_data: 'cat_LACTEOS' }],
-      [{ text: 'Fiambres', callback_data: 'cat_FIAMBRES' }],
-      [{ text: '⬅ Menú', callback_data: 'back_menu' }]
-    ]
-  };
-}
-
-function formatPrice(n) {
-  return '$' + n.toLocaleString('es-AR');
-}
-
-async function showCategories(chatId) {
-  await bot.sendMessage(chatId, '🛍 Elegí una categoría:', {
-    reply_markup: categoryKeyboard()
-  });
-}
-
-async function sendProductCard(chatId, categoryKey, index) {
-  const session = getSession(chatId);
-  const products = catalog[categoryKey] || [];
-
-  if (!products.length) {
-    await bot.sendMessage(
-      chatId,
-      'Por ahora no hay productos cargados en esta categoría.',
-      { reply_markup: categoryKeyboard() }
-    );
-    return;
-  }
-
-  if (index < 0) index = 0;
-  if (index >= products.length) index = products.length - 1;
-
-  session.currentCategory = categoryKey;
-  session.currentIndex = index;
-
-  const product = products[index];
-
-  const caption =
-    `*${product.name}*\n` +
-    `💵 ${formatPrice(product.price)}\n` +
-    (product.description ? `${product.description}\n` : '') +
-    `\nUnidad: ${product.unitType === 'gramos' ? 'por kilo / gramos' : 'por unidad'}`;
-
-  // Botones carrusel
-  const rowNav = [];
-  if (index > 0) {
-    rowNav.push({
-      text: '⬅ Anterior',
-      callback_data: `prod_prev_${categoryKey}`
-    });
-  }
-  if (index < products.length - 1) {
-    rowNav.push({
-      text: 'Siguiente ➡',
-      callback_data: `prod_next_${categoryKey}`
+      });
+    } catch (e) {
+      console.error('Error enviando logo, mando sólo texto:', e.message);
+      await bot.sendMessage(chatId, infoTexto, {
+        parse_mode: 'Markdown',
+      });
+    }
+  } else {
+    await bot.sendMessage(chatId, infoTexto, {
+      parse_mode: 'Markdown',
     });
   }
 
-  const keyboard = {
-    inline_keyboard: [
-      [
-        { text: '➕ Agregar', callback_data: `add_${product.id}` },
-        { text: '📤 Compartir', callback_data: `share_${product.id}` }
+  await sendMainMenu(chatId);
+}
+
+async function sendMainMenu(chatId) {
+  await bot.sendMessage(chatId, '📋 Menú principal:', {
+    reply_markup: {
+      keyboard: [
+        ['🛍 Catálogo', '🛒 Mi carrito'],
+        ['✅ Finalizar compra'],
+        ['🎟 Tarjeta de sellos', '📣 Compartir el bot'],
       ],
-      ...(rowNav.length ? [rowNav] : []),
-      [
-        { text: '🧾 Ver carrito', callback_data: 'view_cart' },
-        { text: '📂 Categorías', callback_data: 'back_categories' }
-      ]
-    ]
-  };
-
-  await bot.sendPhoto(chatId, product.image, {
-    caption,
-    parse_mode: 'Markdown',
-    reply_markup: keyboard
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    },
   });
 }
 
-// === CARRITO ===
+// -------- CATÁLOGO ----------
 
-function getCartSummary(session) {
-  if (!session.cart.length) return { text: 'Tu carrito está vacío.', subtotal: 0 };
+async function sendCategoryList(chatId) {
+  if (!CATALOG.length) await loadCatalog();
 
-  let text = '🧾 *Tu carrito*\n';
-  let subtotal = 0;
-
-  for (const item of session.cart) {
-    const lineTotal = item.price * item.qty;
-    subtotal += lineTotal;
-    text += `• ${item.qty} × ${item.name} — ${formatPrice(lineTotal)}\n`;
-  }
-
-  text += `\nSubtotal: *${formatPrice(subtotal)}*`;
-
-  return { text, subtotal };
-}
-
-async function showCart(chatId) {
-  const session = getSession(chatId);
-  const { text, subtotal } = getCartSummary(session);
-
-  const keyboard =
-    session.cart.length > 0
-      ? {
-          inline_keyboard: [
-            [{ text: '🧹 Vaciar carrito', callback_data: 'empty_cart' }],
-            [{ text: '✅ Finalizar compra', callback_data: 'checkout' }],
-            [{ text: '⬅ Menú', callback_data: 'back_menu' }]
-          ]
-        }
-      : {
-          inline_keyboard: [
-            [{ text: '🛒 Ver catálogo', callback_data: 'back_categories' }],
-            [{ text: '⬅ Menú', callback_data: 'back_menu' }]
-          ]
-        };
-
-  await bot.sendMessage(chatId, text, {
-    parse_mode: 'Markdown',
-    reply_markup: keyboard
-  });
-}
-
-// === TARJETA DE SELLOS ===
-
-async function showStamps(chatId) {
-  const session = getSession(chatId);
-  const totalSlots = 10;
-  const filled = Math.min(session.stamps, totalSlots);
-  const empty = totalSlots - filled;
-
-  const bar = '🟩'.repeat(filled) + '⬜'.repeat(empty);
-
-  const text =
-    '🎫 *Tarjeta de sellos*\n' +
-    `${bar}\n\n` +
-    `Sellos: ${filled} / ${totalSlots}\n` +
-    'Premio al completar: Picada premium Todo Queso (configurable)\n\n' +
-    'Tip: cada compra confirmada suma 1 sello automático.';
-
-  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
-}
-
-// === HORARIOS & COMPARTIR ===
-
-async function sendSchedule(chatId) {
-  await bot.sendMessage(chatId, BUSINESS_INFO, { parse_mode: 'Markdown' });
-}
-
-async function sendShareMessage(chatId) {
-  const text =
-    '📣 *Compartí Todo Queso Club*\n\n' +
-    'Reenviá este mensaje a tus contactos para que también puedan pedir por el bot:\n' +
-    BOT_PUBLIC_LINK;
-
-  await bot.sendMessage(chatId, text, { parse_mode: 'Markdown' });
-}
-
-// === CHECKOUT: ENTREGA & PAGO ===
-
-async function startCheckout(chatId) {
-  const session = getSession(chatId);
-  const { subtotal } = getCartSummary(session);
-
-  if (!session.cart.length) {
+  if (!CATALOG.length) {
     await bot.sendMessage(
       chatId,
-      'Tu carrito está vacío. Agregá algo del catálogo antes de finalizar la compra.',
-      {
-        reply_markup: categoryKeyboard()
-      }
+      'Por ahora no hay productos cargados en el catálogo. Revisá la hoja de Sheets o intentá de nuevo en unos minutos.'
     );
     return;
   }
 
-  session.delivery = { type: null, address: null, name: null, phone: null };
-  session.step = 'choose_delivery';
+  const rows = CATEGORIES.map((cat) => [
+    { text: cat, callback_data: `cat_${cat}` },
+  ]);
 
   await bot.sendMessage(
     chatId,
-    `Subtotal de tu pedido: *${formatPrice(subtotal)}*\n\nElegí cómo querés recibir tu pedido 👇`,
+    '🛍 *Catálogo* — elegí una categoría:',
     {
       parse_mode: 'Markdown',
       reply_markup: {
-        inline_keyboard: [
-          [{ text: '🚚 Envío a domicilio', callback_data: 'delivery_envio' }],
-          [{ text: '🏪 Retiro en el local', callback_data: 'delivery_retiro' }],
-          [{ text: '⬅ Cancelar', callback_data: 'back_menu' }]
-        ]
-      }
+        inline_keyboard: rows,
+      },
     }
   );
 }
 
-// === TICKET ===
-
-function buildTicket(order) {
-  const { items, subtotal, delivery, paymentType, id, chatId } = order;
-  let text = '🧾 *Ticket de compra - Todo Queso*\n';
-  text += '--------------------------------\n';
-  text += `ID Pedido: #${id}\n`;
-  text += `ChatID: ${chatId}\n\n`;
-  text += '*Detalle:*\n';
-
-  for (const it of items) {
-    const line = it.price * it.qty;
-    text += `• ${it.qty} × ${it.name} — ${formatPrice(line)}\n`;
+function showProduct(chatId, category, index) {
+  const products = CATALOG.filter((p) => p.categoria === category);
+  if (!products.length) {
+    bot.sendMessage(
+      chatId,
+      'No encontré productos en esta categoría. Revisá el catálogo en Sheets.'
+    );
+    return;
   }
 
-  text += `\nSubtotal: *${formatPrice(subtotal)}*\n`;
-  text += `Envío: *${formatPrice(0)}* (configurable)\n`;
-  text += `TOTAL: *${formatPrice(subtotal)}*\n\n`;
+  if (index < 0) index = products.length - 1;
+  if (index >= products.length) index = 0;
 
-  text += `📦 Entrega: ${
-    delivery.type === 'envio' ? 'Envío a domicilio 🚚' : 'Retiro en el local 🏪'
-  }\n`;
-  if (delivery.type === 'envio' && delivery.address) {
-    text += `📍 Dirección: ${delivery.address}\n`;
+  userCatalogState[chatId] = {
+    category,
+    index,
+  };
+
+  const product = products[index];
+  const caption =
+    `*${product.nombre || 'Producto'}*\n` +
+    (product.precio
+      ? `💲 $${Number(product.precio).toLocaleString('es-AR')}\n`
+      : '') +
+    (product.descripcion ? `${product.descripcion}\n` : '') +
+    `\n${index + 1}/${products.length}`;
+
+  const inline_keyboard = [
+    [
+      {
+        text: '➕ Agregar',
+        callback_data: `add_${product.id}`,
+      },
+      {
+        text: '📤 Compartir',
+        callback_data: `shareprod_${product.id}`,
+      },
+    ],
+    [
+      {
+        text: '⬅️ Anterior',
+        callback_data: 'nav_prev',
+      },
+      {
+        text: '➡️ Siguiente',
+        callback_data: 'nav_next',
+      },
+    ],
+    [
+      {
+        text: '🛍 Ver categorías',
+        callback_data: 'back_categories',
+      },
+      {
+        text: '🛒 Ver carrito',
+        callback_data: 'view_cart',
+      },
+    ],
+  ];
+
+  if (product.imagenUrl) {
+    bot
+      .sendPhoto(chatId, product.imagenUrl, {
+        caption,
+        parse_mode: 'Markdown',
+        reply_markup: { inline_keyboard },
+      })
+      .catch((e) => {
+        console.error('Error enviando foto de producto:', e.message);
+        bot.sendMessage(chatId, caption, {
+          parse_mode: 'Markdown',
+          reply_markup: { inline_keyboard },
+        });
+      });
+  } else {
+    bot.sendMessage(chatId, caption, {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard },
+    });
   }
-  if (delivery.name) text += `👤 Cliente: ${delivery.name}\n`;
-  if (delivery.phone) text += `📞 Tel: ${delivery.phone}\n`;
-
-  text += `\n💳 Pago: *${paymentType}*\n`;
-
-  if (paymentType === 'Transferencia') {
-    text += `Alias: \`${ALIAS_TRANSFERENCIA}\`\n`;
-  }
-
-  text += '\nGracias por tu compra 🧀';
-
-  return text;
 }
 
-// === HANDLERS DE MENSAJES ===
+// -------- CARRITO ----------
+
+async function sendCart(chatId) {
+  const text = cartSummaryText(chatId);
+  await bot.sendMessage(chatId, text, {
+    parse_mode: 'Markdown',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '🧹 Vaciar carrito', callback_data: 'empty_cart' },
+          { text: '🛍 Seguir comprando', callback_data: 'back_categories' },
+        ],
+        [
+          {
+            text: '✅ Finalizar compra',
+            callback_data: 'go_checkout',
+          },
+        ],
+      ],
+    },
+  });
+}
+
+// -------- CHECKOUT (ENTREGA + PAGO) ----------
+
+function startCheckout(chatId) {
+  const cart = getCart(chatId);
+  if (!cart.length) {
+    bot.sendMessage(
+      chatId,
+      'Tu carrito está vacío. Primero agregá algún producto del catálogo 🙂'
+    );
+    return;
+  }
+
+  userStates[chatId] = {
+    step: 'choose_delivery',
+    deliveryType: null,
+    address: null,
+    name: null,
+    phone: null,
+    paymentType: null,
+  };
+
+  bot.sendMessage(chatId, 'Elegí cómo querés recibir tu pedido 👇', {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: '🚚 Envío a domicilio',
+            callback_data: 'envio_domicilio',
+          },
+        ],
+        [
+          {
+            text: '🏪 Retiro en el local',
+            callback_data: 'retiro_local',
+          },
+        ],
+      ],
+    },
+  });
+}
+
+// =====================
+// HANDLERS DE MENSAJES
+// =====================
 
 bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const textRaw = (msg.text || '').trim();
-  const text = textRaw.toLowerCase();
-  const session = getSession(chatId);
+  const text = (msg.text || '').trim();
 
-  // Saludos / /start → bienvenida
+  // Saludo / start
+  const lower = text.toLowerCase();
   if (
-    text === '/start' ||
-    text === 'hola' ||
-    text === 'buenas' ||
-    text.startsWith('buenos') ||
-    text.startsWith('buenas ')
+    lower === '/start' ||
+    lower === 'menú' ||
+    lower === 'menu' ||
+    lower === 'hola' ||
+    lower === 'buenas' ||
+    lower === 'buenos días' ||
+    lower === 'buenas tardes' ||
+    lower === 'buenas noches'
   ) {
     await sendWelcome(chatId);
-    session.step = null;
     return;
   }
 
-  // Menú principal por texto
-  if (textRaw === '🛒 Catálogo') {
-    await showCategories(chatId);
-    return;
-  }
-  if (textRaw === '🧾 Mi carrito') {
-    await showCart(chatId);
-    return;
-  }
-  if (textRaw === '🎫 Tarjeta de sellos') {
-    await showStamps(chatId);
-    return;
-  }
-  if (textRaw === '📍 Horarios y dirección') {
-    await sendSchedule(chatId);
-    return;
-  }
-  if (textRaw === '📣 Compartir el bot') {
-    await sendShareMessage(chatId);
+  // Menú principal
+  if (text === '🛍 Catálogo') {
+    await sendCategoryList(chatId);
     return;
   }
 
-  // Flujo de checkout: address, name, phone
-  if (session.step === 'ask_address') {
-    session.delivery.address = textRaw;
-    session.step = 'ask_name';
-    await bot.sendMessage(chatId, '🧾 Decime tu nombre para el pedido:');
+  if (text === '🛒 Mi carrito') {
+    await sendCart(chatId);
     return;
   }
 
-  if (session.step === 'ask_name') {
-    session.delivery.name = textRaw;
-    session.step = 'ask_phone';
-    await bot.sendMessage(chatId, '📞 Pasame tu teléfono (para coordinar si hace falta):');
+  if (text === '✅ Finalizar compra') {
+    startCheckout(chatId);
     return;
   }
 
-  if (session.step === 'ask_phone') {
-    session.delivery.phone = textRaw;
-    session.step = 'choose_payment';
+  if (text === '🎟 Tarjeta de sellos') {
+    const card = stampsCardText(chatId);
+    await bot.sendMessage(chatId, card, { parse_mode: 'Markdown' });
+    return;
+  }
 
-    await bot.sendMessage(chatId, 'Elegí método de pago:', {
+  if (text === '📣 Compartir el bot') {
+    const shareText =
+      '📣 *Compartí Todo Queso Club*\n\n' +
+      'Reenviá este mensaje o usá uno de los botones para compartir el bot con tus contactos:';
+
+    const botLink = 'https://t.me/EzerBot';
+
+    const waText = encodeURIComponent(
+      'Te paso el bot de Todo Queso Club para hacer pedidos por Telegram: ' + botLink
+    );
+    const tgText = encodeURIComponent(
+      'Bot de Todo Queso Club para hacer pedidos: ' + botLink
+    );
+    const mailSubject = encodeURIComponent('Bot Todo Queso Club');
+    const mailBody = encodeURIComponent(
+      'Te comparto el bot de Todo Queso Club para hacer pedidos:\n' + botLink
+    );
+
+    await bot.sendMessage(chatId, shareText, {
+      parse_mode: 'Markdown',
       reply_markup: {
         inline_keyboard: [
-          [{ text: '💵 Efectivo', callback_data: 'pay_cash' }],
-          [{ text: '🏦 Transferencia', callback_data: 'pay_transfer' }],
-          [{ text: '⬅ Cancelar', callback_data: 'back_menu' }]
-        ]
-      }
+          [
+            {
+              text: '📲 WhatsApp',
+              url: `https://wa.me/?text=${waText}`,
+            },
+          ],
+          [
+            {
+              text: '📨 Telegram',
+              url: `https://t.me/share/url?url=${botLink}&text=${tgText}`,
+            },
+          ],
+          [
+            {
+              text: '📧 Email',
+              url: `mailto:?subject=${mailSubject}&body=${mailBody}`,
+            },
+          ],
+        ],
+      },
     });
     return;
   }
 
-  // Otros mensajes fuera de flujo: ignorar o responder suave
+  // Flujo de checkout: address / name / phone
+  const state = userStates[chatId];
+  if (!state) return;
+
+  if (state.step === 'ask_address') {
+    state.address = text;
+    state.step = 'ask_name';
+    bot.sendMessage(chatId, '🧾 Tu nombre para el pedido:');
+    return;
+  }
+
+  if (state.step === 'ask_name') {
+    state.name = text;
+    state.step = 'ask_phone';
+    bot.sendMessage(chatId, '📞 Tu teléfono:');
+    return;
+  }
+
+  if (state.step === 'ask_phone') {
+    state.phone = text;
+    state.step = 'choose_payment';
+
+    bot.sendMessage(chatId, 'Elegí el método de pago:', {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '💵 Efectivo', callback_data: 'pago_efectivo' }],
+          [{ text: '🏦 Transferencia', callback_data: 'pago_transferencia' }],
+        ],
+      },
+    });
+    return;
+  }
 });
 
-// === HANDLERS DE CALLBACKS ===
+// =====================
+// HANDLERS DE CALLBACKS
+// =====================
 
 bot.on('callback_query', async (query) => {
   const chatId = query.message.chat.id;
   const data = query.data;
-  const session = getSession(chatId);
+  const state = userStates[chatId] || {};
 
-  // Navegación básica
-  if (data === 'back_menu') {
-    await bot.answerCallbackQuery(query.id);
-    await sendWelcome(chatId);
+  // --- Catálogo: elegir categoría ---
+  if (data.startsWith('cat_')) {
+    const category = data.substring(4);
+    showProduct(chatId, category, 0);
+    bot.answerCallbackQuery(query.id);
     return;
   }
 
   if (data === 'back_categories') {
-    await bot.answerCallbackQuery(query.id);
-    await showCategories(chatId);
+    await sendCategoryList(chatId);
+    bot.answerCallbackQuery(query.id);
+    return;
+  }
+
+  if (data === 'nav_prev' || data === 'nav_next') {
+    const st = userCatalogState[chatId];
+    if (!st || !st.category) {
+      bot.answerCallbackQuery(query.id);
+      return;
+    }
+    const delta = data === 'nav_prev' ? -1 : 1;
+    showProduct(chatId, st.category, (st.index || 0) + delta);
+    bot.answerCallbackQuery(query.id);
+    return;
+  }
+
+  // --- Agregar producto al carrito ---
+  if (data.startsWith('add_')) {
+    const productId = data.substring(4);
+    addToCart(chatId, productId);
+    bot.answerCallbackQuery(query.id, { text: 'Producto agregado al carrito ✅' });
     return;
   }
 
   if (data === 'view_cart') {
-    await bot.answerCallbackQuery(query.id);
-    await showCart(chatId);
+    await sendCart(chatId);
+    bot.answerCallbackQuery(query.id);
     return;
   }
 
   if (data === 'empty_cart') {
-    await bot.answerCallbackQuery(query.id, { text: 'Carrito vaciado.' });
-    session.cart = [];
-    await showCart(chatId);
+    userCart[chatId] = [];
+    bot.answerCallbackQuery(query.id, { text: 'Carrito vaciado' });
+    await sendCart(chatId);
     return;
   }
 
-  if (data === 'checkout') {
-    await bot.answerCallbackQuery(query.id);
-    await startCheckout(chatId);
+  if (data === 'go_checkout') {
+    bot.answerCallbackQuery(query.id);
+    startCheckout(chatId);
     return;
   }
 
-  // Categorías
-  if (data.startsWith('cat_')) {
-    await bot.answerCallbackQuery(query.id);
-    const categoryKey = data.replace('cat_', '');
-    await sendProductCard(chatId, categoryKey, 0);
-    return;
-  }
-
-  // Carrusel next/prev
-  if (data.startsWith('prod_prev_') || data.startsWith('prod_next_')) {
-    await bot.answerCallbackQuery(query.id);
-    const isPrev = data.startsWith('prod_prev_');
-    const categoryKey = data.replace('prod_prev_', '').replace('prod_next_', '');
-    const current = session.currentCategory === categoryKey ? session.currentIndex : 0;
-    const newIndex = isPrev ? current - 1 : current + 1;
-    await sendProductCard(chatId, categoryKey, newIndex);
-    return;
-  }
-
-  // Agregar al carrito
-  if (data.startsWith('add_')) {
-    await bot.answerCallbackQuery(query.id, { text: 'Producto agregado al carrito.' });
-    const productId = data.replace('add_', '');
-
-    let foundProduct = null;
-    for (const key of Object.keys(catalog)) {
-      const p = catalog[key].find((x) => x.id === productId);
-      if (p) {
-        foundProduct = p;
-        break;
-      }
+  // --- Compartir producto ---
+  if (data.startsWith('shareprod_')) {
+    const productId = data.substring('shareprod_'.length);
+    const p = CATALOG.find((x) => x.id === productId);
+    if (!p) {
+      bot.answerCallbackQuery(query.id);
+      return;
     }
-    if (!foundProduct) return;
 
-    const existing = session.cart.find((it) => it.id === productId);
-    if (existing) existing.qty += 1;
-    else session.cart.push({ id: productId, name: foundProduct.name, price: foundProduct.price, qty: 1 });
+    const botLink = 'https://t.me/EzerBot';
+    const baseText = `Mirá este producto de Todo Queso Club: ${p.nombre} - $${Number(
+      p.precio
+    ).toLocaleString('es-AR')}.\nLo podés pedir desde el bot: ${botLink}`;
 
-    await bot.sendMessage(chatId, `✅ Agregado: *${foundProduct.name}*\n¿Qué querés hacer ahora?`, {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '🛍 Seguir viendo', callback_data: `back_categories` }],
-          [{ text: '🧾 Ver carrito', callback_data: 'view_cart' }]
-        ]
-      }
-    });
-    return;
-  }
+    const waText = encodeURIComponent(baseText);
+    const tgText = encodeURIComponent(baseText);
 
-  // Compartir producto (texto listo para reenviar)
-  if (data.startsWith('share_')) {
-    await bot.answerCallbackQuery(query.id);
-    const productId = data.replace('share_', '');
-
-    let foundProduct = null;
-    for (const key of Object.keys(catalog)) {
-      const p = catalog[key].find((x) => x.id === productId);
-      if (p) {
-        foundProduct = p;
-        break;
-      }
-    }
-    if (!foundProduct) return;
-
-    const shareText =
-      `📣 *Mirá este producto de Todo Queso Club*\n\n` +
-      `*${foundProduct.name}*\n` +
-      `💵 ${formatPrice(foundProduct.price)}\n` +
-      (foundProduct.description ? `${foundProduct.description}\n\n` : '\n') +
-      `Pedilo por el bot: ${BOT_PUBLIC_LINK}`;
-
-    await bot.sendMessage(chatId, shareText, { parse_mode: 'Markdown' });
-    return;
-  }
-
-  // Entrega
-  if (data === 'delivery_envio' || data === 'delivery_retiro') {
-    await bot.answerCallbackQuery(query.id);
-    session.delivery.type = data === 'delivery_envio' ? 'envio' : 'retiro';
-
-    if (data === 'delivery_envio') {
-      session.step = 'ask_address';
-      await bot.sendMessage(
-        chatId,
-        '📍 Pasame tu dirección completa (calle + número + entre calles / referencia):'
-      );
-    } else {
-      session.step = 'ask_name';
-      await bot.sendMessage(chatId, '🧾 Decime tu nombre para el pedido:');
-    }
-    return;
-  }
-
-  // Pago
-  if (data === 'pay_cash' || data === 'pay_transfer') {
-    await bot.answerCallbackQuery(query.id);
-
-    const paymentType = data === 'pay_cash' ? 'Efectivo' : 'Transferencia';
-
-    const { subtotal } = getCartSummary(session);
-
-    const order = {
-      id: lastOrderId++,
+    await bot.sendMessage(
       chatId,
-      items: [...session.cart],
-      subtotal,
-      delivery: { ...session.delivery },
-      paymentType
-    };
-
-    session.pendingOrder = order;
-    session.step = null;
-    session.cart = []; // vaciamos carrito al generar pedido
-
-    // Ticket para cliente
-    const ticketText = buildTicket(order);
-    await bot.sendMessage(chatId, ticketText, { parse_mode: 'Markdown' });
-
-    if (paymentType === 'Transferencia') {
-      await bot.sendMessage(
-        chatId,
-        `🏦 Recordá enviar el comprobante de transferencia por acá cuando lo tengas.\nAlias: \`${ALIAS_TRANSFERENCIA}\``,
-        { parse_mode: 'Markdown' }
-      );
-    } else {
-      await bot.sendMessage(chatId, '💵 Pagás en efectivo al recibir o retirar tu pedido.');
-    }
-
-    // Ticket para vendedor
-    const sellerText = '📢 *Nuevo pedido recibido*\n\n' + buildTicket(order);
-    await bot.sendMessage(OWNER_CHAT_ID, sellerText, {
-      parse_mode: 'Markdown',
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '✅ Pago recibido', callback_data: `confirm_pay_${order.id}` }]
-        ]
+      `📤 Compartir *${p.nombre}*`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: '📲 WhatsApp',
+                url: `https://wa.me/?text=${waText}`,
+              },
+            ],
+            [
+              {
+                text: '📨 Telegram',
+                url: `https://t.me/share/url?url=${botLink}&text=${tgText}`,
+              },
+            ],
+          ],
+        },
       }
-    });
-
-    // Sumar sello
-    session.stamps = (session.stamps || 0) + 1;
-
+    );
+    bot.answerCallbackQuery(query.id);
     return;
   }
 
-  // Confirmación de pago por parte del vendedor
-  if (data.startsWith('confirm_pay_') && chatId === OWNER_CHAT_ID) {
-    await bot.answerCallbackQuery(query.id, { text: 'Pago confirmado.' });
-    const orderId = parseInt(data.replace('confirm_pay_', ''), 10);
+  // --- Checkout: tipo de entrega ---
+  if (data === 'envio_domicilio') {
+    state.deliveryType = 'envio';
+    state.step = 'ask_address';
+    userStates[chatId] = state;
 
-    // Buscar a qué usuario pertenece ese pedido
-    let targetChat = null;
-    for (const [cid, sess] of Object.entries(sessions)) {
-      if (sess.pendingOrder && sess.pendingOrder.id === orderId) {
-        targetChat = Number(cid);
-        break;
-      }
+    bot.answerCallbackQuery(query.id);
+    bot.sendMessage(chatId, '📍 Pasame tu dirección completa (calle + número + entre calles / referencia):');
+    return;
+  }
+
+  if (data === 'retiro_local') {
+    state.deliveryType = 'retiro';
+    state.step = 'ask_name';
+    userStates[chatId] = state;
+
+    bot.answerCallbackQuery(query.id);
+    bot.sendMessage(chatId, '🧾 Tu nombre para el pedido:');
+    return;
+  }
+
+  // --- Checkout: método de pago ---
+  if (data === 'pago_efectivo' || data === 'pago_transferencia') {
+    if (state.step !== 'choose_payment') {
+      bot.answerCallbackQuery(query.id);
+      return;
     }
 
-    if (targetChat) {
-      await bot.sendMessage(
-        targetChat,
-        '✅ Tu pago fue confirmado. Estamos preparando tu pedido. ¡Gracias por elegir Todo Queso!'
-      );
+    state.paymentType =
+      data === 'pago_efectivo' ? 'Efectivo' : 'Transferencia';
+    userStates[chatId] = state;
+    bot.answerCallbackQuery(query.id);
+
+    const cart = getCart(chatId);
+    let total = 0;
+    cart.forEach((i) => (total += i.precio * i.cantidad));
+
+    let deliveryText = '';
+    if (state.deliveryType === 'envio') {
+      deliveryText = 'Envío a domicilio 🚚';
+    } else if (state.deliveryType === 'retiro') {
+      deliveryText = 'Retiro en el local 🏪';
+    } else {
+      deliveryText = 'Sin especificar';
     }
 
+    let ticket =
+      '🧾 *Ticket de compra*\n' +
+      'Todo Queso Club\n' +
+      '────────────────────\n' +
+      `👤 Cliente: ${state.name || 'Sin nombre'}\n` +
+      `📞 Tel: ${state.phone || 'Sin teléfono'}\n` +
+      `💬 ChatID: ${chatId}\n\n` +
+      '*Detalle:*\n';
+
+    cart.forEach((item) => {
+      const subtotal = item.precio * item.cantidad;
+      ticket += `• ${item.cantidad} × ${item.nombre} — $${subtotal.toLocaleString(
+        'es-AR'
+      )}\n`;
+    });
+
+    ticket +=
+      `\n*Subtotal:* $${total.toLocaleString('es-AR')}\n` +
+      `*Envío:* $0 (no configurado)\n` +
+      `*TOTAL:* $${total.toLocaleString('es-AR')}\n\n` +
+      `🚚 *Entrega:* ${deliveryText}\n`;
+
+    if (state.deliveryType === 'envio' && state.address) {
+      ticket += `📍 Dirección: ${state.address}\n`;
+    }
+
+    ticket += `💳 *Pago:* ${state.paymentType}\n\n`;
+
+    if (state.paymentType === 'Transferencia') {
+      ticket +=
+        `Alias para transferir: \`${ALIAS_TRANSFERENCIA}\`\n` +
+        '📌 Enviá el comprobante por acá para confirmar el pedido.';
+    } else {
+      ticket += '💵 Pagás en efectivo al retirar o al recibir el pedido.';
+    }
+
+    await bot.sendMessage(chatId, ticket, { parse_mode: 'Markdown' });
+
+    // Sumar sello por compra confirmada (simple por ahora)
+    addStamp(chatId);
+
+    await bot.sendMessage(
+      chatId,
+      'Gracias. Tu compra fue registrada ✅\n\nCuando el vendedor confirme el pago, comenzamos a preparar tu pedido.'
+    );
+
+    // Vaciar carrito
+    userCart[chatId] = [];
     return;
   }
 });
 
-// === MINI SERVIDOR HTTP PARA RENDER ===
+console.log('EzerBot Todo Queso iniciado…');
+
+// =====================
+// MINI SERVIDOR HTTP PARA RENDER
+// =====================
 
 const PORT = process.env.PORT || 10000;
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('EzerBot / Todo Queso está corriendo ✅');
+  res.end('EzerBot está corriendo ✅');
 });
 
 server.listen(PORT, () => {
-  console.log(`Servidor HTTP de salud escuchando en el puerto ${PORT}`);
+  console.log(`Servidor HTTP escuchando en puerto ${PORT}`);
 });
