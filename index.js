@@ -1,11 +1,83 @@
-// Estado por usuario: catálogo tipo libro + carrito + checkout
+// index.js (ESM) — EzerBot Render Webhook + Config/Catalogo desde Google Sheets (Apps Script)
+// Requisitos Render ENV: BOT_TOKEN, SHEETS_API_BASE, PUBLIC_URL
+// PUBLIC_URL = https://ezerbot-system.onrender.com  (SIN / al final)
+// SHEETS_API_BASE = https://script.google.com/macros/s/XXXX/exec
+
+import TelegramBot from "node-telegram-bot-api";
+import http from "http";
+import { URL } from "url";
+
+// =====================
+// 1) ENV
+// =====================
+const BOT_TOKEN = process.env.BOT_TOKEN || "";
+const SHEETS_API_BASE = process.env.SHEETS_API_BASE || ""; // https://script.google.com/macros/s/.../exec
+const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, ""); // https://ezerbot-system.onrender.com
+const PORT = Number(process.env.PORT || 10000);
+
+// Webhook path fijo:
+const WEBHOOK_PATH = "/telegram";
+const WEBHOOK_URL = PUBLIC_URL ? `${PUBLIC_URL}${WEBHOOK_PATH}` : "";
+
+if (!BOT_TOKEN) console.log("❌ FALTA BOT_TOKEN en Render > Environment");
+if (!SHEETS_API_BASE) console.log("❌ FALTA SHEETS_API_BASE en Render > Environment");
+if (!PUBLIC_URL) console.log("❌ FALTA PUBLIC_URL en Render > Environment (ej: https://ezerbot-system.onrender.com)");
+
+// =====================
+// 2) BOT (WEBHOOK ONLY)
+// =====================
+const bot = new TelegramBot(BOT_TOKEN, { webHook: true });
+
+// =====================
+// 3) CACHE (Config + Catalogo)
+// =====================
+const CACHE_TTL_MS = 30 * 1000;
+let cacheConfig = { at: 0, data: null };
+let cacheCatalog = { at: 0, data: null };
+
+async function fetchJSON(url) {
+  const r = await fetch(url, { method: "GET" });
+  const txt = await r.text();
+  let j;
+  try {
+    j = JSON.parse(txt);
+  } catch {
+    throw new Error(`Respuesta no JSON desde ${url}: ${txt.slice(0, 200)}`);
+  }
+  return j;
+}
+
+async function getConfig() {
+  const now = Date.now();
+  if (cacheConfig.data && now - cacheConfig.at < CACHE_TTL_MS) return cacheConfig.data;
+
+  if (!SHEETS_API_BASE) return {};
+  const url = `${SHEETS_API_BASE}?type=config&_=${now}`;
+  const data = await fetchJSON(url);
+  cacheConfig = { at: now, data };
+  return data;
+}
+
+async function getCatalog() {
+  const now = Date.now();
+  if (cacheCatalog.data && now - cacheCatalog.at < CACHE_TTL_MS) return cacheCatalog.data;
+
+  if (!SHEETS_API_BASE) return [];
+  const url = `${SHEETS_API_BASE}?type=catalog&_=${now}`;
+  const data = await fetchJSON(url);
+  cacheCatalog = { at: now, data: Array.isArray(data) ? data : [] };
+  return cacheCatalog.data;
+}
+
+// =====================
+// 4) STATE (RAM)
+// =====================
 const userState = new Map(); // chatId -> state
 
 function getState(chatId) {
   if (!userState.has(chatId)) {
     userState.set(chatId, {
       catFilter: "ALL",
-      // "Book view" (1 producto por vez)
       bookIndex: 0,
       bookMsgId: null,
       bookHasPhoto: false,
@@ -32,7 +104,6 @@ function safeStr(v) {
 
 function normalizeUnit(u) {
   const s = safeStr(u).toLowerCase();
-  // Acepta "kg", "kilo", "kilos", etc.
   if (s.includes("kg") || s.includes("kilo")) return "kg";
   return "unidad";
 }
@@ -44,18 +115,26 @@ function qtyStepForUnit(unit) {
 function roundQty(q, unit) {
   const n = Number(q || 0);
   if (!isFinite(n) || n <= 0) return 0;
-  if (unit === "kg") return Math.round(n * 100) / 100; // 2 dec
+  if (unit === "kg") return Math.round(n * 100) / 100;
   return Math.round(n);
 }
 
 function pickFirstNumber(v, fallback = 10) {
   const s = safeStr(v);
   if (!s) return fallback;
-  // si viene "10|30|50" o "10,30,50"
   const m = s.match(/(\d+(\.\d+)?)/);
   if (!m) return fallback;
   const n = Number(m[1]);
   return isFinite(n) && n > 0 ? n : fallback;
+}
+
+function parseMoneyNumber(v, fallback = 0) {
+  const s = safeStr(v);
+  if (!s) return fallback;
+  // Acepta "2000", "$2.000", "2.000", "2000,50"
+  const cleaned = s.replace(/\$/g, "").replace(/\./g, "").replace(",", ".");
+  const n = Number(cleaned);
+  return isFinite(n) ? n : fallback;
 }
 
 // =====================
@@ -83,13 +162,11 @@ async function sendWelcome(chatId) {
   const ig = safeStr(cfg.Instagram) || "";
   const logo = safeStr(cfg.LogoURL);
 
-  // Saludo configurable (si existe en Config)
   const saludoConfig = safeStr(cfg.SaludoInicial) || safeStr(cfg.TextoSaludo) || "";
   const saludoDefault = `¡Hola! 👋 Bienvenid@ a *${negocio}* 🧀✨\nElegí del *Catálogo*, armá tu carrito y confirmá en 1 minuto. ¿Arrancamos? 😄`;
 
   let text = "";
-  if (saludoConfig) text += `${saludoConfig}\n\n`;
-  else text += `${saludoDefault}\n\n`;
+  text += saludoConfig ? `${saludoConfig}\n\n` : `${saludoDefault}\n\n`;
 
   text += `🧀 *${negocio}*\n`;
   text += `📍 ${dir}\n`;
@@ -108,16 +185,13 @@ async function sendWelcome(chatId) {
         reply_markup: mainMenuKeyboard(),
       });
       return;
-    } catch {
-      // fallback
-    }
+    } catch {}
   }
 
   await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 }
 
 function shareInlineButtons(cfg = {}) {
-  // Permite configurar el link del bot desde Config (si querés)
   const botLink = safeStr(cfg.BotLink) || safeStr(cfg.LinkBot) || "https://t.me/EzerBot";
   const waText = encodeURIComponent(`Pedí por el bot 🧀👇\n${botLink}`);
   const mailSubj = encodeURIComponent("Te comparto el bot para pedir");
@@ -126,12 +200,7 @@ function shareInlineButtons(cfg = {}) {
   return {
     inline_keyboard: [
       [{ text: "💬 WhatsApp", url: `https://wa.me/?text=${waText}` }],
-      [
-        {
-          text: "✈️ Telegram",
-          url: `https://t.me/share/url?url=${encodeURIComponent(botLink)}&text=${encodeURIComponent("Pedí por el bot:")}`,
-        },
-      ],
+      [{ text: "✈️ Telegram", url: `https://t.me/share/url?url=${encodeURIComponent(botLink)}&text=${encodeURIComponent("Pedí por el bot:")}` }],
       [{ text: "📧 Email", url: `mailto:?subject=${mailSubj}&body=${mailBody}` }],
     ],
   };
@@ -141,16 +210,13 @@ async function sendStampsCard(chatId) {
   const cfg = await getConfig();
   const usa = (safeStr(cfg.UsaSellos) || "NO").toUpperCase() === "SI";
 
-  // OJO: en tu Config se ve "SelloURL" como URL a imagen, y también tenés "TarjetaURL"
   const cardUrl = safeStr(cfg.TarjetaURL) || safeStr(cfg.SelloURL);
-  // Premio: si tenés algo tipo BeneficioSellos o BeneficioNivel, usar eso primero
   const premio =
     safeStr(cfg.PremioSellos) ||
     safeStr(cfg.BeneficioSellos) ||
     safeStr(cfg.BeneficioCumple) ||
     "Premio configurable";
 
-  // Evita NaN si viene "10|30|50"
   const meta = pickFirstNumber(cfg.SellosPorNivel, 10);
 
   if (!usa) {
@@ -158,9 +224,7 @@ async function sendStampsCard(chatId) {
     return;
   }
 
-  // Por ahora queda en 0 (como estaba), después lo conectás por cliente
   const sellos = 0;
-
   const bar = "🟩".repeat(Math.min(sellos, meta)) + "⬜".repeat(Math.max(0, meta - sellos));
 
   const text =
@@ -174,9 +238,7 @@ async function sendStampsCard(chatId) {
     try {
       await bot.sendPhoto(chatId, cardUrl, { caption: text, parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
       return;
-    } catch {
-      // fallback
-    }
+    } catch {}
   }
   await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 }
@@ -214,7 +276,7 @@ function productCaption(p, idx, total, filterLabel) {
   return cap;
 }
 
-function bookButtons(st, canPrev, canNext, code) {
+function bookButtons(code) {
   return {
     inline_keyboard: [
       [
@@ -226,9 +288,7 @@ function bookButtons(st, canPrev, canNext, code) {
         { text: "📤 Compartir", callback_data: `BOOK:SHARE:${code}` },
         { text: "🛒 Ver carrito", callback_data: "OPEN:CART" },
       ],
-      [
-        { text: "🏷️ Categorías", callback_data: "BOOK:CATS" },
-      ],
+      [{ text: "🏷️ Categorías", callback_data: "BOOK:CATS" }],
     ].map((row) => row.filter(Boolean)),
   };
 }
@@ -237,7 +297,6 @@ async function renderBook(chatId, forceNewMessage = false) {
   const st = getState(chatId);
   const full = await getCatalog();
   const list = filterCatalog(full, st.catFilter);
-  const cats = uniqueCategories(full);
 
   if (!list.length) {
     await bot.sendMessage(chatId, "Por ahora no hay productos cargados en el catálogo.", { reply_markup: mainMenuKeyboard() });
@@ -249,17 +308,11 @@ async function renderBook(chatId, forceNewMessage = false) {
 
   const p = list[st.bookIndex];
   const code = safeStr(p.codigo || p.id);
-  const img = safeStr(p.imagen); // importante: en tu sheet la col se llama IMAGEN
+  const img = safeStr(p.imagen);
   const caption = productCaption(p, st.bookIndex, list.length, st.catFilter !== "ALL" ? st.catFilter : "");
-  const canPrev = st.bookIndex > 0;
-  const canNext = st.bookIndex < list.length - 1;
+  const markup = bookButtons(code);
 
-  // Botones con navegación
-  const markup = bookButtons(st, canPrev, canNext, code);
-
-  // Si no hay imagen -> mensaje normal (igual editable con editMessageText)
   if (!img) {
-    // Intento editar si tengo msgId y no forzo nuevo
     if (st.bookMsgId && !forceNewMessage) {
       try {
         await bot.editMessageText(caption, {
@@ -270,9 +323,7 @@ async function renderBook(chatId, forceNewMessage = false) {
         });
         st.bookHasPhoto = false;
         return;
-      } catch {
-        // si falla, cae a enviar nuevo
-      }
+      } catch {}
     }
     const sent = await bot.sendMessage(chatId, caption, { parse_mode: "Markdown", reply_markup: markup });
     st.bookMsgId = sent.message_id;
@@ -280,45 +331,21 @@ async function renderBook(chatId, forceNewMessage = false) {
     return;
   }
 
-  // Con imagen: preferimos editar la misma "página" para no ensuciar el chat
   if (st.bookMsgId && !forceNewMessage) {
     try {
-      // Si el mensaje anterior tenía foto: editMessageMedia
       if (st.bookHasPhoto) {
         await bot.editMessageMedia(
-          {
-            type: "photo",
-            media: img,
-            caption,
-            parse_mode: "Markdown",
-          },
-          {
-            chat_id: chatId,
-            message_id: st.bookMsgId,
-            reply_markup: markup,
-          }
+          { type: "photo", media: img, caption, parse_mode: "Markdown" },
+          { chat_id: chatId, message_id: st.bookMsgId, reply_markup: markup }
         );
         return;
       }
-
-      // Si el anterior era texto y ahora es foto, a veces Telegram no deja cambiar tipo:
-      // En ese caso mandamos uno nuevo y guardamos msgId.
-    } catch {
-      // fallback a nuevo
-    }
+    } catch {}
   }
 
-  // Enviar nuevo con foto
-  const sent = await bot.sendPhoto(chatId, img, {
-    caption,
-    parse_mode: "Markdown",
-    reply_markup: markup,
-  });
+  const sent = await bot.sendPhoto(chatId, img, { caption, parse_mode: "Markdown", reply_markup: markup });
   st.bookMsgId = sent.message_id;
   st.bookHasPhoto = true;
-
-  // Opcional: mostramos categorías (solo si el usuario las pide con botón)
-  // (Para no recargar el chat)
 }
 
 async function sendCategoriesInline(chatId) {
@@ -331,10 +358,8 @@ async function sendCategoriesInline(chatId) {
     return;
   }
 
-  // Armamos filas de 3 botones para que no quede gigante
   const rows = [];
-  const allBtn = [{ text: "📚 Todas", callback_data: "CATF:ALL" }];
-  rows.push(allBtn);
+  rows.push([{ text: "📚 Todas", callback_data: "CATF:ALL" }]);
 
   let row = [];
   for (const c of cats) {
@@ -366,9 +391,7 @@ async function addToCart(chatId, code, askQty = true) {
     return;
   }
 
-  // Si pedimos cantidad, dejamos esperando
   if (askQty) {
-    // Aseguramos que exista en carrito con qty temporal
     if (!st.cart.has(code)) st.cart.set(code, { prod, qty: 0 });
 
     st.awaitingQtyFor = code;
@@ -390,7 +413,6 @@ async function addToCart(chatId, code, askQty = true) {
     return;
   }
 
-  // Si no preguntamos cantidad, sumar por step
   const unit = normalizeUnit(prod.unidad);
   const step = qtyStepForUnit(unit);
 
@@ -445,7 +467,7 @@ async function showCart(chatId) {
     ]);
   }
 
-  text += `Total: *${moneyARS(cartTotal(st))}*`;
+  text += `Total productos: *${moneyARS(cartTotal(st))}*`;
 
   const inline = {
     inline_keyboard: [
@@ -457,6 +479,111 @@ async function showCart(chatId) {
 
   await bot.sendMessage(chatId, text, { parse_mode: "Markdown", reply_markup: inline });
 }
+
+// =====================
+// 8) CHECKOUT (flow)
+// =====================
+function startCheckout(chatId) {
+  const st = getState(chatId);
+  if (!st.cart.size) {
+    bot.sendMessage(chatId, "Tu carrito está vacío. Agregá productos desde *Catálogo*.", { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
+    return;
+  }
+
+  st.flow = {
+    step: "choose_delivery",
+    deliveryType: null,
+    address: null,
+    name: null,
+    phone: null,
+    payment: null,
+  };
+
+  bot.sendMessage(chatId, "Elegí cómo querés recibir tu pedido 👇", {
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🚚 Envío a domicilio", callback_data: "CHK:DELIVERY" }],
+        [{ text: "🏪 Retiro por el local", callback_data: "CHK:PICKUP" }],
+      ],
+    },
+  });
+}
+
+async function finalizeOrder(chatId) {
+  const st = getState(chatId);
+  const cfg = await getConfig();
+  const flow = st.flow;
+
+  const negocio = safeStr(cfg.NegocioNombre) || "Todo Queso";
+  const alias = safeStr(cfg.AliasPago) || "jennyocampos.mp";
+  const waNegocio = safeStr(cfg.WhatsAppLink);
+  const chatVendedor = Number(cfg.ChatIdVendedor || 0);
+
+  // ✅ Costo envío desde Config (soporta CostoEnvio o EnvioCosto)
+  const costoEnvio = parseMoneyNumber(cfg.CostoEnvio ?? cfg.EnvioCosto, 0);
+  const aplicaEnvio = flow.deliveryType === "envio";
+  const envioFinal = aplicaEnvio ? costoEnvio : 0;
+
+  // detalle carrito
+  let detalle = "";
+  for (const { prod, qty } of st.cart.values()) {
+    const unit = normalizeUnit(prod.unidad);
+    const lt = Number(prod.precio || 0) * Number(qty || 0);
+    detalle += `- ${safeStr(prod.nombre)} | ${qty} ${unit} | ${moneyARS(lt)}\n`;
+  }
+
+  const totalProductosNum = cartTotal(st);
+  const totalFinalNum = totalProductosNum + envioFinal;
+
+  const totalProductos = moneyARS(totalProductosNum);
+  const totalFinal = moneyARS(totalFinalNum);
+  const entregaTxt = aplicaEnvio ? "🚚 Envío a domicilio" : "🏪 Retiro por el local";
+
+  let resumen =
+    `✅ *Pedido confirmado (pendiente de pago/validación)*\n\n` +
+    `*${negocio}*\n` +
+    `Entrega: *${entregaTxt}*\n` +
+    (aplicaEnvio ? `Dirección: *${safeStr(flow.address)}*\n` : "") +
+    `Nombre: *${safeStr(flow.name)}*\n` +
+    `Teléfono: *${safeStr(flow.phone)}*\n` +
+    `Pago: *${safeStr(flow.payment)}*\n\n` +
+    `🧾 *Detalle:*\n${detalle}\n` +
+    `🧮 Total productos: *${totalProductos}*\n` +
+    (aplicaEnvio ? `🚚 Envío: *${moneyARS(envioFinal)}*\n` : "") +
+    `💰 *Total final: ${totalFinal}*\n`;
+
+  if (flow.payment === "Transferencia") {
+    resumen += `\n🏦 Alias para transferir: \`${alias}\`\n📌 Cuando transfieras, mandá el comprobante por acá.`;
+  } else {
+    resumen += `\n💵 Pagás en efectivo al retirar o al recibir el pedido.`;
+  }
+
+  await bot.sendMessage(chatId, resumen, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
+
+  // Aviso al vendedor
+  if (chatVendedor) {
+    const vendedorMsg =
+      `🛎️ *Nuevo pedido*\n\n` +
+      `Cliente: *${safeStr(flow.name)}*\n` +
+      `Tel: *${safeStr(flow.phone)}*\n` +
+      `Entrega: *${entregaTxt}*\n` +
+      (aplicaEnvio ? `Dirección: *${safeStr(flow.address)}*\n` : "") +
+      `Pago: *${safeStr(flow.payment)}*\n\n` +
+      `🧾 *Detalle:*\n${detalle}\n` +
+      `🧮 Total productos: *${totalProductos}*\n` +
+      (aplicaEnvio ? `🚚 Envío: *${moneyARS(envioFinal)}*\n` : "") +
+      `💰 *Total final: ${totalFinal}*\n`;
+
+    try {
+      await bot.sendMessage(chatVendedor, vendedorMsg, { parse_mode: "Markdown" });
+    } catch (e) {
+      console.log("No pude avisar al vendedor:", e?.message || e);
+    }
+  }
+
+  if (waNegocio && waNegocio.toUpperCase() !== "NO") {
+    await bot.sendMessage(chatId, `📲 Si querés, también podés escribirnos por WhatsApp: ${waNegocio}`, { reply_markup: mainMenuKeyboard() });
+  }
 
   st.flow = null;
 }
@@ -471,7 +598,7 @@ bot.on("message", async (msg) => {
 
   const st = getState(chatId);
 
-  // Si está esperando cantidad manual:
+  // esperando cantidad
   if (st.awaitingQtyFor) {
     const code = st.awaitingQtyFor;
     const it = st.cart.get(code);
@@ -484,7 +611,6 @@ bot.on("message", async (msg) => {
 
     const unit = normalizeUnit(it.prod.unidad);
 
-    // Acepta: "300", "300g", "0.3", "0,3", "1kg"
     const raw = safeStr(textRaw).toLowerCase().replace(",", ".");
     let n = Number(raw.replace(/[^0-9.]/g, ""));
 
@@ -493,14 +619,9 @@ bot.on("message", async (msg) => {
       return;
     }
 
-    // Si es kg y escribió un número grande (ej 300), lo interpretamos como gramos
     if (unit === "kg") {
-      if (raw.includes("g") && !raw.includes("kg")) {
-        n = n / 1000;
-      } else if (n >= 10) {
-        // 300 => 0.3kg
-        n = n / 1000;
-      }
+      if (raw.includes("g") && !raw.includes("kg")) n = n / 1000;
+      else if (n >= 10) n = n / 1000;
     }
 
     it.qty = roundQty(n, unit);
@@ -513,11 +634,59 @@ bot.on("message", async (msg) => {
     st.cart.set(code, it);
     await bot.sendMessage(chatId, `✅ Agregado: *${safeStr(it.prod.nombre)}* → *${it.qty}* ${unit}`, { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 
-    // Sugerencia suave (vendedor)
     const cfg = await getConfig();
     const suger = safeStr(cfg.TextoSugerenciaVendedor) || "💡 Tip: si querés, sumá algo más del catálogo y aprovechás el pedido 😉";
     await bot.sendMessage(chatId, suger, { reply_markup: mainMenuKeyboard() });
-    // catálogo tipo libro
+    return;
+  }
+
+  // checkout flow
+  if (st.flow && st.flow.step) {
+    const flow = st.flow;
+
+    if (flow.step === "ask_address") {
+      flow.address = textRaw;
+      flow.step = "ask_name";
+      await bot.sendMessage(chatId, "🧾 Tu nombre:");
+      return;
+    }
+    if (flow.step === "ask_name") {
+      flow.name = textRaw;
+      flow.step = "ask_phone";
+      await bot.sendMessage(chatId, "📞 Tu teléfono:");
+      return;
+    }
+    if (flow.step === "ask_phone") {
+      flow.phone = textRaw;
+      flow.step = "choose_payment";
+      await bot.sendMessage(chatId, "Perfecto. Ahora elegí el método de pago:", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "💵 Efectivo", callback_data: "CHK:PAY:CASH" }],
+            [{ text: "🏦 Transferencia", callback_data: "CHK:PAY:TRANSFER" }],
+          ],
+        },
+      });
+      return;
+    }
+  }
+
+  // start / saludos
+  if (
+    text === "/start" ||
+    text === "hola" ||
+    text === "buenas" ||
+    text === "buen día" ||
+    text === "buen dia" ||
+    text === "buenas tardes" ||
+    text === "buenas noches"
+  ) {
+    await sendWelcome(chatId);
+    return;
+  }
+
+  // menú
+  if (textRaw === "🛍️ Catálogo") {
     st.bookIndex = 0;
     await renderBook(chatId, true);
     return;
@@ -540,7 +709,6 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  // Default: re-mostrar menú
   await bot.sendMessage(chatId, "Elegí una opción del menú 👇", { reply_markup: mainMenuKeyboard() });
 });
 
@@ -552,23 +720,12 @@ bot.on("callback_query", async (q) => {
   const data = safeStr(q.data);
   const st = getState(chatId);
 
-  try {
-    await bot.answerCallbackQuery(q.id);
-  } catch {}
+  try { await bot.answerCallbackQuery(q.id); } catch {}
 
-  // Open catalog book
-  if (data === "OPEN:CAT") {
-    await renderBook(chatId, false);
-    return;
-  }
+  if (data === "OPEN:CAT") { await renderBook(chatId, false); return; }
 
-  // Categorías
-  if (data === "BOOK:CATS") {
-    await sendCategoriesInline(chatId);
-    return;
-  }
+  if (data === "BOOK:CATS") { await sendCategoriesInline(chatId); return; }
 
-  // Filtro categoría
   if (data.startsWith("CATF:")) {
     const f = data.slice("CATF:".length);
     st.catFilter = f === "ALL" ? "ALL" : f;
@@ -577,37 +734,22 @@ bot.on("callback_query", async (q) => {
     return;
   }
 
-  // Navegación del libro
-  if (data === "BOOK:PREV") {
-    st.bookIndex = Math.max(0, st.bookIndex - 1);
-    await renderBook(chatId, false);
-    return;
-  }
-  if (data === "BOOK:NEXT") {
-    st.bookIndex = st.bookIndex + 1;
-    await renderBook(chatId, false);
-    return;
-  }
+  if (data === "BOOK:PREV") { st.bookIndex = Math.max(0, st.bookIndex - 1); await renderBook(chatId, false); return; }
+  if (data === "BOOK:NEXT") { st.bookIndex = st.bookIndex + 1; await renderBook(chatId, false); return; }
 
-  // Agregar producto desde libro
   if (data.startsWith("BOOK:ADD:")) {
     const code = data.slice("BOOK:ADD:".length);
-    await addToCart(chatId, code, true); // pregunta cantidad según unidad
+    await addToCart(chatId, code, true);
     return;
   }
 
-  // Compartir un producto (por ahora comparte el bot; después lo hacemos producto + link)
   if (data.startsWith("BOOK:SHARE:")) {
     const cfg = await getConfig();
     await bot.sendMessage(chatId, "📤 Compartilo por donde quieras 👇", { reply_markup: shareInlineButtons(cfg) });
     return;
   }
 
-  // Carrito
-  if (data === "OPEN:CART") {
-    await showCart(chatId);
-    return;
-  }
+  if (data === "OPEN:CART") { await showCart(chatId); return; }
 
   if (data.startsWith("DEL:")) {
     const code = data.slice("DEL:".length);
@@ -627,3 +769,118 @@ bot.on("callback_query", async (q) => {
     await bot.sendMessage(chatId, `Escribí la cantidad para *${safeStr(it.prod.nombre)}*.\nEjemplo: ${example}`, {
       parse_mode: "Markdown",
       reply_markup: mainMenuKeyboard(),
+    });
+    return;
+  }
+
+  if (data.startsWith("QTY:INC:") || data.startsWith("QTY:DEC:")) {
+    const inc = data.startsWith("QTY:INC:");
+    const code = data.split(":").pop();
+    const it = st.cart.get(code);
+    if (!it) return;
+
+    const unit = normalizeUnit(it.prod.unidad);
+    const step = qtyStepForUnit(unit);
+    const next = inc ? Number(it.qty) + step : Number(it.qty) - step;
+    const qty = roundQty(next, unit);
+
+    if (qty <= 0) st.cart.delete(code);
+    else { it.qty = qty; st.cart.set(code, it); }
+
+    await showCart(chatId);
+    return;
+  }
+
+  if (data === "OPEN:CHECKOUT") { startCheckout(chatId); return; }
+
+  if (data === "CHK:DELIVERY") {
+    st.flow = st.flow || {};
+    st.flow.deliveryType = "envio";
+    st.flow.step = "ask_address";
+    await bot.sendMessage(chatId, "📍 Decime tu dirección completa:");
+    return;
+  }
+
+  if (data === "CHK:PICKUP") {
+    st.flow = st.flow || {};
+    st.flow.deliveryType = "retiro";
+    st.flow.step = "ask_name";
+    await bot.sendMessage(chatId, "🧾 Tu nombre:");
+    return;
+  }
+
+  if (data === "CHK:PAY:CASH" || data === "CHK:PAY:TRANSFER") {
+    if (!st.flow || st.flow.step !== "choose_payment") return;
+    st.flow.payment = data.endsWith("CASH") ? "Efectivo" : "Transferencia";
+    await finalizeOrder(chatId);
+    return;
+  }
+});
+
+// =====================
+// 11) HTTP SERVER (Render)
+// =====================
+const server = http.createServer((req, res) => {
+  try {
+    const u = new URL(req.url, `http://${req.headers.host}`);
+    if (u.pathname === "/") {
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("EzerBot está corriendo ✅");
+      return;
+    }
+
+    if (u.pathname === WEBHOOK_PATH && req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => (body += chunk));
+      req.on("end", async () => {
+        try {
+          const update = JSON.parse(body || "{}");
+          await bot.processUpdate(update);
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: true }));
+        } catch (e) {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.end(JSON.stringify({ ok: false, error: String(e?.message || e) }));
+        }
+      });
+      return;
+    }
+
+    if (u.pathname === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, webhook: WEBHOOK_URL, sheets: !!SHEETS_API_BASE }));
+      return;
+    }
+
+    res.writeHead(404, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error_code: 404, description: "Not Found" }));
+  } catch {
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end("Server error");
+  }
+});
+
+server.listen(PORT, async () => {
+  console.log(`HTTP escuchando en puerto ${PORT}`);
+
+  if (WEBHOOK_URL) {
+    try {
+      await bot.setWebHook(WEBHOOK_URL);
+      console.log("✅ Webhook seteado:", WEBHOOK_URL);
+    } catch (e) {
+      console.log("❌ Error setWebHook:", e?.message || e);
+    }
+  } else {
+    console.log("❌ No hay PUBLIC_URL, no se puede setear webhook.");
+  }
+
+  try {
+    const cfg = await getConfig();
+    const cat = await getCatalog();
+    console.log("✅ Warmup ok. Config keys:", Object.keys(cfg || {}).length, "Catalog items:", Array.isArray(cat) ? cat.length : 0);
+  } catch (e) {
+    console.log("❌ Warmup fetch error:", e?.message || e);
+  }
+
+  console.log("✅ EzerBot iniciado (WEBHOOK + Config/Catalogo desde Sheets)");
+});
