@@ -2,6 +2,7 @@ import TelegramBot from "node-telegram-bot-api";
 import http from "http";
 import { URL } from "url";
 
+
 /**
  * ENV requeridas:
  * BOT_TOKEN
