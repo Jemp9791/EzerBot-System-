@@ -1,11 +1,3 @@
-/**
- * EZER_IA_BOT - Telegram bot (Webhook root "/") + Catálogo con carrusel
- * ENV en Render:
- * - TELEGRAM_TOKEN
- * - PUBLIC_URL (sin barra final)
- * - SHEET_CSV_URL (CSV de Catalogo)
- */
-
 import express from "express";
 
 const app = express();
@@ -25,12 +17,11 @@ if (!SHEET_CSV_URL) console.error("Falta ENV SHEET_CSV_URL");
 
 const TG = (method) => `https://api.telegram.org/bot${TOKEN}/${method}`;
 
-// ---- Utils: Telegram API ----
 async function tgCall(method, payload) {
   const res = await fetch(TG(method), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload || {}),
   });
   const data = await res.json().catch(() => ({}));
   if (!data?.ok) console.error("Telegram API error:", method, data);
@@ -52,7 +43,25 @@ async function editMessageMedia(chat_id, message_id, photo, caption, extra = {})
   });
 }
 
-// ---- CSV parse (simple) ----
+// ---------- Normalización robusta ----------
+function normText(s) {
+  return String(s || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+// ---------- CSV ----------
 function parseCSV(text) {
   const rows = [];
   let row = [];
@@ -96,15 +105,15 @@ function parseCSV(text) {
   return rows;
 }
 
-// ---- Catalog cache ----
-let catalogCache = { at: 0, items: [], categories: [] };
-
 function normalizeUrl(u) {
   if (!u) return "";
   const m = u.match(/\((https?:\/\/[^)]+)\)/);
   if (m?.[1]) return m[1];
   return u.replace(/^\[|\]$/g, "").trim();
 }
+
+// ---------- Cache catálogo ----------
+let catalogCache = { at: 0, items: [], categories: [] };
 
 async function loadCatalog() {
   const now = Date.now();
@@ -154,70 +163,20 @@ async function loadCatalog() {
   return catalogCache;
 }
 
-// ---- State ----
-const userState = new Map();
+// ---------- Estado ----------
+const userState = new Map(); // chatId -> { list, index, messageId }
 
-// ---- Helpers ----
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
-}
-
-// Normaliza texto para detectar botones tipo teclado (con emojis)
-function normText(s) {
-  return String(s || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "") // sin tildes
-    .replace(/[^\p{L}\p{N}\s]/gu, " ") // fuera emojis/símbolos → espacio
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function makeBotLink() {
-  return BOT_USERNAME ? `https://t.me/${BOT_USERNAME}` : "";
-}
-
-function shareText() {
-  const botLink = makeBotLink();
-  return (
-    `📣 <b>Compartí Todo Queso</b>\n\n` +
-    `✅ Catálogo con fotos + compra\n` +
-    (botLink ? `🔗 Abrir bot: ${botLink}\n\n` : "\n") +
-    `📩 ¿Querés este sistema para tu negocio?\n` +
-    `Escribinos a: <b>${EZERBOT_EMAIL}</b>`
-  );
-}
-
-function shareKeyboard() {
-  const botLink = makeBotLink() || "https://t.me/";
-  const msg = encodeURIComponent(
-    `🧀 Mirá el catálogo de Todo Queso y comprá por el bot:\n${botLink}\n\nSi querés este sistema para tu negocio: ${EZERBOT_EMAIL}`
-  );
-  const subject = encodeURIComponent("Quiero el sistema EzerBot para mi negocio");
-  const body = encodeURIComponent(
-    `Hola! Me interesa el sistema tipo bot+catálogo+compra.\n\nQuiero más info.\n\nLink del bot: ${botLink}`
-  );
-
+// ---------- Teclados ----------
+function replyMenuKeyboard() {
+  // ESTE es el “menú fijo” que ves abajo en Telegram (como en tus capturas)
   return {
-    inline_keyboard: [
-      [{ text: "🤖 Abrir bot", url: botLink }],
-      [{ text: "📲 Compartir por WhatsApp", url: `https://wa.me/?text=${msg}` }],
-      [{ text: "✉️ Pedir el sistema (Email)", url: `mailto:${EZERBOT_EMAIL}?subject=${subject}&body=${body}` }],
-      [{ text: "🏠 Menú", callback_data: "MENU_HOME" }],
+    keyboard: [
+      [{ text: "🛍️ Catálogo" }, { text: "🛒 Carrito" }],
+      [{ text: "✅ Finalizar compra" }],
+      [{ text: "🏷️ Tarjeta de sellos" }, { text: "📣 Compartir bot" }],
     ],
-  };
-}
-
-// ---- Keyboards ----
-function mainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "🛍️ Catálogo", callback_data: "MENU_CATALOGO" }],
-      [{ text: "📣 Compartir bot", callback_data: "SHARE_BOT" }],
-    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
   };
 }
 
@@ -231,7 +190,6 @@ function categoriesKeyboard(categories) {
     rows.push(row);
   }
   rows.unshift([{ text: "📚 Todas", callback_data: "CAT_ALL" }]);
-  rows.push([{ text: "🏠 Menú", callback_data: "MENU_HOME" }]);
   return { inline_keyboard: rows };
 }
 
@@ -248,27 +206,57 @@ function productNavKeyboard() {
     inline_keyboard: [
       [{ text: "⬅️ Anterior", callback_data: "PROD_PREV" }, { text: "➡️ Siguiente", callback_data: "PROD_NEXT" }],
       [{ text: "📣 Compartir bot", callback_data: "SHARE_BOT" }],
-      [{ text: "📁 Categorías", callback_data: "MENU_CATALOGO" }, { text: "🏠 Menú", callback_data: "MENU_HOME" }],
+      [{ text: "📁 Categorías", callback_data: "MENU_CATALOGO" }],
     ],
   };
 }
 
-// ---- Carrusel ----
+// ---------- Compartir ----------
+function makeBotLink() {
+  return BOT_USERNAME ? `https://t.me/${BOT_USERNAME}` : "";
+}
+
+function shareKeyboard() {
+  const botLink = makeBotLink() || "https://t.me/";
+  const msg = encodeURIComponent(
+    `🧀 Mirá el catálogo de Todo Queso y comprá por el bot:\n${botLink}\n\nSi querés este sistema para tu negocio: ${EZERBOT_EMAIL}`
+  );
+  const subject = encodeURIComponent("Quiero el sistema EzerBot para mi negocio");
+  const body = encodeURIComponent(`Hola! Me interesa el sistema.\n\nLink del bot: ${botLink}`);
+
+  return {
+    inline_keyboard: [
+      [{ text: "🤖 Abrir bot", url: botLink }],
+      [{ text: "📲 Compartir por WhatsApp", url: `https://wa.me/?text=${msg}` }],
+      [{ text: "✉️ Pedir el sistema (Email)", url: `mailto:${EZERBOT_EMAIL}?subject=${subject}&body=${body}` }],
+    ],
+  };
+}
+
+async function handleShareBot(chat_id) {
+  console.log("🟣 SHARE TRIGGERED for chat:", chat_id);
+  const botLink = makeBotLink();
+  const text =
+    `📣 <b>Compartí Todo Queso</b>\n\n` +
+    `🔗 Bot: ${botLink || "(aún sin username detectado)"}\n\n` +
+    `📩 ¿Querés este sistema para tu negocio?\n` +
+    `Escribinos a: <b>${EZERBOT_EMAIL}</b>`;
+
+  return sendMessage(chat_id, text, { parse_mode: "HTML", reply_markup: shareKeyboard() });
+}
+
+// ---------- Catálogo carrusel ----------
 async function showProductCarousel(chat_id, list, index) {
   const total = list.length;
   const item = list[index];
   const caption = productCaption(item, index + 1, total);
   const kb = productNavKeyboard();
 
-  if (!item.imagen || !item.imagen.startsWith("http")) {
-    const msg = await sendMessage(chat_id, caption + "\n\n⚠️ (Este producto no tiene imagen válida)", {
-      parse_mode: "HTML",
-      reply_markup: kb,
-    });
-    return { messageId: msg?.result?.message_id || null };
-  }
+  const msg = await sendPhoto(chat_id, item.imagen, caption, { parse_mode: "HTML", reply_markup: kb }).catch(async () => {
+    // Si falla la imagen, mandamos texto para no trabar el flujo
+    return sendMessage(chat_id, caption + "\n\n⚠️ Imagen no válida", { parse_mode: "HTML", reply_markup: kb });
+  });
 
-  const msg = await sendPhoto(chat_id, item.imagen, caption, { parse_mode: "HTML", reply_markup: kb });
   return { messageId: msg?.result?.message_id || null };
 }
 
@@ -286,34 +274,29 @@ async function updateCarousel(chat_id, state) {
     return;
   }
 
-  if (item.imagen && item.imagen.startsWith("http")) {
-    await editMessageMedia(chat_id, messageId, item.imagen, caption, { reply_markup: kb });
-  } else {
+  await editMessageMedia(chat_id, messageId, item.imagen, caption, { reply_markup: kb }).catch(async () => {
     await tgCall("editMessageCaption", {
       chat_id,
       message_id: messageId,
-      caption: caption + "\n\n⚠️ (Este producto no tiene imagen válida)",
+      caption: caption + "\n\n⚠️ Imagen no válida",
       parse_mode: "HTML",
       reply_markup: kb,
     });
-  }
-}
-
-// ---- Handlers ----
-async function handleStart(chat_id) {
-  await sendMessage(chat_id, "🧀 <b>Todo Queso</b>\n\nElegí una opción:", {
-    parse_mode: "HTML",
-    reply_markup: mainMenuKeyboard(),
   });
 }
 
-async function handleShareBot(chat_id) {
-  return sendMessage(chat_id, shareText(), { parse_mode: "HTML", reply_markup: shareKeyboard() });
+// ---------- Handlers base ----------
+async function handleStart(chat_id) {
+  return sendMessage(
+    chat_id,
+    "🧀 <b>Todo Queso</b>\n\nElegí una opción del menú de abajo 👇",
+    { parse_mode: "HTML", reply_markup: replyMenuKeyboard() }
+  );
 }
 
 async function handleCatalogMenu(chat_id) {
   const { categories } = await loadCatalog();
-  await sendMessage(chat_id, "📚 <b>Categorías</b>\nElegí una para ver productos:", {
+  return sendMessage(chat_id, "📚 <b>Categorías</b>\nElegí una para ver productos 👇", {
     parse_mode: "HTML",
     reply_markup: categoriesKeyboard(categories),
   });
@@ -322,22 +305,17 @@ async function handleCatalogMenu(chat_id) {
 async function handleCategory(chat_id, category) {
   const { items } = await loadCatalog();
   let list = items;
+  if (category && category !== "__ALL__") list = items.filter((x) => x.categoria === category);
 
-  if (category && category !== "__ALL__") {
-    list = items.filter((x) => x.categoria === category);
-  }
+  if (!list.length) return sendMessage(chat_id, "No hay productos en esta categoría.", { reply_markup: replyMenuKeyboard() });
 
-  if (!list.length) {
-    await sendMessage(chat_id, "No hay productos en esta categoría.", { reply_markup: mainMenuKeyboard() });
-    return;
-  }
-
-  const state = { mode: "CATALOG", category, list, index: 0, messageId: null };
+  const state = { list, index: 0, messageId: null };
   const created = await showProductCarousel(chat_id, list, 0);
   state.messageId = created.messageId;
   userState.set(chat_id, state);
 }
 
+// ---------- Callback handler ----------
 async function handleCallback(cb) {
   const chat_id = cb.message?.chat?.id;
   const data = cb.data || "";
@@ -345,16 +323,14 @@ async function handleCallback(cb) {
 
   await tgCall("answerCallbackQuery", { callback_query_id: cb.id }).catch(() => {});
 
-  if (data === "MENU_HOME") return handleStart(chat_id);
   if (data === "MENU_CATALOGO") return handleCatalogMenu(chat_id);
   if (data === "SHARE_BOT") return handleShareBot(chat_id);
 
+  if (data === "CAT_ALL") return handleCategory(chat_id, "__ALL__");
   if (data.startsWith("CAT_")) {
-    const raw = data.slice(4);
-    const cat = decodeURIComponent(raw);
+    const cat = decodeURIComponent(data.slice(4));
     return handleCategory(chat_id, cat);
   }
-  if (data === "CAT_ALL") return handleCategory(chat_id, "__ALL__");
 
   if (data === "PROD_NEXT" || data === "PROD_PREV") {
     const state = userState.get(chat_id);
@@ -369,18 +345,13 @@ async function handleCallback(cb) {
   }
 }
 
-// ---- Web routes ----
-app.get("/", (req, res) => res.status(200).send("OK - EZER_IA_BOT LIVE"));
+// ---------- Rutas ----------
+app.get("/", (req, res) => res.status(200).send("OK"));
 app.get("/debug", (req, res) => {
   res.status(200).json({
     ok: true,
-    info: "Server vivo. Bot responde por POST / (webhook).",
-    env: {
-      hasToken: Boolean(TOKEN),
-      publicUrl: PUBLIC_URL || null,
-      hasSheetCsvUrl: Boolean(SHEET_CSV_URL),
-      botUsername: BOT_USERNAME || null,
-    },
+    botUsername: BOT_USERNAME || null,
+    env: { hasToken: !!TOKEN, hasPublicUrl: !!PUBLIC_URL, hasSheetCsvUrl: !!SHEET_CSV_URL },
   });
 });
 
@@ -388,18 +359,29 @@ app.post("/", async (req, res) => {
   res.sendStatus(200);
   const update = req.body || {};
 
+  // LOG mínimo para ver si llega algo cuando apretás “Compartir”
+  try {
+    if (update?.message?.text) {
+      console.log("📩 MSG:", update.message.text);
+    }
+    if (update?.callback_query?.data) {
+      console.log("🧷 CB:", update.callback_query.data);
+    }
+  } catch {}
+
   try {
     if (update.message) {
       const chat_id = update.message.chat.id;
       const textRaw = update.message.text || "";
       const t = normText(textRaw);
 
-      // /start con o sin payload
-      if (t.startsWith("start") || String(textRaw).trim().startsWith("/start")) return handleStart(chat_id);
+      if (String(textRaw).trim().startsWith("/start") || t === "start") return handleStart(chat_id);
 
-      // ✅ CLAVE: cualquier variante que contenga "compartir"
+      // ✅ Detecta “Compartir bot” venga como venga (teclado fijo)
       if (t.includes("compartir")) return handleShareBot(chat_id);
-      if (String(textRaw).trim().startsWith("/share")) return handleShareBot(chat_id);
+
+      // Menú fijo
+      if (t.includes("catalogo")) return handleCatalogMenu(chat_id);
 
       // default
       return handleStart(chat_id);
@@ -411,16 +393,12 @@ app.post("/", async (req, res) => {
   }
 });
 
-// ---- Start server ----
+// ---------- Init ----------
 async function initBotInfo() {
-  try {
-    const me = await tgCall("getMe", {});
-    if (me?.ok && me?.result?.username) {
-      BOT_USERNAME = me.result.username;
-      console.log("✅ Nombre de usuario del bot:", BOT_USERNAME);
-    }
-  } catch (e) {
-    console.log("⚠️ getMe error:", e?.message || e);
+  const me = await tgCall("getMe", {});
+  if (me?.ok && me?.result?.username) {
+    BOT_USERNAME = me.result.username;
+    console.log("✅ Bot username:", BOT_USERNAME);
   }
 }
 
@@ -428,4 +406,4 @@ app.listen(PORT, async () => {
   console.log("✅ Server listo en puerto", PORT);
   console.log("✅ Webhook debería apuntar a:", PUBLIC_URL ? `${PUBLIC_URL}/` : "(PUBLIC_URL vacío)");
   await initBotInfo();
-}); 
+});
