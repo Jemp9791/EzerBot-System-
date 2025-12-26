@@ -408,6 +408,7 @@ app.post("/", async (req, res) => {
         return handleStart(chat_id);
       }
 
+      
       // si escribe algo, lo llevamos al menú (simple)
       return handleStart(chat_id);
     }
