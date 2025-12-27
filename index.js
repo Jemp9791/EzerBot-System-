@@ -1,15 +1,14 @@
 /**
- * TODO_QUESO - Bot Telegram + Catálogo carrusel + Compartir + Carrito + Sellos
+ * TODO_QUESO - Bot Telegram + Catálogo carrusel + Compartir con Referidos + Carrito + Sellos
  *
- * ENV:
- * - TELEGRAM_TOKEN   (obligatorio)
- * - PUBLIC_URL       (obligatorio) ej: https://ezerbot-system.onrender.com
- * - SHEET_CSV_URL    (obligatorio) CSV de Catalogo
- * - BOT_USERNAME     (opcional recomendado) ej: Ezer_IA_Bot
- * - SYSTEM_EMAIL     (opcional) ej: ezerbot.assistant@gmail.com
+ * ENV obligatorias:
+ * - TELEGRAM_TOKEN
+ * - PUBLIC_URL              ej: https://ezerbot-system.onrender.com
+ * - SHEET_CSV_URL           CSV de Catalogo
+ * - CONFIG_CSV_URL          CSV de Config (CLAVE,VALOR)  <<< ESTO habilita logo/horarios/tarjeta/alias/etc
  *
- * OPCIONAL (Config dinámico):
- * - CONFIG_CSV_URL   CSV de hoja Config (CLAVE,VALOR)
+ * ENV opcionales:
+ * - BOT_USERNAME            ej: Ezer_IA_Bot
  */
 
 import express from "express";
@@ -23,15 +22,14 @@ const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
 const SHEET_CSV_URL = process.env.SHEET_CSV_URL || "";
 const CONFIG_CSV_URL = process.env.CONFIG_CSV_URL || "";
 const BOT_USERNAME = (process.env.BOT_USERNAME || "Ezer_IA_Bot").replace("@", "");
-const SYSTEM_EMAIL = process.env.SYSTEM_EMAIL || "ezerbot.assistant@gmail.com";
 
 if (!TOKEN) console.error("Falta ENV TELEGRAM_TOKEN");
 if (!PUBLIC_URL) console.error("Falta ENV PUBLIC_URL");
 if (!SHEET_CSV_URL) console.error("Falta ENV SHEET_CSV_URL");
+if (!CONFIG_CSV_URL) console.error("Falta ENV CONFIG_CSV_URL (sin esto NO hay logo/horarios/tarjeta/config real)");
 
 const TG = (method) => `https://api.telegram.org/bot${TOKEN}/${method}`;
 
-// ---------------- Telegram API ----------------
 async function tgCall(method, payload) {
   const res = await fetch(TG(method), {
     method: "POST",
@@ -57,14 +55,10 @@ async function editMessageMedia(chat_id, message_id, photo, caption, extra = {})
     ...extra,
   });
 }
-async function editMessageCaption(chat_id, message_id, caption, extra = {}) {
-  return tgCall("editMessageCaption", { chat_id, message_id, caption, parse_mode: "HTML", ...extra });
-}
 async function editMessageReplyMarkup(chat_id, message_id, reply_markup) {
   return tgCall("editMessageReplyMarkup", { chat_id, message_id, reply_markup });
 }
 
-// ---------------- Utils ----------------
 function escapeHtml(s) {
   return String(s || "")
     .replaceAll("&", "&amp;")
@@ -76,9 +70,9 @@ function enc(s) {
 }
 function normalizeUrl(u) {
   if (!u) return "";
-  const m = u.match(/\((https?:\/\/[^)]+)\)/);
+  const m = String(u).match(/\((https?:\/\/[^)]+)\)/);
   if (m?.[1]) return m[1];
-  return u.replace(/^\[|\]$/g, "").trim();
+  return String(u).trim();
 }
 
 // CSV básico
@@ -125,7 +119,7 @@ function parseCSV(text) {
   return rows;
 }
 
-// ---------------- Config ----------------
+// ---------------- Config (dinámico) ----------------
 let configCache = { at: 0, data: null };
 
 const DEFAULT_CONFIG = {
@@ -133,16 +127,11 @@ const DEFAULT_CONFIG = {
   negocio_slogan: "Compras por Telegram",
   negocio_direccion: "",
   negocio_horario: "",
-  // soportamos varios nombres posibles (por si en tu Config se llaman distinto)
   negocio_logo_url: "",
   logo_url: "",
   tarjeta_sellos_url: "",
   tarjeta_virtual_url: "",
   tarjeta_url: "",
-  whatsapp_numero: "",
-  alias_transferencia: "",
-  envio_texto: "",
-  promo_texto: "",
 };
 
 function pickCfg(cfg, ...keys) {
@@ -155,19 +144,14 @@ function pickCfg(cfg, ...keys) {
 
 async function loadConfig() {
   const now = Date.now();
-  if (configCache.data && now - configCache.at < 60_000) return configCache.data;
-
-  if (!CONFIG_CSV_URL) {
-    configCache = { at: now, data: DEFAULT_CONFIG };
-    return DEFAULT_CONFIG;
-  }
+  if (configCache.data && now - configCache.at < 30_000) return configCache.data;
 
   const res = await fetch(CONFIG_CSV_URL, { method: "GET" });
   const csv = await res.text();
   const rows = parseCSV(csv);
   const data = { ...DEFAULT_CONFIG };
 
-  // Espera formato: CLAVE, VALOR
+  // Formato esperado: CLAVE,VALOR
   for (let r = 0; r < rows.length; r++) {
     const k = (rows[r]?.[0] || "").trim();
     const v = (rows[r]?.[1] || "").trim();
@@ -175,7 +159,6 @@ async function loadConfig() {
     data[k] = v;
   }
 
-  // normalizamos urls por si vienen con formato raro
   data.negocio_logo_url = normalizeUrl(data.negocio_logo_url);
   data.logo_url = normalizeUrl(data.logo_url);
   data.tarjeta_sellos_url = normalizeUrl(data.tarjeta_sellos_url);
@@ -191,7 +174,7 @@ let catalogCache = { at: 0, items: [], categories: [] };
 
 async function loadCatalog() {
   const now = Date.now();
-  if (catalogCache.items.length && now - catalogCache.at < 60_000) return catalogCache;
+  if (catalogCache.items.length && now - catalogCache.at < 30_000) return catalogCache;
 
   const res = await fetch(SHEET_CSV_URL, { method: "GET" });
   const csv = await res.text();
@@ -214,12 +197,10 @@ async function loadCatalog() {
   const items = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
-    if (!row || row.length < 2) continue;
-
     const nombre = (row[I.NOMBRE] || "").trim();
     if (!nombre) continue;
 
-    const item = {
+    items.push({
       codigo: (row[I.CODIGO] || "").trim() || `ROW${r}`,
       nombre,
       precio: (row[I.PRECIO] || "").trim(),
@@ -227,8 +208,7 @@ async function loadCatalog() {
       descripcion: (row[I.DESCRIPCION] || "").trim(),
       imagen: normalizeUrl((row[I.IMAGEN] || "").trim()),
       categoria: (row[I.CATEGORIA] || "").trim() || "Sin categoría",
-    };
-    items.push(item);
+    });
   }
 
   const categories = [...new Set(items.map((x) => x.categoria))].sort((a, b) =>
@@ -242,20 +222,23 @@ async function loadCatalog() {
 // ---------------- State (por chat) ----------------
 const userState = new Map();
 
+/**
+ * refBy: id del cliente que lo refirió (si entró con start REF_x)
+ * referralsPaid: Set de ids de referidos ya premiados (para no sumar 1000 sellos)
+ */
 function getOrInitState(chat_id) {
   if (!userState.has(chat_id)) {
     userState.set(chat_id, {
       mode: "HOME",
       category: "__ALL__",
-      categoryLabel: "Todas",
       list: [],
       index: 0,
       messageId: null,
-      messageIsPhoto: false,
       cart: [],
       stamps: 0,
+
       refBy: null,
-      lastShare: null,
+      referralsPaid: new Set(), // quiénes ya generaron un sello al referidor
       pendingItem: null,
     });
   }
@@ -348,42 +331,28 @@ async function showProductCarousel(chat_id, state) {
   if (!item.imagen || !item.imagen.startsWith("http")) {
     const msg = await sendMessage(chat_id, caption + "\n\n⚠️ (Sin imagen)", { parse_mode: "HTML", reply_markup: kb });
     state.messageId = msg?.result?.message_id || null;
-    state.messageIsPhoto = false;
     return;
   }
 
   const msg = await sendPhoto(chat_id, item.imagen, caption, { parse_mode: "HTML", reply_markup: kb });
   state.messageId = msg?.result?.message_id || null;
-  state.messageIsPhoto = true;
 }
 
 async function updateCarousel(chat_id, state) {
-  const list = state.list;
-  const index = state.index;
-
-  const total = list.length;
-  const item = list[index];
-  const caption = productCaption(item, index + 1, total);
+  const item = state.list[state.index];
+  const caption = productCaption(item, state.index + 1, state.list.length);
 
   if (!state.messageId) return showProductCarousel(chat_id, state);
 
   if (item.imagen && item.imagen.startsWith("http")) {
     await editMessageMedia(chat_id, state.messageId, item.imagen, caption, { reply_markup: productKeyboard() });
   } else {
-    await editMessageCaption(chat_id, state.messageId, caption + "\n\n⚠️ (Sin imagen)", { reply_markup: productKeyboard() });
+    // si no hay imagen, no rompemos; solo mantenemos caption cambiando botones
+    await editMessageReplyMarkup(chat_id, state.messageId, productKeyboard());
   }
 }
 
-// ---------------- Compartir links ----------------
-function buildProductShare(item) {
-  const payload = `P_${item.codigo}`;
-  const startLink = `https://t.me/${BOT_USERNAME}?start=${enc(payload)}`;
-  const text = `🧀 Todo Queso\nMirá este producto:\n${item.nombre} - $ ${item.precio || "-"} ${
-    item.unidad ? `(${item.unidad})` : ""
-  }\n\nAbrí el bot y pedilo acá 👇`;
-  return { payload, startLink, text };
-}
-
+// ---------------- Compartir (con referido) ----------------
 function waLink(text, url) {
   return `https://wa.me/?text=${enc(text + "\n" + url)}`;
 }
@@ -394,6 +363,21 @@ function gmailComposeLink(subject, body) {
   return `https://mail.google.com/mail/?view=cm&fs=1&su=${enc(subject)}&body=${enc(body)}`;
 }
 
+function buildBotShare(referrerChatId) {
+  const startLink = `https://t.me/${BOT_USERNAME}?start=${enc(`REF_${referrerChatId}`)}`;
+  const text = `🧀 Todo Queso\nCompras por Telegram\n\nAbrí el bot acá 👇`;
+  return { startLink, text };
+}
+
+function buildProductShare(item, referrerChatId) {
+  const payload = `P_${item.codigo}_REF_${referrerChatId}`;
+  const startLink = `https://t.me/${BOT_USERNAME}?start=${enc(payload)}`;
+  const text = `🧀 Todo Queso\nMirá este producto:\n${item.nombre} - $ ${item.precio || "-"} ${
+    item.unidad ? `(${item.unidad})` : ""
+  }\n\nAbrí el bot y pedilo acá 👇`;
+  return { startLink, text };
+}
+
 // ---------------- Sellos ----------------
 function addStamp(chat_id, n = 1) {
   const st = getOrInitState(chat_id);
@@ -401,41 +385,48 @@ function addStamp(chat_id, n = 1) {
   userState.set(chat_id, st);
 }
 
-// ---------------- Flujos ----------------
-async function handleStart(chat_id, startPayloadRaw = "") {
+// ---------------- /start ----------------
+async function handleStart(chat_id, payload = "") {
   const cfg = await loadConfig();
   const st = getOrInitState(chat_id);
 
-  // Referido: /start REF_xxx
-  if (startPayloadRaw?.startsWith("REF_")) {
-    st.refBy = startPayloadRaw.slice(4);
+  // payloads posibles:
+  // REF_<id>
+  // P_<codigo>_REF_<id>
+  if (payload.startsWith("REF_")) {
+    const ref = payload.slice(4).trim();
+    if (ref && ref !== String(chat_id)) st.refBy = ref;
   }
 
-  // Entrar directo a producto: /start P_codigo
-  if (startPayloadRaw?.startsWith("P_")) {
-    const code = startPayloadRaw.slice(2);
+  if (payload.startsWith("P_")) {
+    // P_<codigo>_REF_<id>
+    const parts = payload.split("_");
+    const code = parts[1] || "";
+    const refIdx = parts.findIndex((x) => x === "REF");
+    if (refIdx >= 0 && parts[refIdx + 1]) {
+      const ref = parts[refIdx + 1];
+      if (ref && ref !== String(chat_id)) st.refBy = ref;
+    }
+
     const { items } = await loadCatalog();
     const idx = items.findIndex((x) => String(x.codigo) === String(code));
+    userState.set(chat_id, st);
+
+    await sendWarmWelcome(chat_id, cfg);
     if (idx >= 0) {
       st.mode = "CATALOG";
-      st.category = "__ALL__";
-      st.categoryLabel = "Todas";
       st.list = items;
       st.index = idx;
       st.messageId = null;
       userState.set(chat_id, st);
-
-      // saludo cálido (igual)
-      await sendWarmWelcome(chat_id, cfg);
       await showProductCarousel(chat_id, st);
       return;
     }
+    return;
   }
 
-  // Inicio normal
-  await sendWarmWelcome(chat_id, cfg);
-  st.mode = "HOME";
   userState.set(chat_id, st);
+  await sendWarmWelcome(chat_id, cfg);
 }
 
 async function sendWarmWelcome(chat_id, cfg) {
@@ -453,7 +444,7 @@ async function sendWarmWelcome(chat_id, cfg) {
     `\n✨ ¿Qué te preparo hoy?\n` +
     `• Tocá <b>Catálogo</b> para ver productos con foto\n` +
     `• Mirá <b>Sellos</b> para tus beneficios\n` +
-    `• O <b>Compartí el bot</b> y sumás sellos 😉`;
+    `• O <b>Compartí el bot</b> para invitar a alguien 😉`;
 
   if (logo && logo.startsWith("http")) {
     return sendPhoto(chat_id, logo, texto, { parse_mode: "HTML", reply_markup: homeKeyboard() });
@@ -461,6 +452,7 @@ async function sendWarmWelcome(chat_id, cfg) {
   return sendMessage(chat_id, texto, { parse_mode: "HTML", reply_markup: homeKeyboard() });
 }
 
+// ---------------- Menús ----------------
 async function handleCatalogMenu(chat_id) {
   const st = getOrInitState(chat_id);
   const { categories } = await loadCatalog();
@@ -483,7 +475,6 @@ async function handleCategory(chat_id, category) {
   if (!list.length) return sendMessage(chat_id, "No hay productos en esta categoría.", { reply_markup: homeKeyboard() });
 
   st.mode = "CATALOG";
-  st.category = category;
   st.list = list;
   st.index = 0;
   st.messageId = null;
@@ -523,12 +514,12 @@ async function handleSellos(chat_id) {
   const st = getOrInitState(chat_id);
 
   const cardUrl = pickCfg(cfg, "tarjeta_sellos_url", "tarjeta_virtual_url", "tarjeta_url");
+
   const texto =
     `🏷️ <b>Tu tarjeta de sellos</b>\n\n` +
     `Sellos acumulados: <b>${escapeHtml(st.stamps || 0)}</b>\n\n` +
-    `📣 Tip: compartí el bot o una promo para sumar sellos.`;
+    `💡 Tip: por cada compra sumás sellos. Si alguien compra por tu link compartido, sumás 1 sello extra.`;
 
-  // ✅ AHORA SÍ: muestra la tarjeta virtual (imagen) si está en Config
   if (cardUrl && cardUrl.startsWith("http")) {
     return sendPhoto(chat_id, cardUrl, texto, { parse_mode: "HTML", reply_markup: homeKeyboard() });
   }
@@ -536,9 +527,6 @@ async function handleSellos(chat_id) {
 }
 
 async function handleShareBot(chat_id) {
-  // ✅ suma sello por compartir bot (la acción de entrar a compartir)
-  addStamp(chat_id, 1);
-
   return sendMessage(chat_id, "📣 <b>Compartir el bot</b>\nElegí dónde:", {
     parse_mode: "HTML",
     reply_markup: shareBotKeyboard(),
@@ -594,14 +582,12 @@ async function handleCallback(cb) {
     return editMessageReplyMarkup(chat_id, msg_id, productKeyboard());
   }
 
-  // ✅ Compartir producto/promo: suma sello cuando elige canal
+  // Compartir PRODUCTO (NO suma sellos acá)
   if (data === "SHARE_WA" || data === "SHARE_TG" || data === "SHARE_EMAIL") {
     const item = st.list?.[st.index];
-    if (!item) return;
+    if (!item || !msg_id) return;
 
-    addStamp(chat_id, 1);
-
-    const { startLink, text } = buildProductShare(item);
+    const { startLink, text } = buildProductShare(item, chat_id);
 
     if (data === "SHARE_WA") {
       return editMessageReplyMarkup(chat_id, msg_id, {
@@ -638,24 +624,25 @@ async function handleCallback(cb) {
     }
   }
 
-  // Compartir BOT (desde menú principal)
+  // Compartir BOT (NO suma sellos acá)
   if (data === "BOTSHARE_WA" || data === "BOTSHARE_TG" || data === "BOTSHARE_EMAIL") {
-    const botLink = `https://t.me/${BOT_USERNAME}`;
-    const text = `🧀 Todo Queso — Compras por Telegram\nAbrí el bot acá:\n${botLink}`;
+    const { startLink, text } = buildBotShare(chat_id);
 
     if (data === "BOTSHARE_WA") {
       return sendMessage(chat_id, "📣 WhatsApp:", {
-        reply_markup: { inline_keyboard: [[{ text: "📣 Abrir WhatsApp", url: waLink(text, botLink) }]] },
+        reply_markup: { inline_keyboard: [[{ text: "📣 Abrir WhatsApp", url: waLink(text, startLink) }]] },
       });
     }
+
     if (data === "BOTSHARE_TG") {
       return sendMessage(chat_id, "✈️ Telegram:", {
-        reply_markup: { inline_keyboard: [[{ text: "✈️ Compartir en Telegram", url: tgShareLink("Todo Queso", botLink) }]] },
+        reply_markup: { inline_keyboard: [[{ text: "✈️ Compartir en Telegram", url: tgShareLink("Todo Queso", startLink) }]] },
       });
     }
+
     if (data === "BOTSHARE_EMAIL") {
       const subject = "Todo Queso - Bot";
-      const body = text;
+      const body = `${text}\n${startLink}`;
       const gmailUrl = gmailComposeLink(subject, body);
       return sendMessage(chat_id, "✉️ Email:", {
         reply_markup: { inline_keyboard: [[{ text: "✉️ Abrir Email", url: gmailUrl }]] },
@@ -703,16 +690,40 @@ async function handleTextMessage(chat_id, text) {
   if (t.toLowerCase() === "sellos" || t === "🏷️ Sellos") return handleSellos(chat_id);
   if (t.toLowerCase().includes("compartir bot") || t === "📣 Compartir bot") return handleShareBot(chat_id);
 
-  // ✅ Compra: sumo sello al finalizar (por ahora, hasta que unamos pagos/confirmación)
+  // FINALIZAR: aquí es donde corresponde dar sellos por compra
   if (t.toLowerCase() === "finalizar" || t.toLowerCase() === "finalizar compra") {
-    if (!st.cart?.length) return sendMessage(chat_id, "Tu carrito está vacío. Agregá productos desde el catálogo.", { reply_markup: homeKeyboard() });
+    if (!st.cart?.length) {
+      return sendMessage(chat_id, "Tu carrito está vacío. Agregá productos desde el catálogo.", { reply_markup: homeKeyboard() });
+    }
 
+    // ✅ Sello por compra (por ahora 1 base; luego lo conectamos a reglas reales de Config)
     addStamp(chat_id, 1);
+
+    // ✅ Premio por referido SOLO si el comprador entró por link REF_x y aún no se premió ese referido
+    if (st.refBy && String(st.refBy).trim()) {
+      const refId = String(st.refBy).trim();
+      // evitamos dar premio infinito: solo 1 vez por cada comprador referido
+      // (es decir: si ese usuario compra 100 veces, ya lo afinamos después con reglas reales,
+      // pero hoy lo dejamos "1 sola vez" para que sea justo y no explote)
+      const buyerId = String(chat_id);
+      if (!st.referralsPaid.has("PAID")) {
+        // marcamos en el comprador que ya generó premio al referidor
+        st.referralsPaid.add("PAID");
+        userState.set(chat_id, st);
+
+        // sumamos 1 sello al referidor si existe su estado
+        const refSt = getOrInitState(refId);
+        addStamp(refId, 1);
+
+        // aviso opcional (no ensucia)
+        await sendMessage(refId, `🎉 ¡Sumaste 1 sello!\nUn cliente compró desde tu link compartido ✅`, { reply_markup: homeKeyboard() }).catch(() => {});
+      }
+    }
 
     const lines = st.cart.map((it) => `• ${it.nombre} — ${it.qtyText || "1"} — $ ${it.precio || "-"}`);
     return sendMessage(
       chat_id,
-      `🧾 <b>Pedido (resumen)</b>\n\n${escapeHtml(lines.join("\n"))}\n\n✅ Próximo paso: envío / pago / comprobante (lo unimos después sin romper nada).`,
+      `🧾 <b>Pedido confirmado (resumen)</b>\n\n${escapeHtml(lines.join("\n"))}\n\n✅ Ya sumaste sellos por tu compra.\n📦 Próximo: envío / pago / comprobante (lo unimos después sin romper nada).`,
       { parse_mode: "HTML", reply_markup: homeKeyboard() }
     );
   }
@@ -724,14 +735,18 @@ async function handleTextMessage(chat_id, text) {
 app.get("/", (req, res) => res.status(200).send("OK - TODO_QUESO LIVE"));
 
 app.get("/debug", async (req, res) => {
-  const cfg = await loadConfig();
+  let cfg = null;
+  try {
+    cfg = await loadConfig();
+  } catch (e) {
+    cfg = { error: "No pude leer CONFIG_CSV_URL", detail: String(e?.message || e) };
+  }
   res.status(200).json({
     ok: true,
     env: {
       hasToken: Boolean(TOKEN),
       publicUrl: PUBLIC_URL || null,
       botUsername: BOT_USERNAME,
-      systemEmail: SYSTEM_EMAIL,
       hasSheetCsvUrl: Boolean(SHEET_CSV_URL),
       hasConfigCsvUrl: Boolean(CONFIG_CSV_URL),
     },
@@ -748,6 +763,7 @@ app.post("/", async (req, res) => {
       const chat_id = update.message.chat.id;
       const text = update.message.text || "";
       const isStart = text.startsWith("/start");
+
       if (isStart) {
         const parts = text.split(" ");
         const payload = (parts[1] || "").trim();
@@ -764,9 +780,9 @@ app.post("/", async (req, res) => {
   }
 });
 
-// Start
 app.listen(PORT, () => {
   console.log("✅ Server listo en puerto", PORT);
   console.log("✅ PUBLIC_URL:", PUBLIC_URL);
   console.log("✅ BOT_USERNAME:", BOT_USERNAME);
+  console.log("✅ CONFIG_CSV_URL:", CONFIG_CSV_URL ? "OK" : "FALTA");
 });
