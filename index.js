@@ -1,13 +1,14 @@
 /**
  * EZER_IA_BOT - Telegram bot (Webhook "/")
- * - Catálogo con carrusel (editMessageMedia)
- * - Compartir PRODUCTO (WhatsApp + Email) usando deep-link /start prod_CODIGO
+ * - Catálogo carrusel (editMessageMedia)
+ * - Compartir PRODUCTO con 1 botón -> menú (WhatsApp / Email / Telegram)
+ * - Deep-link /start prod_<CODIGO> para que el receptor vea la ficha + imagen
  *
  * ENV (Render):
  * - TELEGRAM_TOKEN   = ...
  * - PUBLIC_URL       = https://ezerbot-system.onrender.com   (sin barra final)
  * - SHEET_CSV_URL    = CSV del sheet "Catalogo"
- * - BOT_USERNAME     = Ezer_IA_Bot (opcional; si no, se usa este default)
+ * - BOT_USERNAME     = Ezer_IA_Bot (opcional; si no, default Ezer_IA_Bot)
  * - SYSTEM_EMAIL     = ezerbot.assistant@gmail.com (opcional)
  */
 
@@ -28,7 +29,6 @@ if (!PUBLIC_URL) console.error("Falta ENV PUBLIC_URL");
 if (!SHEET_CSV_URL) console.error("Falta ENV SHEET_CSV_URL");
 
 const TG = (method) => `https://api.telegram.org/bot${TOKEN}/${method}`;
-const botLink = () => `https://t.me/${BOT_USERNAME}`;
 
 // -------------------- Utils --------------------
 const enc = (s) => encodeURIComponent(String(s ?? ""));
@@ -40,19 +40,50 @@ function escapeHtml(s) {
     .replaceAll(">", "&gt;");
 }
 
+function normalizeUrl(u) {
+  if (!u) return "";
+  const m = u.match(/\((https?:\/\/[^)]+)\)/);
+  if (m?.[1]) return m[1];
+  return u.replace(/^\[|\]$/g, "").trim();
+}
+
+function botLink() {
+  return `https://t.me/${BOT_USERNAME}`;
+}
+
+// hash simple y estable (para generar CODIGO si viene vacío)
+function stableHash(str) {
+  let h = 2166136261; // FNV-ish
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  // a base36 corto
+  return (h >>> 0).toString(36).toUpperCase();
+}
+
+function ensureCode(item) {
+  if (item.codigo && item.codigo.trim()) return item.codigo.trim();
+  const base = `${item.nombre}|${item.precio}|${item.unidad}|${item.categoria}|${item.imagen}|${item.descripcion}`;
+  return `AUTO_${stableHash(base)}`;
+}
+
 // Deep-link a un producto
 function productDeepLink(code) {
-  // Telegram espera /start con un parámetro sin espacios
   return `https://t.me/${BOT_USERNAME}?start=prod_${encodeURIComponent(code)}`;
 }
 
 function waShareUrl(text, url) {
-  // WhatsApp share universal
   return `https://wa.me/?text=${enc(text + "\n" + url)}`;
 }
 
 function emailShareUrl(subject, body) {
   return `mailto:?subject=${enc(subject)}&body=${enc(body)}`;
+}
+
+// Share por Telegram (abre selector de chats de Telegram)
+function telegramShareUrl(text, url) {
+  return `https://t.me/share/url?url=${enc(url)}&text=${enc(text)}`;
 }
 
 // -------------------- Telegram API --------------------
@@ -128,13 +159,6 @@ function parseCSV(text) {
   return rows;
 }
 
-function normalizeUrl(u) {
-  if (!u) return "";
-  const m = u.match(/\((https?:\/\/[^)]+)\)/);
-  if (m?.[1]) return m[1];
-  return u.replace(/^\[|\]$/g, "").trim();
-}
-
 // -------------------- Catalog cache --------------------
 let catalogCache = { at: 0, items: [], categories: [] };
 
@@ -165,6 +189,7 @@ async function loadCatalog() {
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     if (!row || row.length < 2) continue;
+
     const nombre = (row[I.NOMBRE] || "").trim();
     if (!nombre) continue;
 
@@ -177,6 +202,10 @@ async function loadCatalog() {
       imagen: normalizeUrl((row[I.IMAGEN] || "").trim()),
       categoria: (row[I.CATEGORIA] || "").trim() || "Sin categoría",
     };
+
+    // ✅ clave: si viene sin CODIGO, generamos uno estable
+    item.codigo = ensureCode(item);
+
     items.push(item);
   }
 
@@ -189,15 +218,11 @@ async function loadCatalog() {
 }
 
 // -------------------- State --------------------
-const userState = new Map(); // chatId -> {mode, categoryLabel, list, index, messageId}
+const userState = new Map(); // chatId -> {list, index, messageId}
 
-// -------------------- Keyboards --------------------
+// -------------------- UI --------------------
 function mainMenuKeyboard() {
-  return {
-    inline_keyboard: [
-      [{ text: "🛍️ Catálogo", callback_data: "MENU_CATALOGO" }],
-    ],
-  };
+  return { inline_keyboard: [[{ text: "🛍️ Catálogo", callback_data: "MENU_CATALOGO" }]] };
 }
 
 function categoriesKeyboard(categories) {
@@ -222,8 +247,8 @@ function productCaption(item, pos, total) {
   )}\n📌 <i>${pos} de ${total}</i>${desc}\n\n✅ Para pedir: escribí <b>QUIERO</b>`;
 }
 
-// ✅ ACA está “Compartir este producto”
-function productNavKeyboard(item) {
+// Botones del producto (1 SOLO botón "Compartir")
+function productKeyboard() {
   return {
     inline_keyboard: [
       [
@@ -231,12 +256,21 @@ function productNavKeyboard(item) {
         { text: "➡️ Siguiente", callback_data: "PROD_NEXT" },
       ],
       [{ text: "🟢 Quiero este", callback_data: "PROD_WANT" }],
-      [
-        { text: "📣 Compartir (WhatsApp)", callback_data: "SHARE_WA" },
-        { text: "✉️ Compartir (Email)", callback_data: "SHARE_EMAIL" },
-      ],
+      [{ text: "📣 Compartir", callback_data: "SHARE_MENU" }],
       [{ text: "📁 Categorías", callback_data: "MENU_CATALOGO" }],
       [{ text: "🏠 Menú", callback_data: "MENU_HOME" }],
+    ],
+  };
+}
+
+// Menú de compartir (3 opciones)
+function shareMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📣 WhatsApp", callback_data: "SHARE_WA" }],
+      [{ text: "✉️ Email", callback_data: "SHARE_EMAIL" }],
+      [{ text: "📨 Telegram", callback_data: "SHARE_TG" }],
+      [{ text: "⬅️ Volver", callback_data: "SHARE_BACK" }],
     ],
   };
 }
@@ -246,19 +280,18 @@ async function showProductCarousel(chat_id, list, index) {
   const total = list.length;
   const item = list[index];
   const caption = productCaption(item, index + 1, total);
-  const kb = productNavKeyboard(item);
 
   if (!item.imagen || !item.imagen.startsWith("http")) {
     const msg = await sendMessage(chat_id, caption + "\n\n⚠️ (Sin imagen válida)", {
       parse_mode: "HTML",
-      reply_markup: kb,
+      reply_markup: productKeyboard(),
     });
     return { messageId: msg?.result?.message_id || null };
   }
 
   const msg = await sendPhoto(chat_id, item.imagen, caption, {
     parse_mode: "HTML",
-    reply_markup: kb,
+    reply_markup: productKeyboard(),
   });
   return { messageId: msg?.result?.message_id || null };
 }
@@ -268,7 +301,6 @@ async function updateCarousel(chat_id, state) {
   const total = list.length;
   const item = list[index];
   const caption = productCaption(item, index + 1, total);
-  const kb = productNavKeyboard(item);
 
   if (!messageId) {
     const created = await showProductCarousel(chat_id, list, index);
@@ -278,46 +310,53 @@ async function updateCarousel(chat_id, state) {
   }
 
   if (item.imagen && item.imagen.startsWith("http")) {
-    await editMessageMedia(chat_id, messageId, item.imagen, caption, { reply_markup: kb });
+    await editMessageMedia(chat_id, messageId, item.imagen, caption, { reply_markup: productKeyboard() });
   } else {
     await tgCall("editMessageCaption", {
       chat_id,
       message_id: messageId,
       caption: caption + "\n\n⚠️ (Sin imagen válida)",
       parse_mode: "HTML",
-      reply_markup: kb,
+      reply_markup: productKeyboard(),
     });
   }
 }
 
 // -------------------- Handlers --------------------
 async function handleStart(chat_id, startPayload = "") {
-  // Si viene /start prod_TQ01 => mostrar ese producto directo
+  // /start prod_<codigo>
   if (startPayload?.startsWith("prod_")) {
     const code = startPayload.slice(5);
     const { items } = await loadCatalog();
-    const item = items.find((x) => (x.codigo || "") === code);
+    const item = items.find((x) => String(x.codigo) === String(code));
 
     if (item) {
-      const caption =
-        `🎁 <b>PROMO / PRODUCTO COMPARTIDO</b>\n\n` +
-        `🛍️ <b>${escapeHtml(item.nombre)}</b>\n` +
-        `💰 <b>$ ${escapeHtml(item.precio || "-")}</b> (${escapeHtml(item.unidad || "unidad")})\n` +
-        (item.descripcion ? `📝 ${escapeHtml(item.descripcion)}\n` : "") +
-        `\n✅ Para pedir: escribí <b>QUIERO</b>\n\n` +
-        `🧀 Volvé al bot: ${escapeHtml(botLink())}`;
+      const deep = productDeepLink(item.codigo);
+      const textShare =
+        `🧀 Todo Queso — ${item.nombre}\n` +
+        `💰 $${item.precio} (${item.unidad || "unidad"})\n\n` +
+        `Abrí y comprá acá:`;
 
       const kb = {
         inline_keyboard: [
           [{ text: "🟢 Quiero este", callback_data: "PROD_WANT_SHARED" }],
           [{ text: "🛍️ Ver Catálogo", callback_data: "MENU_CATALOGO" }],
           [
-            { text: "📣 Compartir (WhatsApp)", url: waShareUrl(`Mirá esto en Todo Queso: ${item.nombre}`, productDeepLink(item.codigo)) },
-            { text: "✉️ Compartir (Email)", url: emailShareUrl(`Promo Todo Queso: ${item.nombre}`, `Mirá este producto:\n${item.nombre}\n${productDeepLink(item.codigo)}`) },
+            { text: "📣 Compartir (WhatsApp)", url: waShareUrl(textShare, deep) },
+            { text: "✉️ Compartir (Email)", url: emailShareUrl(`Todo Queso: ${item.nombre}`, `${textShare}\n${deep}\n\nSistema: ${SYSTEM_EMAIL}`) },
           ],
-          [{ text: "💼 Quiero este sistema", url: emailShareUrl("Quiero el sistema EzerBot", `Hola, quiero el sistema para mi negocio.\nMi contacto: \n\nEnviado desde ${botLink()}`) }],
+          [
+            { text: "📨 Compartir (Telegram)", url: telegramShareUrl(textShare, deep) },
+          ],
         ],
       };
+
+      const caption =
+        `🎁 <b>PRODUCTO COMPARTIDO</b>\n\n` +
+        `🛍️ <b>${escapeHtml(item.nombre)}</b>\n` +
+        `💰 <b>$ ${escapeHtml(item.precio || "-")}</b> (${escapeHtml(item.unidad || "unidad")})\n` +
+        (item.descripcion ? `📝 ${escapeHtml(item.descripcion)}\n` : "") +
+        `\n✅ Para pedir: escribí <b>QUIERO</b>`;
 
       if (item.imagen && item.imagen.startsWith("http")) {
         await sendPhoto(chat_id, item.imagen, caption, { parse_mode: "HTML", reply_markup: kb });
@@ -326,9 +365,15 @@ async function handleStart(chat_id, startPayload = "") {
       }
       return;
     }
-    // Si no existe el código, cae al menú normal
+
+    // si no encontró el producto
+    await sendMessage(chat_id, "⚠️ Este producto ya no está disponible. Te muestro el catálogo:", {
+      reply_markup: mainMenuKeyboard(),
+    });
+    return;
   }
 
+  // start normal
   await sendMessage(chat_id, "🧀 <b>Todo Queso</b>\n\nElegí una opción:", {
     parse_mode: "HTML",
     reply_markup: mainMenuKeyboard(),
@@ -346,10 +391,8 @@ async function handleCatalogMenu(chat_id) {
 async function handleCategory(chat_id, category) {
   const { items } = await loadCatalog();
   let list = items;
-  let label = "Todas";
 
   if (category && category !== "__ALL__") {
-    label = category;
     list = items.filter((x) => x.categoria === category);
   }
 
@@ -358,26 +401,23 @@ async function handleCategory(chat_id, category) {
     return;
   }
 
-  const state = {
-    mode: "CATALOG",
-    categoryLabel: label,
-    list,
-    index: 0,
-    messageId: null,
-  };
-
+  const state = { list, index: 0, messageId: null };
   const created = await showProductCarousel(chat_id, list, 0);
   state.messageId = created.messageId;
   userState.set(chat_id, state);
 }
 
-// -------------------- Callback handler --------------------
+function currentItemFromState(chat_id) {
+  const state = userState.get(chat_id);
+  const item = state?.list?.[state?.index];
+  return { state, item };
+}
+
 async function handleCallback(cb) {
   const chat_id = cb.message?.chat?.id;
   const data = cb.data || "";
   if (!chat_id) return;
 
-  // sacar “loading…”
   await tgCall("answerCallbackQuery", { callback_query_id: cb.id }).catch(() => {});
 
   if (data === "MENU_HOME") return handleStart(chat_id);
@@ -385,17 +425,16 @@ async function handleCallback(cb) {
 
   if (data === "CAT_ALL") return handleCategory(chat_id, "__ALL__");
   if (data.startsWith("CAT_")) {
-    const raw = data.slice(4);
-    const cat = decodeURIComponent(raw);
+    const cat = decodeURIComponent(data.slice(4));
     return handleCategory(chat_id, cat);
   }
 
-  // NAV
+  // Navegación
   if (data === "PROD_NEXT" || data === "PROD_PREV") {
     const state = userState.get(chat_id);
     if (!state?.list?.length) return;
-
     const total = state.list.length;
+
     if (data === "PROD_NEXT") state.index = (state.index + 1) % total;
     if (data === "PROD_PREV") state.index = (state.index - 1 + total) % total;
 
@@ -403,31 +442,58 @@ async function handleCallback(cb) {
     return updateCarousel(chat_id, state);
   }
 
-  // QUIERO
+  // Quiero
   if (data === "PROD_WANT" || data === "PROD_WANT_SHARED") {
     return sendMessage(chat_id, "✅ Genial. Escribí <b>QUIERO</b> y te tomo el pedido.", { parse_mode: "HTML" });
   }
 
-  // ✅ COMPARTIR PRODUCTO (se genera link con deep-link y se responde con URLs clickeables)
-  if (data === "SHARE_WA" || data === "SHARE_EMAIL") {
-    const state = userState.get(chat_id);
-    const item = state?.list?.[state?.index];
+  // Abrir menú de compartir
+  if (data === "SHARE_MENU") {
+    return sendMessage(chat_id, "📣 <b>Compartir este producto por:</b>", {
+      parse_mode: "HTML",
+      reply_markup: shareMenuKeyboard(),
+    });
+  }
+
+  // Volver (solo vuelve a mostrar los botones del producto sin crear caos)
+  if (data === "SHARE_BACK") {
+    // No tocamos el mensaje del carrusel; solo respondemos con un texto corto
+    return sendMessage(chat_id, "✅ Listo. Seguimos en el producto.", { reply_markup: productKeyboard() });
+  }
+
+  // Compartir WA / Email / Telegram
+  if (data === "SHARE_WA" || data === "SHARE_EMAIL" || data === "SHARE_TG") {
+    const { item } = currentItemFromState(chat_id);
     if (!item) return;
 
-    const url = productDeepLink(item.codigo);
-    const text = `🧀 Todo Queso — ${item.nombre}\n💰 $${item.precio} (${item.unidad || "unidad"})\n\nAbrí y comprá acá:`;
+    const deep = productDeepLink(item.codigo);
+
+    const textShare =
+      `🧀 Todo Queso — ${item.nombre}\n` +
+      `💰 $${item.precio} (${item.unidad || "unidad"})\n\n` +
+      `Abrí y comprá acá:`;
 
     if (data === "SHARE_WA") {
-      const wa = waShareUrl(text, url);
+      const wa = waShareUrl(textShare, deep);
       return sendMessage(chat_id, "📣 Compartir por WhatsApp:", {
-        reply_markup: { inline_keyboard: [[{ text: "Abrir WhatsApp", url: wa }], [{ text: "🛍️ Abrir bot", url: botLink() }]] },
+        reply_markup: { inline_keyboard: [[{ text: "Abrir WhatsApp", url: wa }]] },
       });
     }
 
     if (data === "SHARE_EMAIL") {
-      const em = emailShareUrl(`Todo Queso: ${item.nombre}`, `${text}\n${url}\n\nSi querés este sistema para tu negocio, escribinos a ${SYSTEM_EMAIL}`);
+      const em = emailShareUrl(
+        `Todo Queso: ${item.nombre}`,
+        `${textShare}\n${deep}\n\nSi querés este sistema para tu negocio: ${SYSTEM_EMAIL}`
+      );
       return sendMessage(chat_id, "✉️ Compartir por Email:", {
-        reply_markup: { inline_keyboard: [[{ text: "Abrir Email", url: em }], [{ text: "🛍️ Abrir bot", url: botLink() }]] },
+        reply_markup: { inline_keyboard: [[{ text: "Abrir Email", url: em }]] },
+      });
+    }
+
+    if (data === "SHARE_TG") {
+      const tg = telegramShareUrl(textShare, deep);
+      return sendMessage(chat_id, "📨 Compartir por Telegram:", {
+        reply_markup: { inline_keyboard: [[{ text: "Elegir chat en Telegram", url: tg }]] },
       });
     }
   }
@@ -451,8 +517,8 @@ app.get("/debug", (req, res) => {
 
 app.post("/", async (req, res) => {
   res.sendStatus(200);
-
   const update = req.body || {};
+
   try {
     if (update.message) {
       const chat_id = update.message.chat.id;
@@ -464,7 +530,6 @@ app.post("/", async (req, res) => {
         return handleStart(chat_id, payload);
       }
 
-      // Si escriben QUIERO, lo dejamos básico (no rompe tu flujo)
       if ((text || "").toUpperCase().includes("QUIERO")) {
         return sendMessage(chat_id, "✅ Listo. Decime: ¿retiro o envío? (y tu dirección si es envío)");
       }
@@ -483,5 +548,5 @@ app.post("/", async (req, res) => {
 // -------------------- Start --------------------
 app.listen(PORT, () => {
   console.log("✅ Server listo en puerto", PORT);
-  console.log("✅ Webhook debería apuntar a:", PUBLIC_URL ? `${PUBLIC_URL}/` : "(PUBLIC_URL vacío)");
+  console.log("✅ URL:", PUBLIC_URL);
 });
