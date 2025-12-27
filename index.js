@@ -1,17 +1,3 @@
-/**
- * EZER_IA_BOT - Telegram bot (Webhook "/")
- * - Catálogo carrusel (editMessageMedia)
- * - Compartir PRODUCTO con 1 botón -> menú (WhatsApp / Email / Telegram)
- * - Deep-link /start prod_<CODIGO> para que el receptor vea la ficha + imagen
- *
- * ENV (Render):
- * - TELEGRAM_TOKEN   = ...
- * - PUBLIC_URL       = https://ezerbot-system.onrender.com   (sin barra final)
- * - SHEET_CSV_URL    = CSV del sheet "Catalogo"
- * - BOT_USERNAME     = Ezer_IA_Bot (opcional; si no, default Ezer_IA_Bot)
- * - SYSTEM_EMAIL     = ezerbot.assistant@gmail.com (opcional)
- */
-
 import express from "express";
 
 const app = express();
@@ -53,12 +39,11 @@ function botLink() {
 
 // hash simple y estable (para generar CODIGO si viene vacío)
 function stableHash(str) {
-  let h = 2166136261; // FNV-ish
+  let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
     h ^= str.charCodeAt(i);
     h = Math.imul(h, 16777619);
   }
-  // a base36 corto
   return (h >>> 0).toString(36).toUpperCase();
 }
 
@@ -68,20 +53,30 @@ function ensureCode(item) {
   return `AUTO_${stableHash(base)}`;
 }
 
-// Deep-link a un producto
+// Deep-link producto
 function productDeepLink(code) {
   return `https://t.me/${BOT_USERNAME}?start=prod_${encodeURIComponent(code)}`;
+}
+
+// Deep-link bot (captación)
+function botDeepLink() {
+  return `https://t.me/${BOT_USERNAME}?start=ref_share`;
 }
 
 function waShareUrl(text, url) {
   return `https://wa.me/?text=${enc(text + "\n" + url)}`;
 }
 
-function emailShareUrl(subject, body) {
+// ✅ Email 1: mailto (a veces no abre)
+function emailMailto(subject, body) {
   return `mailto:?subject=${enc(subject)}&body=${enc(body)}`;
 }
 
-// Share por Telegram (abre selector de chats de Telegram)
+// ✅ Email 2: Gmail web (abre casi siempre)
+function emailGmailWeb(to, subject, body) {
+  return `https://mail.google.com/mail/?view=cm&fs=1&to=${enc(to)}&su=${enc(subject)}&body=${enc(body)}`;
+}
+
 function telegramShareUrl(text, url) {
   return `https://t.me/share/url?url=${enc(url)}&text=${enc(text)}`;
 }
@@ -203,9 +198,7 @@ async function loadCatalog() {
       categoria: (row[I.CATEGORIA] || "").trim() || "Sin categoría",
     };
 
-    // ✅ clave: si viene sin CODIGO, generamos uno estable
     item.codigo = ensureCode(item);
-
     items.push(item);
   }
 
@@ -222,7 +215,12 @@ const userState = new Map(); // chatId -> {list, index, messageId}
 
 // -------------------- UI --------------------
 function mainMenuKeyboard() {
-  return { inline_keyboard: [[{ text: "🛍️ Catálogo", callback_data: "MENU_CATALOGO" }]] };
+  return {
+    inline_keyboard: [
+      [{ text: "🛍️ Catálogo", callback_data: "MENU_CATALOGO" }],
+      [{ text: "📣 Compartir BOT", callback_data: "SHARE_BOT_MENU" }],
+    ],
+  };
 }
 
 function categoriesKeyboard(categories) {
@@ -247,7 +245,6 @@ function productCaption(item, pos, total) {
   )}\n📌 <i>${pos} de ${total}</i>${desc}\n\n✅ Para pedir: escribí <b>QUIERO</b>`;
 }
 
-// Botones del producto (1 SOLO botón "Compartir")
 function productKeyboard() {
   return {
     inline_keyboard: [
@@ -263,7 +260,6 @@ function productKeyboard() {
   };
 }
 
-// Menú de compartir (3 opciones)
 function shareMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -271,6 +267,17 @@ function shareMenuKeyboard() {
       [{ text: "✉️ Email", callback_data: "SHARE_EMAIL" }],
       [{ text: "📨 Telegram", callback_data: "SHARE_TG" }],
       [{ text: "⬅️ Volver", callback_data: "SHARE_BACK" }],
+    ],
+  };
+}
+
+function shareBotMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "📣 Bot por WhatsApp", callback_data: "SHARE_BOT_WA" }],
+      [{ text: "✉️ Bot por Email", callback_data: "SHARE_BOT_EMAIL" }],
+      [{ text: "📨 Bot por Telegram", callback_data: "SHARE_BOT_TG" }],
+      [{ text: "🏠 Menú", callback_data: "MENU_HOME" }],
     ],
   };
 }
@@ -341,13 +348,7 @@ async function handleStart(chat_id, startPayload = "") {
         inline_keyboard: [
           [{ text: "🟢 Quiero este", callback_data: "PROD_WANT_SHARED" }],
           [{ text: "🛍️ Ver Catálogo", callback_data: "MENU_CATALOGO" }],
-          [
-            { text: "📣 Compartir (WhatsApp)", url: waShareUrl(textShare, deep) },
-            { text: "✉️ Compartir (Email)", url: emailShareUrl(`Todo Queso: ${item.nombre}`, `${textShare}\n${deep}\n\nSistema: ${SYSTEM_EMAIL}`) },
-          ],
-          [
-            { text: "📨 Compartir (Telegram)", url: telegramShareUrl(textShare, deep) },
-          ],
+          [{ text: "📣 Compartir", callback_data: "SHARE_MENU" }],
         ],
       };
 
@@ -366,8 +367,7 @@ async function handleStart(chat_id, startPayload = "") {
       return;
     }
 
-    // si no encontró el producto
-    await sendMessage(chat_id, "⚠️ Este producto ya no está disponible. Te muestro el catálogo:", {
+    await sendMessage(chat_id, "⚠️ Este producto ya no está disponible. Te muestro el menú:", {
       reply_markup: mainMenuKeyboard(),
     });
     return;
@@ -392,9 +392,7 @@ async function handleCategory(chat_id, category) {
   const { items } = await loadCatalog();
   let list = items;
 
-  if (category && category !== "__ALL__") {
-    list = items.filter((x) => x.categoria === category);
-  }
+  if (category && category !== "__ALL__") list = items.filter((x) => x.categoria === category);
 
   if (!list.length) {
     await sendMessage(chat_id, "No hay productos en esta categoría.", { reply_markup: mainMenuKeyboard() });
@@ -424,12 +422,9 @@ async function handleCallback(cb) {
   if (data === "MENU_CATALOGO") return handleCatalogMenu(chat_id);
 
   if (data === "CAT_ALL") return handleCategory(chat_id, "__ALL__");
-  if (data.startsWith("CAT_")) {
-    const cat = decodeURIComponent(data.slice(4));
-    return handleCategory(chat_id, cat);
-  }
+  if (data.startsWith("CAT_")) return handleCategory(chat_id, decodeURIComponent(data.slice(4)));
 
-  // Navegación
+  // Navegación carrusel
   if (data === "PROD_NEXT" || data === "PROD_PREV") {
     const state = userState.get(chat_id);
     if (!state?.list?.length) return;
@@ -447,7 +442,7 @@ async function handleCallback(cb) {
     return sendMessage(chat_id, "✅ Genial. Escribí <b>QUIERO</b> y te tomo el pedido.", { parse_mode: "HTML" });
   }
 
-  // Abrir menú de compartir
+  // Compartir producto
   if (data === "SHARE_MENU") {
     return sendMessage(chat_id, "📣 <b>Compartir este producto por:</b>", {
       parse_mode: "HTML",
@@ -455,19 +450,15 @@ async function handleCallback(cb) {
     });
   }
 
-  // Volver (solo vuelve a mostrar los botones del producto sin crear caos)
   if (data === "SHARE_BACK") {
-    // No tocamos el mensaje del carrusel; solo respondemos con un texto corto
     return sendMessage(chat_id, "✅ Listo. Seguimos en el producto.", { reply_markup: productKeyboard() });
   }
 
-  // Compartir WA / Email / Telegram
   if (data === "SHARE_WA" || data === "SHARE_EMAIL" || data === "SHARE_TG") {
     const { item } = currentItemFromState(chat_id);
     if (!item) return;
 
     const deep = productDeepLink(item.codigo);
-
     const textShare =
       `🧀 Todo Queso — ${item.nombre}\n` +
       `💰 $${item.precio} (${item.unidad || "unidad"})\n\n` +
@@ -481,18 +472,68 @@ async function handleCallback(cb) {
     }
 
     if (data === "SHARE_EMAIL") {
-      const em = emailShareUrl(
-        `Todo Queso: ${item.nombre}`,
-        `${textShare}\n${deep}\n\nSi querés este sistema para tu negocio: ${SYSTEM_EMAIL}`
-      );
-      return sendMessage(chat_id, "✉️ Compartir por Email:", {
-        reply_markup: { inline_keyboard: [[{ text: "Abrir Email", url: em }]] },
+      const subject = `Todo Queso: ${item.nombre}`;
+      const body = `${textShare}\n${deep}\n\nSi querés este sistema para tu negocio: ${SYSTEM_EMAIL}`;
+
+      const mailto = emailMailto(subject, body);
+      const gmail = emailGmailWeb("", subject, body);
+
+      return sendMessage(chat_id, "✉️ Compartir por Email (elegí):", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Abrir Email (mailto)", url: mailto }],
+            [{ text: "Abrir Gmail Web (recomendado)", url: gmail }],
+          ],
+        },
       });
     }
 
     if (data === "SHARE_TG") {
       const tg = telegramShareUrl(textShare, deep);
       return sendMessage(chat_id, "📨 Compartir por Telegram:", {
+        reply_markup: { inline_keyboard: [[{ text: "Elegir chat en Telegram", url: tg }]] },
+      });
+    }
+  }
+
+  // Compartir BOT
+  if (data === "SHARE_BOT_MENU") {
+    return sendMessage(chat_id, "📣 <b>Compartir el BOT por:</b>", {
+      parse_mode: "HTML",
+      reply_markup: shareBotMenuKeyboard(),
+    });
+  }
+
+  if (data === "SHARE_BOT_WA" || data === "SHARE_BOT_EMAIL" || data === "SHARE_BOT_TG") {
+    const deepBot = botDeepLink();
+    const text = `🧀 Todo Queso — Compras por Telegram\nAbrí el bot acá:`;
+
+    if (data === "SHARE_BOT_WA") {
+      const wa = waShareUrl(text, deepBot);
+      return sendMessage(chat_id, "📣 Compartir BOT por WhatsApp:", {
+        reply_markup: { inline_keyboard: [[{ text: "Abrir WhatsApp", url: wa }]] },
+      });
+    }
+
+    if (data === "SHARE_BOT_EMAIL") {
+      const subject = "Todo Queso — Compras por Telegram";
+      const body = `${text}\n${deepBot}\n\nSistema: ${SYSTEM_EMAIL}`;
+      const mailto = emailMailto(subject, body);
+      const gmail = emailGmailWeb("", subject, body);
+
+      return sendMessage(chat_id, "✉️ Compartir BOT por Email (elegí):", {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "Abrir Email (mailto)", url: mailto }],
+            [{ text: "Abrir Gmail Web (recomendado)", url: gmail }],
+          ],
+        },
+      });
+    }
+
+    if (data === "SHARE_BOT_TG") {
+      const tg = telegramShareUrl(text, deepBot);
+      return sendMessage(chat_id, "📨 Compartir BOT por Telegram:", {
         reply_markup: { inline_keyboard: [[{ text: "Elegir chat en Telegram", url: tg }]] },
       });
     }
