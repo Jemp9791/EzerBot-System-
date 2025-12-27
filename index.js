@@ -16,16 +16,13 @@ if (!SHEET_CSV_URL) console.error("Falta ENV SHEET_CSV_URL");
 
 const TG = (method) => `https://api.telegram.org/bot${TOKEN}/${method}`;
 
-// -------------------- Utils --------------------
 const enc = (s) => encodeURIComponent(String(s ?? ""));
-
 function escapeHtml(s) {
   return String(s || "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;");
 }
-
 function normalizeUrl(u) {
   if (!u) return "";
   const m = u.match(/\((https?:\/\/[^)]+)\)/);
@@ -33,11 +30,6 @@ function normalizeUrl(u) {
   return u.replace(/^\[|\]$/g, "").trim();
 }
 
-function botLink() {
-  return `https://t.me/${BOT_USERNAME}`;
-}
-
-// hash simple y estable (para generar CODIGO si viene vacío)
 function stableHash(str) {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) {
@@ -53,12 +45,9 @@ function ensureCode(item) {
   return `AUTO_${stableHash(base)}`;
 }
 
-// Deep-link producto
 function productDeepLink(code) {
   return `https://t.me/${BOT_USERNAME}?start=prod_${encodeURIComponent(code)}`;
 }
-
-// Deep-link bot (captación)
 function botDeepLink() {
   return `https://t.me/${BOT_USERNAME}?start=ref_share`;
 }
@@ -66,22 +55,16 @@ function botDeepLink() {
 function waShareUrl(text, url) {
   return `https://wa.me/?text=${enc(text + "\n" + url)}`;
 }
-
-// ✅ Email 1: mailto (a veces no abre)
-function emailMailto(subject, body) {
-  return `mailto:?subject=${enc(subject)}&body=${enc(body)}`;
-}
-
-// ✅ Email 2: Gmail web (abre casi siempre)
-function emailGmailWeb(to, subject, body) {
-  return `https://mail.google.com/mail/?view=cm&fs=1&to=${enc(to)}&su=${enc(subject)}&body=${enc(body)}`;
-}
-
 function telegramShareUrl(text, url) {
   return `https://t.me/share/url?url=${enc(url)}&text=${enc(text)}`;
 }
 
-// -------------------- Telegram API --------------------
+// ✅ Email robusto: abre SIEMPRE (porque es HTTPS tuyo)
+function emailLandingUrl(subject, body) {
+  return `${PUBLIC_URL}/go/email?subject=${enc(subject)}&body=${enc(body)}`;
+}
+
+// ---------------- Telegram API ----------------
 async function tgCall(method, payload) {
   const res = await fetch(TG(method), {
     method: "POST",
@@ -92,15 +75,12 @@ async function tgCall(method, payload) {
   if (!data?.ok) console.error("Telegram API error:", method, data);
   return data;
 }
-
 async function sendMessage(chat_id, text, extra = {}) {
   return tgCall("sendMessage", { chat_id, text, ...extra });
 }
-
 async function sendPhoto(chat_id, photo, caption, extra = {}) {
   return tgCall("sendPhoto", { chat_id, photo, caption, ...extra });
 }
-
 async function editMessageMedia(chat_id, message_id, photo, caption, extra = {}) {
   return tgCall("editMessageMedia", {
     chat_id,
@@ -110,7 +90,7 @@ async function editMessageMedia(chat_id, message_id, photo, caption, extra = {})
   });
 }
 
-// -------------------- CSV parse --------------------
+// ---------------- CSV parse ----------------
 function parseCSV(text) {
   const rows = [];
   let row = [];
@@ -154,7 +134,7 @@ function parseCSV(text) {
   return rows;
 }
 
-// -------------------- Catalog cache --------------------
+// ---------------- Catalog cache ----------------
 let catalogCache = { at: 0, items: [], categories: [] };
 
 async function loadCatalog() {
@@ -210,10 +190,10 @@ async function loadCatalog() {
   return catalogCache;
 }
 
-// -------------------- State --------------------
+// ---------------- State ----------------
 const userState = new Map(); // chatId -> {list, index, messageId}
 
-// -------------------- UI --------------------
+// ---------------- UI ----------------
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
@@ -282,7 +262,7 @@ function shareBotMenuKeyboard() {
   };
 }
 
-// -------------------- Carrusel --------------------
+// ---------------- Carrusel ----------------
 async function showProductCarousel(chat_id, list, index) {
   const total = list.length;
   const item = list[index];
@@ -329,21 +309,14 @@ async function updateCarousel(chat_id, state) {
   }
 }
 
-// -------------------- Handlers --------------------
+// ---------------- Handlers ----------------
 async function handleStart(chat_id, startPayload = "") {
-  // /start prod_<codigo>
   if (startPayload?.startsWith("prod_")) {
     const code = startPayload.slice(5);
     const { items } = await loadCatalog();
     const item = items.find((x) => String(x.codigo) === String(code));
 
     if (item) {
-      const deep = productDeepLink(item.codigo);
-      const textShare =
-        `🧀 Todo Queso — ${item.nombre}\n` +
-        `💰 $${item.precio} (${item.unidad || "unidad"})\n\n` +
-        `Abrí y comprá acá:`;
-
       const kb = {
         inline_keyboard: [
           [{ text: "🟢 Quiero este", callback_data: "PROD_WANT_SHARED" }],
@@ -373,7 +346,6 @@ async function handleStart(chat_id, startPayload = "") {
     return;
   }
 
-  // start normal
   await sendMessage(chat_id, "🧀 <b>Todo Queso</b>\n\nElegí una opción:", {
     parse_mode: "HTML",
     reply_markup: mainMenuKeyboard(),
@@ -391,7 +363,6 @@ async function handleCatalogMenu(chat_id) {
 async function handleCategory(chat_id, category) {
   const { items } = await loadCatalog();
   let list = items;
-
   if (category && category !== "__ALL__") list = items.filter((x) => x.categoria === category);
 
   if (!list.length) {
@@ -424,7 +395,6 @@ async function handleCallback(cb) {
   if (data === "CAT_ALL") return handleCategory(chat_id, "__ALL__");
   if (data.startsWith("CAT_")) return handleCategory(chat_id, decodeURIComponent(data.slice(4)));
 
-  // Navegación carrusel
   if (data === "PROD_NEXT" || data === "PROD_PREV") {
     const state = userState.get(chat_id);
     if (!state?.list?.length) return;
@@ -437,12 +407,10 @@ async function handleCallback(cb) {
     return updateCarousel(chat_id, state);
   }
 
-  // Quiero
   if (data === "PROD_WANT" || data === "PROD_WANT_SHARED") {
     return sendMessage(chat_id, "✅ Genial. Escribí <b>QUIERO</b> y te tomo el pedido.", { parse_mode: "HTML" });
   }
 
-  // Compartir producto
   if (data === "SHARE_MENU") {
     return sendMessage(chat_id, "📣 <b>Compartir este producto por:</b>", {
       parse_mode: "HTML",
@@ -454,6 +422,7 @@ async function handleCallback(cb) {
     return sendMessage(chat_id, "✅ Listo. Seguimos en el producto.", { reply_markup: productKeyboard() });
   }
 
+  // Compartir producto
   if (data === "SHARE_WA" || data === "SHARE_EMAIL" || data === "SHARE_TG") {
     const { item } = currentItemFromState(chat_id);
     if (!item) return;
@@ -471,27 +440,21 @@ async function handleCallback(cb) {
       });
     }
 
-    if (data === "SHARE_EMAIL") {
-      const subject = `Todo Queso: ${item.nombre}`;
-      const body = `${textShare}\n${deep}\n\nSi querés este sistema para tu negocio: ${SYSTEM_EMAIL}`;
-
-      const mailto = emailMailto(subject, body);
-      const gmail = emailGmailWeb("", subject, body);
-
-      return sendMessage(chat_id, "✉️ Compartir por Email (elegí):", {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Abrir Email (mailto)", url: mailto }],
-            [{ text: "Abrir Gmail Web (recomendado)", url: gmail }],
-          ],
-        },
-      });
-    }
-
     if (data === "SHARE_TG") {
       const tg = telegramShareUrl(textShare, deep);
       return sendMessage(chat_id, "📨 Compartir por Telegram:", {
         reply_markup: { inline_keyboard: [[{ text: "Elegir chat en Telegram", url: tg }]] },
+      });
+    }
+
+    // ✅ Email: abre landing page HTTPS (siempre funciona el click)
+    if (data === "SHARE_EMAIL") {
+      const subject = `Todo Queso: ${item.nombre}`;
+      const body = `${textShare}\n${deep}\n\nSi querés este sistema para tu negocio: ${SYSTEM_EMAIL}`;
+      const url = emailLandingUrl(subject, body);
+
+      return sendMessage(chat_id, "✉️ Compartir por Email:", {
+        reply_markup: { inline_keyboard: [[{ text: "Abrir opciones de Email", url }]] },
       });
     }
   }
@@ -515,32 +478,27 @@ async function handleCallback(cb) {
       });
     }
 
-    if (data === "SHARE_BOT_EMAIL") {
-      const subject = "Todo Queso — Compras por Telegram";
-      const body = `${text}\n${deepBot}\n\nSistema: ${SYSTEM_EMAIL}`;
-      const mailto = emailMailto(subject, body);
-      const gmail = emailGmailWeb("", subject, body);
-
-      return sendMessage(chat_id, "✉️ Compartir BOT por Email (elegí):", {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "Abrir Email (mailto)", url: mailto }],
-            [{ text: "Abrir Gmail Web (recomendado)", url: gmail }],
-          ],
-        },
-      });
-    }
-
     if (data === "SHARE_BOT_TG") {
       const tg = telegramShareUrl(text, deepBot);
       return sendMessage(chat_id, "📨 Compartir BOT por Telegram:", {
         reply_markup: { inline_keyboard: [[{ text: "Elegir chat en Telegram", url: tg }]] },
       });
     }
+
+    // ✅ Email BOT: landing page HTTPS
+    if (data === "SHARE_BOT_EMAIL") {
+      const subject = "Todo Queso — Compras por Telegram";
+      const body = `${text}\n${deepBot}\n\nSistema: ${SYSTEM_EMAIL}`;
+      const url = emailLandingUrl(subject, body);
+
+      return sendMessage(chat_id, "✉️ Compartir BOT por Email:", {
+        reply_markup: { inline_keyboard: [[{ text: "Abrir opciones de Email", url }]] },
+      });
+    }
   }
 }
 
-// -------------------- Routes --------------------
+// ---------------- Routes ----------------
 app.get("/", (req, res) => res.status(200).send("OK - EZER_IA_BOT LIVE"));
 
 app.get("/debug", (req, res) => {
@@ -554,6 +512,47 @@ app.get("/debug", (req, res) => {
       systemEmail: SYSTEM_EMAIL || null,
     },
   });
+});
+
+// ✅ Landing Email (para que el click siempre funcione)
+app.get("/go/email", (req, res) => {
+  const subject = String(req.query.subject || "");
+  const body = String(req.query.body || "");
+
+  const mailto = `mailto:?subject=${enc(subject)}&body=${enc(body)}`;
+  const gmail = `https://mail.google.com/mail/?view=cm&fs=1&to=&su=${enc(subject)}&body=${enc(body)}`;
+
+  // HTML simple, rápido, con 2 botones grandes + texto copiable
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.status(200).send(`
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Compartir por Email</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; padding:18px; max-width:720px; margin:auto;}
+    h2{margin:0 0 10px;}
+    .btn{display:block; text-decoration:none; padding:14px 16px; border-radius:12px; margin:10px 0; font-weight:700; text-align:center;}
+    .a{background:#111; color:#fff;}
+    .b{background:#0ea5e9; color:#fff;}
+    textarea{width:100%; height:220px; padding:12px; border-radius:12px; border:1px solid #ddd; font-size:14px;}
+    .hint{color:#555; font-size:13px; margin-top:8px;}
+  </style>
+</head>
+<body>
+  <h2>✉️ Compartir por Email</h2>
+  <div class="hint">Si un botón no abre, usá el otro. Si ninguno abre, copiá y pegá el texto.</div>
+
+  <a class="btn a" href="${mailto}">Abrir app de Email (mailto)</a>
+  <a class="btn b" href="${gmail}" target="_blank" rel="noopener">Abrir Gmail Web (recomendado)</a>
+
+  <div class="hint">Texto listo para copiar y pegar:</div>
+  <textarea readonly>${body.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")}</textarea>
+</body>
+</html>
+  `);
 });
 
 app.post("/", async (req, res) => {
@@ -586,8 +585,9 @@ app.post("/", async (req, res) => {
   }
 });
 
-// -------------------- Start --------------------
+// ---------------- Start ----------------
 app.listen(PORT, () => {
   console.log("✅ Server listo en puerto", PORT);
   console.log("✅ URL:", PUBLIC_URL);
+  console.log("✅ BOT_USERNAME:", BOT_USERNAME);
 });
