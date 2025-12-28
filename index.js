@@ -1,7 +1,6 @@
-// index.js (COMPLETO) - TODO_QUESO estable: Config robusto + webhook sólido + compartir + sellos con imagen
+// index.js (COMPLETO) - Auto-setWebhook + debug webhook + compartir + saludo + sellos
 
 const express = require("express");
-
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 
@@ -104,15 +103,12 @@ function escapeHtml(s) {
 }
 
 function driveToDirect(url) {
-  // Telegram NO muestra imágenes si es link de Drive “share”. Convertimos a directo.
   if (!url) return "";
   const u = String(url).trim();
 
-  // file/d/<ID>/view
   let m = u.match(/\/file\/d\/([^/]+)\//);
   if (m?.[1]) return `https://drive.google.com/uc?export=download&id=${m[1]}`;
 
-  // open?id=<ID>
   m = u.match(/[?&]id=([^&]+)/);
   if (m?.[1]) return `https://drive.google.com/uc?export=download&id=${m[1]}`;
 
@@ -122,7 +118,6 @@ function driveToDirect(url) {
 function normalizeUrl(u) {
   if (!u) return "";
   const s = String(u).trim();
-  // si viene tipo [url] o (url)
   const m = s.match(/\((https?:\/\/[^)]+)\)/);
   const cleaned = (m?.[1] || s).replace(/^\[|\]$/g, "").trim();
   return driveToDirect(cleaned);
@@ -130,7 +125,7 @@ function normalizeUrl(u) {
 
 // ---------------- Cache ----------------
 let configCache = { at: 0, data: {} };
-let catalogCache = { at: 0, items: [], categories: [] };
+let catalogCache = { at: 0, items: [] };
 
 async function loadConfig() {
   const now = Date.now();
@@ -143,11 +138,12 @@ async function loadConfig() {
 
   const headers = (rows[0] || []).map((h) => String(h || "").trim().toUpperCase());
 
-  // intenta KEY/VALUE o CLAVE/VALOR; si no, usa 1ra y 2da columna SIEMPRE.
   let idxKey = headers.indexOf("KEY");
   let idxVal = headers.indexOf("VALUE");
   if (idxKey < 0) idxKey = headers.indexOf("CLAVE");
   if (idxVal < 0) idxVal = headers.indexOf("VALOR");
+
+  // fallback: A y B
   if (idxKey < 0) idxKey = 0;
   if (idxVal < 0) idxVal = 1;
 
@@ -183,7 +179,6 @@ async function loadCatalog() {
     UNIDAD: idx("UNIDAD"),
     DESCRIPCION: idx("DESCRIPCION"),
     IMAGEN: idx("IMAGEN"),
-    CATEGORIA: idx("CATEGORIA"),
   };
 
   const items = [];
@@ -198,15 +193,10 @@ async function loadCatalog() {
       unidad: String(row[I.UNIDAD] || "").trim(),
       descripcion: String(row[I.DESCRIPCION] || "").trim(),
       imagen: normalizeUrl(String(row[I.IMAGEN] || "").trim()),
-      categoria: String(row[I.CATEGORIA] || "").trim() || "Sin categoría",
     });
   }
 
-  const categories = [...new Set(items.map((x) => x.categoria))].sort((a, b) =>
-    a.localeCompare(b, "es", { sensitivity: "base" })
-  );
-
-  catalogCache = { at: now, items, categories };
+  catalogCache = { at: now, items };
   return catalogCache;
 }
 
@@ -283,7 +273,7 @@ function shareTextForBot() {
   return `🧀 Todo Queso — Compras por Telegram\nAbrí el bot acá 👉 ${botLink("B")}`;
 }
 
-// ---------------- Flujos ----------------
+// ---------------- Core ----------------
 async function ensureBotUsername() {
   if (BOT_USERNAME) return;
   const me = await tgCall("getMe", {});
@@ -322,17 +312,13 @@ async function welcome(chat_id, payload = "") {
     .filter(Boolean)
     .join("\n");
 
-  // payload de producto compartido
-  if (payload && payload.startsWith("P_")) {
-    if (logo) await sendPhoto(chat_id, logo, text, { parse_mode: "HTML", reply_markup: mainMenuReply() });
-    else await sendMessage(chat_id, text, { parse_mode: "HTML", reply_markup: mainMenuReply() });
+  if (logo) await sendPhoto(chat_id, logo, text, { parse_mode: "HTML", reply_markup: mainMenuReply() });
+  else await sendMessage(chat_id, text, { parse_mode: "HTML", reply_markup: mainMenuReply() });
 
+  if (payload && payload.startsWith("P_")) {
     const code = payload.slice(2);
     return showSharedProduct(chat_id, code);
   }
-
-  if (logo) return sendPhoto(chat_id, logo, text, { parse_mode: "HTML", reply_markup: mainMenuReply() });
-  return sendMessage(chat_id, text, { parse_mode: "HTML", reply_markup: mainMenuReply() });
 }
 
 async function showSellos(chat_id) {
@@ -341,11 +327,10 @@ async function showSellos(chat_id) {
   const txt =
     `🏷️ <b>Tu tarjeta de sellos</b>\n\n` +
     `✅ Tus sellos se suman con compras.\n` +
-    `📣 Si alguien compra desde un link compartido, ahí sí suma sello al que compartió.\n\n` +
-    `👉 (Tracking de referidos lo conectamos cuando todo esté estable.)`;
+    `📣 (Referidos: cuando alguien compra desde un link compartido, suma sello al que compartió.)`;
 
   if (card) return sendPhoto(chat_id, card, txt, { parse_mode: "HTML", reply_markup: mainMenuReply() });
-  return sendMessage(chat_id, txt + `\n\n⚠️ No encontré CARD_URL en Config o no es una URL válida.`, {
+  return sendMessage(chat_id, txt + `\n\n⚠️ Falta CARD_URL (o no es URL válida) en Config.`, {
     parse_mode: "HTML",
     reply_markup: mainMenuReply(),
   });
@@ -462,19 +447,19 @@ async function showSharedProduct(chat_id, code) {
     productCaption(item, 1, 1) +
     `\n\n✅ Si querés pedirlo, escribí <b>QUIERO</b>`;
 
-  if (item.imagen) {
-    return sendPhoto(chat_id, item.imagen, caption, { parse_mode: "HTML", reply_markup: mainMenuReply() });
-  }
+  if (item.imagen) return sendPhoto(chat_id, item.imagen, caption, { parse_mode: "HTML", reply_markup: mainMenuReply() });
   return sendMessage(chat_id, caption, { parse_mode: "HTML", reply_markup: mainMenuReply() });
 }
 
-// ---------------- Webhook ----------------
+// ---------------- Routes ----------------
 app.get("/", (req, res) => res.status(200).send("OK"));
 
 app.get("/debug", async (req, res) => {
   const cfg = await loadConfig().catch(() => ({}));
   res.json({
     ok: true,
+    publicUrl: PUBLIC_URL,
+    webhookExpected: `${PUBLIC_URL}/telegram`,
     botUsername: BOT_USERNAME || null,
     hasToken: !!TOKEN,
     hasCatalog: !!SHEET_CSV_URL,
@@ -492,13 +477,12 @@ app.get("/debug", async (req, res) => {
   });
 });
 
-// ESTE endpoint te “cierra” el tema del webhook: lo reinstala siempre.
-app.get("/install", async (req, res) => {
-  const url = `${PUBLIC_URL}/telegram`;
-  const out = await tgCall("setWebhook", { url });
-  res.json({ ok: true, setWebhookTo: url, telegram: out });
+app.get("/webhook", async (req, res) => {
+  const info = await tgCall("getWebhookInfo", {});
+  res.json({ ok: true, info });
 });
 
+// Telegram webhook endpoint
 app.post("/telegram", async (req, res) => {
   res.sendStatus(200);
   const u = req.body || {};
@@ -552,7 +536,6 @@ app.post("/telegram", async (req, res) => {
         });
       }
 
-      // fallback vendedor
       return sendMessage(chat_id, "👋 Estoy acá 😊 Tocá <b>Catálogo</b> o <b>Sellos</b> abajo.", {
         parse_mode: "HTML",
         reply_markup: mainMenuReply(),
@@ -563,18 +546,25 @@ app.post("/telegram", async (req, res) => {
   }
 });
 
-// Boot
+// Boot + AUTO setWebhook
 app.listen(PORT, async () => {
   console.log("✅ Server puerto:", PORT);
-  console.log("✅ Webhook endpoint esperado:", `${PUBLIC_URL}/telegram`);
+  console.log("✅ PUBLIC_URL:", PUBLIC_URL);
+  console.log("✅ Webhook endpoint:", `${PUBLIC_URL}/telegram`);
 
+  // getMe + username
   const me = await tgCall("getMe", {});
   if (me?.ok) {
     BOT_USERNAME = me?.result?.username || BOT_USERNAME;
     console.log("✅ BOT_USERNAME:", BOT_USERNAME);
   }
 
-  // log Config
+  // AUTO SET WEBHOOK (clava el webhook correcto en cada deploy)
+  const whUrl = `${PUBLIC_URL}/telegram`;
+  const wh = await tgCall("setWebhook", { url: whUrl });
+  console.log("✅ setWebhook:", wh);
+
+  // log config keys
   try {
     const cfg = await loadConfig();
     console.log("✅ CONFIG keys:", Object.keys(cfg).length);
