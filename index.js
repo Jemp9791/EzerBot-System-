@@ -1,5 +1,3 @@
-// index.js (COMPLETO) - Auto-setWebhook + debug webhook + compartir + saludo + sellos
-
 const express = require("express");
 const app = express();
 app.use(express.json({ limit: "2mb" }));
@@ -143,7 +141,6 @@ async function loadConfig() {
   if (idxKey < 0) idxKey = headers.indexOf("CLAVE");
   if (idxVal < 0) idxVal = headers.indexOf("VALOR");
 
-  // fallback: A y B
   if (idxKey < 0) idxKey = 0;
   if (idxVal < 0) idxVal = 1;
 
@@ -254,14 +251,22 @@ function botLink(payload = "") {
   const p = payload ? `?start=${payload}` : "";
   return `https://t.me/${BOT_USERNAME}${p}`;
 }
+
+/**
+ * IMPORTANTE:
+ * - Telegram NO acepta mailto: como URL de botón inline
+ * - Por eso Email se hace con un link HTTPS (Gmail compose)
+ */
 function shareLinks(text) {
   const t = encodeURIComponent(text);
   return {
     wa: `https://wa.me/?text=${t}`,
     tg: `https://t.me/share/url?url=${t}`,
-    em: `mailto:?subject=${encodeURIComponent("Todo Queso")}&body=${t}`,
+    // Gmail compose (HTTPS): Telegram lo acepta
+    em: `https://mail.google.com/mail/?view=cm&fs=1&tf=1&su=${encodeURIComponent("Todo Queso")}&body=${t}`,
   };
 }
+
 function shareTextForProduct(item) {
   const payload = `P_${(item.codigo || "").slice(0, 32)}`;
   const link = botLink(payload);
@@ -454,35 +459,11 @@ async function showSharedProduct(chat_id, code) {
 // ---------------- Routes ----------------
 app.get("/", (req, res) => res.status(200).send("OK"));
 
-app.get("/debug", async (req, res) => {
-  const cfg = await loadConfig().catch(() => ({}));
-  res.json({
-    ok: true,
-    publicUrl: PUBLIC_URL,
-    webhookExpected: `${PUBLIC_URL}/telegram`,
-    botUsername: BOT_USERNAME || null,
-    hasToken: !!TOKEN,
-    hasCatalog: !!SHEET_CSV_URL,
-    hasConfig: !!CONFIG_CSV_URL,
-    configKeysCount: Object.keys(cfg).length,
-    configKeysSample: Object.keys(cfg).slice(0, 25),
-    configPreview: {
-      BUSINESS_NAME: cfg.BUSINESS_NAME || cfg.NOMBRE_NEGOCIO || null,
-      LOGO_URL: cfg.LOGO_URL || cfg.LOGO || null,
-      CARD_URL: cfg.CARD_URL || cfg.TARJETA_URL || cfg.TARJETA_VIRTUAL || null,
-      ADDRESS: cfg.ADDRESS || cfg.DIRECCION || null,
-      HOURS: cfg.HOURS || cfg.HORARIOS || null,
-      STATUS: cfg.STATUS || cfg.ESTADO || null,
-    },
-  });
-});
-
 app.get("/webhook", async (req, res) => {
   const info = await tgCall("getWebhookInfo", {});
   res.json({ ok: true, info });
 });
 
-// Telegram webhook endpoint
 app.post("/telegram", async (req, res) => {
   res.sendStatus(200);
   const u = req.body || {};
@@ -500,6 +481,7 @@ app.post("/telegram", async (req, res) => {
 
       if (data === "P:NEXT") return updateCarousel(chat_id, "NEXT");
       if (data === "P:PREV") return updateCarousel(chat_id, "PREV");
+
       if (data === "P:BUY") {
         return sendMessage(chat_id, "🟢 Perfecto. Escribí <b>QUIERO</b> y te pregunto cantidad 😉", {
           parse_mode: "HTML",
@@ -546,25 +528,21 @@ app.post("/telegram", async (req, res) => {
   }
 });
 
-// Boot + AUTO setWebhook
 app.listen(PORT, async () => {
   console.log("✅ Server puerto:", PORT);
   console.log("✅ PUBLIC_URL:", PUBLIC_URL);
   console.log("✅ Webhook endpoint:", `${PUBLIC_URL}/telegram`);
 
-  // getMe + username
   const me = await tgCall("getMe", {});
   if (me?.ok) {
     BOT_USERNAME = me?.result?.username || BOT_USERNAME;
     console.log("✅ BOT_USERNAME:", BOT_USERNAME);
   }
 
-  // AUTO SET WEBHOOK (clava el webhook correcto en cada deploy)
   const whUrl = `${PUBLIC_URL}/telegram`;
   const wh = await tgCall("setWebhook", { url: whUrl });
   console.log("✅ setWebhook:", wh);
 
-  // log config keys
   try {
     const cfg = await loadConfig();
     console.log("✅ CONFIG keys:", Object.keys(cfg).length);
