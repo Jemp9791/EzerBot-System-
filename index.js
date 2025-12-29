@@ -1,6 +1,5 @@
 /**
- * EZERBOT - Bot + Catálogo carrusel + Carrito + Checkout + Vendedor confirma pago + Sellos + Referidos
- * (MEJORA: Categorías con emoji automático + paginado + texto vendedor)
+ * EZERBOT - Bot vendedor + Catálogo por categorías + Carrusel con imagen + Carrito + Checkout + Confirmación vendedor + Sellos + Referidos
  *
  * ENV (Render):
  * - TELEGRAM_TOKEN
@@ -92,7 +91,6 @@ function normalizeUnit(u) {
   return "unidad";
 }
 
-// Limpia markdown tipo [url](url) o corchetes
 function normalizeUrl(u) {
   const t = safe(u);
   if (!t) return "";
@@ -115,6 +113,10 @@ function splitPipe(s) {
     .split("|")
     .map((x) => x.trim())
     .filter(Boolean);
+}
+
+function onlyDigitsPhone(s) {
+  return safe(s).replace(/[^\d]/g, "");
 }
 
 // ---------------- Cache Config / Catalog ----------------
@@ -176,12 +178,12 @@ const db = loadData();
  *   sellos: number,
  *   referredBy: chatId|null,
  *   rewardedReferrer: boolean,
- *   lastTicketId: string|null
+ *   lastOrderId: string|null
  * }
  */
 function getUser(chatId) {
   const id = String(chatId);
-  if (!db.users[id]) db.users[id] = { sellos: 0, referredBy: null, rewardedReferrer: false, lastTicketId: null };
+  if (!db.users[id]) db.users[id] = { sellos: 0, referredBy: null, rewardedReferrer: false, lastOrderId: null };
   return db.users[id];
 }
 
@@ -192,7 +194,7 @@ function addSellos(chatId, n) {
   return u.sellos;
 }
 
-// ---------------- Estado en memoria ----------------
+// ---------------- Estado en memoria (carrito/checkout/carrusel) ----------------
 const state = new Map();
 /**
  * state[chatId] = {
@@ -200,8 +202,7 @@ const state = new Map();
  *  listSnapshot: [],
  *  awaitingQty: { code, unit } | null,
  *  cart: Map(code -> {prod, qty}),
- *  checkout: null | {...},
- *  catsPage: number
+ *  checkout: null | { step, delivery, address, name, phone, payMethod, awaitingProof, orderId, proofText }
  * }
  */
 function getState(chatId) {
@@ -215,92 +216,31 @@ function getState(chatId) {
       awaitingQty: null,
       cart: new Map(),
       checkout: null,
-      catsPage: 0,
     });
   }
   return state.get(id);
 }
 
-// ---------------- ✅ Emoji categorías (AUTO + opcional) ----------------
-function stripEmojiPrefix(name) {
-  // quita emoji al inicio si ya viene "🥛 Lácteos"
-  return safe(name).replace(/^[\p{Extended_Pictographic}\uFE0F\s]+/u, "").trim();
-}
-function hasEmojiPrefix(name) {
-  return /^[\p{Extended_Pictographic}\uFE0F]/u.test(safe(name));
-}
-function emojiForCategory(catRaw) {
-  const cat = stripEmojiPrefix(catRaw).toLowerCase();
-
-  const rules = [
-    { keys: ["promo", "oferta", "combo", "descuento", "sale"], e: "🧨" },
-    { keys: ["láct", "lact", "leche", "yog", "ques", "mante", "crema"], e: "🥛" },
-    { keys: ["fiambre", "jam", "salame", "mort", "bond", "palet"], e: "🥓" },
-    { keys: ["pan", "panif", "fact", "medial", "torta"], e: "🍞" },
-    { keys: ["beb", "gase", "agua", "vino", "cerve", "jugo"], e: "🥤" },
-    { keys: ["dulce", "postre", "helado", "choco", "caramelo"], e: "🍫" },
-    { keys: ["fruta", "verd", "ensalada"], e: "🥗" },
-    { keys: ["café", "cafe", "té", "te", "mate"], e: "☕" },
-    { keys: ["mascota", "perro", "gato"], e: "🐾" },
-    { keys: ["limpieza", "hogar"], e: "🧼" },
-    { keys: ["farm", "medic", "salud"], e: "💊" },
-    { keys: ["ferre", "herram"], e: "🛠️" },
-    { keys: ["ropa", "indument"], e: "👕" },
-    { keys: ["regalo", "gift"], e: "🎁" },
-  ];
-
-  for (const r of rules) {
-    if (r.keys.some((k) => cat.includes(k))) return r.e;
-  }
-  return "🛍️"; // genérico
-}
-
-function formatCategoryButtonLabel(catRaw) {
-  const raw = safe(catRaw);
-  if (!raw) return "🛍️ Sin categoría";
-  if (hasEmojiPrefix(raw)) return raw; // respetar si ya trae
-  const clean = stripEmojiPrefix(raw);
-  return `${emojiForCategory(clean)} ${clean}`;
-}
-
-// ---------------- Menú principal (teclado) ----------------
+// ---------------- Menú principal (solo 4 opciones) ----------------
 function replyMenu(cfg) {
-  // (No cambio tu estructura acá para no romperte nada)
-  const rows = [
-    [{ text: "🛍️ Catálogo" }, { text: "🛒 Carrito" }],
-    [{ text: "✅ Finalizar compra" }],
-    [{ text: "🎫 Tarjeta de sellos" }, { text: "📣 Compartir bot" }],
-  ];
-  return { keyboard: rows, resize_keyboard: true, one_time_keyboard: false };
+  return {
+    keyboard: [
+      [{ text: "🛍️ Catálogo" }],
+      [{ text: "🎫 Sellos" }, { text: "📣 Compartir bot" }],
+      [{ text: "🆘 Ayuda" }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  };
 }
 
-// ---------------- Categorías (paginadas) ----------------
-const CATS_PER_PAGE = 8; // 4 filas de 2 botones
-
-function uniqueCategories(items) {
-  const set = new Set();
-  for (const p of items) {
-    const c = safe(p.categoria || p.CATEGORIA);
-    if (c) set.add(stripEmojiPrefix(c)); // guardamos limpio
-  }
-  return Array.from(set).sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
-}
-
-function categoriesKeyboardPaged(categories, page = 0) {
+// ---------------- Keyboards inline ----------------
+function categoriesKeyboard(categories) {
   const rows = [];
-
-  // primera fila "Todas"
-  rows.push([{ text: "📚 Todas", callback_data: "CAT:ALL" }]);
-
-  const totalPages = Math.max(1, Math.ceil(categories.length / CATS_PER_PAGE));
-  const p = Math.max(0, Math.min(page, totalPages - 1));
-  const start = p * CATS_PER_PAGE;
-  const slice = categories.slice(start, start + CATS_PER_PAGE);
-
+  // 2 por fila
   let r = [];
-  for (const c of slice) {
-    const label = formatCategoryButtonLabel(c);
-    r.push({ text: label, callback_data: `CAT:${encodeURIComponent(c)}` }); // filtro usa limpio
+  for (const c of categories) {
+    r.push({ text: c, callback_data: `CAT:${encodeURIComponent(c)}` });
     if (r.length === 2) {
       rows.push(r);
       r = [];
@@ -308,20 +248,9 @@ function categoriesKeyboardPaged(categories, page = 0) {
   }
   if (r.length) rows.push(r);
 
-  // paginación
-  if (totalPages > 1) {
-    rows.push([
-      { text: "⬅️", callback_data: `CATS:PAGE:${Math.max(0, p - 1)}` },
-      { text: `📄 ${p + 1}/${totalPages}`, callback_data: "CATS:NOOP" },
-      { text: "➡️", callback_data: `CATS:PAGE:${Math.min(totalPages - 1, p + 1)}` },
-    ]);
-  }
-
-  rows.push([{ text: "🛒 Carrito", callback_data: "OPEN:CART" }]);
   return { inline_keyboard: rows };
 }
 
-// ---------------- Productos (carrusel book) ----------------
 function productNavKeyboard() {
   return {
     inline_keyboard: [
@@ -335,7 +264,7 @@ function productNavKeyboard() {
       ],
       [
         { text: "📁 Categorías", callback_data: "OPEN:CATS" },
-        { text: "🛒 Carrito", callback_data: "OPEN:CART" },
+        { text: "🛒 Ver carrito", callback_data: "OPEN:CART" },
       ],
     ],
   };
@@ -345,23 +274,41 @@ function afterAddKeyboard() {
   return {
     inline_keyboard: [
       [{ text: "🟢 Seguir comprando", callback_data: "OPEN:CATS" }],
-      [{ text: "✅ Finalizar compra", callback_data: "CHECKOUT:START" }],
       [{ text: "🛒 Ver carrito", callback_data: "OPEN:CART" }],
+      [{ text: "✅ Finalizar compra", callback_data: "CHECKOUT:START" }],
+    ],
+  };
+}
+
+function cartKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "🟢 Seguir comprando", callback_data: "OPEN:CATS" }],
+      [{ text: "✅ Finalizar compra", callback_data: "CHECKOUT:START" }],
+      [{ text: "🧹 Vaciar carrito", callback_data: "CART:CLEAR" }],
     ],
   };
 }
 
 function shareOptionsKeyboard(waUrl, tgUrl) {
   return {
-    inline_keyboard: [
-      [{ text: "💬 WhatsApp", url: waUrl }, { text: "✈️ Telegram", url: tgUrl }],
-    ],
+    inline_keyboard: [[{ text: "💬 WhatsApp", url: waUrl }, { text: "✈️ Telegram", url: tgUrl }]],
   };
+}
+
+// ---------------- Catálogo helpers ----------------
+function uniqueCategories(items) {
+  const set = new Set();
+  for (const p of items) {
+    const c = safe(p.categoria || p.CATEGORIA);
+    if (c) set.add(c);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "es", { sensitivity: "base" }));
 }
 
 function filterCatalog(items, filter) {
   if (!filter || filter === "ALL") return items;
-  return items.filter((p) => stripEmojiPrefix(safe(p.categoria || p.CATEGORIA)) === stripEmojiPrefix(filter));
+  return items.filter((p) => safe(p.categoria || p.CATEGORIA) === filter);
 }
 
 function productCaption(cfg, p, filterLabel, index, total) {
@@ -371,11 +318,7 @@ function productCaption(cfg, p, filterLabel, index, total) {
   const precio = safe(p.precio || p.PRECIO);
   const moneda = pick(cfg, "Moneda", "ARS");
 
-  const head =
-    filterLabel && filterLabel !== "ALL"
-      ? `🛍️ <b>${escapeHtml(filterLabel)}</b>\n`
-      : `🛍️ <b>Catálogo</b>\n`;
-
+  const head = `🛍️ <b>${escapeHtml(filterLabel || "Catálogo")}</b>\n`;
   const pos = `📖 <i>${index + 1} de ${total}</i>\n\n`;
 
   let cap = head + pos;
@@ -384,6 +327,10 @@ function productCaption(cfg, p, filterLabel, index, total) {
     cap += `💰 <b>${escapeHtml(moneda)} ${escapeHtml(precio || "-")}</b> ${unidad === "kg" ? "(x kg)" : "(por unidad)"}\n`;
   }
   if (desc) cap += `📝 ${desc}\n`;
+
+  // micro “vendedor” (sugerencia ética, sin manipular)
+  cap += `\n✨ Si querés, te lo preparo bien fresquito. Tocá <b>Quiero éste</b> y decime cuánto.\n`;
+
   return cap;
 }
 
@@ -394,7 +341,7 @@ async function renderCarousel(chatId, forceNew = false) {
   const list = filterCatalog(all, st.catFilter);
 
   if (!list.length) {
-    await sendMessage(chatId, "Todavía no hay productos en esa categoría.", {
+    await sendMessage(chatId, "Todavía no hay productos en esa categoría. Elegí otra 👇", {
       reply_markup: { inline_keyboard: [[{ text: "📁 Categorías", callback_data: "OPEN:CATS" }]] },
     });
     return;
@@ -411,6 +358,7 @@ async function renderCarousel(chatId, forceNew = false) {
   const caption = productCaption(cfg, p, label, st.index, list.length);
   const kb = productNavKeyboard();
 
+  // Para evitar “no cambia” en algunos clientes, si forceNew -> mensaje nuevo
   if (!forceNew && st.messageId) {
     if (img && img.startsWith("http")) {
       await editMessageMedia(chatId, st.messageId, img, caption, { reply_markup: kb });
@@ -420,6 +368,7 @@ async function renderCarousel(chatId, forceNew = false) {
     return;
   }
 
+  // nuevo mensaje
   let created;
   if (img && img.startsWith("http")) {
     created = await sendPhoto(chatId, img, caption, { parse_mode: "HTML", reply_markup: kb });
@@ -455,8 +404,16 @@ async function sendShareBot(chatId) {
   const payload = `ref_${chatId}`;
   const link = buildBotStartLink(cfg, payload);
 
-  const texto = `${pick(cfg, "TextoCompartirBot", "Compartí este bot")} 🧀\n\n${link}\n\n${pick(cfg, "TextoSistema", "")}`.trim();
-  const { wa, tg } = shareUrlsForText(texto);
+  const textoSistema = pick(cfg, "TextoSistema", "").trim();
+  const email = pick(cfg, "EmailSistema", "").trim();
+
+  const texto =
+    `${pick(cfg, "TextoCompartirBot", "Compartí este bot")} ✅\n\n` +
+    `${link}\n\n` +
+    (textoSistema ? `${textoSistema}\n` : "") +
+    (email ? `📩 Email: ${email}\n` : "");
+
+  const { wa, tg } = shareUrlsForText(texto.trim());
 
   await sendMessage(chatId, "📣 Elegí dónde querés compartir el bot:", {
     reply_markup: shareOptionsKeyboard(wa, tg),
@@ -474,7 +431,12 @@ async function sendShareProduct(chatId) {
   const payload = `prod_${code}__ref_${chatId}`;
   const link = buildBotStartLink(cfg, payload);
 
-  const text = `🧀 ${pick(cfg, "NegocioNombre", "Todo Queso")} te recomienda:\n${nombre}\n\nEntrá directo acá 👇\n${link}`;
+  const negocio = pick(cfg, "NegocioNombre", "Nuestro local");
+  const text =
+    `🧀 ${negocio}\n\n` +
+    `⭐ ${nombre}\n\n` +
+    `Entrá directo al producto acá 👇\n${link}`;
+
   const { wa, tg } = shareUrlsForText(text);
 
   await sendMessage(chatId, "📣 Compartir este producto:", {
@@ -482,7 +444,7 @@ async function sendShareProduct(chatId) {
   });
 }
 
-// ---------------- ✅ Welcome “vendedor” ----------------
+// ---------------- Welcome (vendedor) ----------------
 async function sendWelcome(chatId, startPayload = "") {
   const cfg = await getConfig();
 
@@ -495,20 +457,7 @@ async function sendWelcome(chatId, startPayload = "") {
   const desc = safe(cfg?.Descripcion || "");
   const estado = pick(cfg, "Estado", "Abierto");
 
-  let text = `🧀 <b>${escapeHtml(negocio)}</b>\n\n`;
-  if (estado) text += `🟢 <b>${escapeHtml(estado)}</b>\n`;
-  if (dir) text += `📍 ${escapeHtml(dir)}\n`;
-  if (hor) text += `🕒 ${escapeHtml(hor)}\n`;
-  if (tel) text += `📞 ${escapeHtml(tel)}\n`;
-  if (ig) text += `📸 ${escapeHtml(ig)}\n`;
-
-  if (desc) text += `\n${escapeHtml(desc)}\n`;
-
-  // “Vendedor” sin ser pesado:
-  text += `\n💡 Tip rápido: si querés algo para hoy, mirá <b>Promos</b> o <b>Picadas</b> primero 😉\n`;
-  text += `¿Qué te tienta más ahora? 👇`;
-
-  // registrar referido / producto igual que tu lógica anterior
+  // registrar referido / deep-link producto
   if (startPayload) {
     const u = getUser(chatId);
 
@@ -530,43 +479,45 @@ async function sendWelcome(chatId, startPayload = "") {
     }
   }
 
+  let text = `🧀 <b>${escapeHtml(negocio)}</b>\n\n`;
+  if (estado) text += `🟢 <b>${escapeHtml(estado)}</b>\n`;
+  if (dir) text += `📍 ${escapeHtml(dir)}\n`;
+  if (hor) text += `🕒 ${escapeHtml(hor)}\n`;
+  if (tel) text += `📞 ${escapeHtml(tel)}\n`;
+  if (ig) text += `📸 ${escapeHtml(ig)}\n`;
+
+  if (desc) text += `\n${escapeHtml(desc)}\n`;
+
+  // vendedor (ético + efectivo)
+  text += `\n✨ Si querés algo rápido, te recomiendo entrar a <b>Catálogo</b>, elegir y me decís cuánto.\n`;
+  text += `¿Te muestro por categorías? 👇`;
+
+  const extra = { parse_mode: "HTML", reply_markup: replyMenu(cfg) };
+
   if (logo && logo.startsWith("http")) {
-    const sent = await sendPhoto(chatId, logo, text, {
-      parse_mode: "HTML",
-      reply_markup: replyMenu(cfg),
-    });
-    if (startPayload?.startsWith("prod_")) {
-      await openProductFromPayload(chatId, startPayload);
-    }
-    return sent;
+    await sendPhoto(chatId, logo, text, extra);
+  } else {
+    await sendMessage(chatId, text, extra);
   }
 
-  const sent = await sendMessage(chatId, text, { parse_mode: "HTML", reply_markup: replyMenu(cfg) });
+  // si venía con producto, abrir directo ese producto
   if (startPayload?.startsWith("prod_")) {
     await openProductFromPayload(chatId, startPayload);
   }
-  return sent;
 }
 
-// ---------------- ✅ Categorías con paginado + vendedor ----------------
 async function openCategories(chatId) {
-  const cfg = await getConfig();
-  const st = getState(chatId);
   const all = await getCatalog();
   const categories = uniqueCategories(all);
 
-  const negocio = pick(cfg, "NegocioNombre", "el local");
-  const vendedorText =
-    `🧑‍💼 <b>${escapeHtml(negocio)}</b>\n\n` +
-    `¿Qué estás buscando hoy?\n` +
-    `• Algo para picar ahora 😋\n` +
-    `• Una promo para llevar 🎁\n` +
-    `• Quesos y fiambres para la semana 🧀\n\n` +
-    `Elegí una categoría 👇`;
+  if (!categories.length) {
+    await sendMessage(chatId, "Todavía no hay categorías cargadas en el catálogo.", {});
+    return;
+  }
 
-  await sendMessage(chatId, vendedorText, {
+  await sendMessage(chatId, "🛍️ <b>Elegí una categoría</b> 👇", {
     parse_mode: "HTML",
-    reply_markup: categoriesKeyboardPaged(categories, st.catsPage || 0),
+    reply_markup: categoriesKeyboard(categories),
   });
 }
 
@@ -579,17 +530,18 @@ async function openProductFromPayload(chatId, payload) {
   if (!found) return;
 
   const st = getState(chatId);
-  st.catFilter = stripEmojiPrefix(safe(found.categoria || found.CATEGORIA)) || "ALL";
+  st.catFilter = safe(found.categoria || found.CATEGORIA) || "ALL";
 
   const list = filterCatalog(all, st.catFilter);
   const idx = list.findIndex((x) => safe(x.codigo || x.CODIGO) === code);
   st.index = idx >= 0 ? idx : 0;
-  st.messageId = null;
 
+  // forzar mensaje nuevo para que SIEMPRE se vea
+  st.messageId = null;
   await renderCarousel(chatId, true);
 }
 
-// ---------------- Carrito (tu código intacto) ----------------
+// ---------------- Carrito ----------------
 function cartTotal(st) {
   let total = 0;
   for (const { prod, qty } of st.cart.values()) {
@@ -623,18 +575,23 @@ async function showCart(chatId) {
 
   await sendMessage(chatId, text, {
     parse_mode: "HTML",
-    reply_markup: {
-      inline_keyboard: [
-        [{ text: "🟢 Seguir comprando", callback_data: "OPEN:CATS" }],
-        [{ text: "✅ Finalizar compra", callback_data: "CHECKOUT:START" }],
-      ],
-    },
+    reply_markup: cartKeyboard(),
   });
 }
 
-// ---------------- Cantidad ----------------
-async function askQty(chatId, prod) {
+async function clearCart(chatId) {
   const cfg = await getConfig();
+  const st = getState(chatId);
+  st.cart = new Map();
+  st.checkout = null;
+  st.awaitingQty = null;
+  await sendMessage(chatId, "🧹 Listo, carrito vaciado. Si querés, volvemos al catálogo 👇", {
+    reply_markup: replyMenu(cfg),
+  });
+}
+
+// ---------------- Cantidad (texto) ----------------
+async function askQty(chatId, prod) {
   const st = getState(chatId);
 
   const code = safe(prod.codigo || prod.CODIGO);
@@ -648,13 +605,13 @@ async function askQty(chatId, prod) {
       `¿Cuántos <b>gramos</b> querés de <b>${name}</b>?\n` +
       `Ejemplos: 250, 400, 1000\n\n` +
       `Escribí el número (desde 100g).`;
-    await sendMessage(chatId, msg, { parse_mode: "HTML", reply_markup: replyMenu(cfg) });
+    await sendMessage(chatId, msg, { parse_mode: "HTML" });
   } else {
     const msg =
       `¿Cuántas <b>unidades</b> querés de <b>${name}</b>?\n` +
       `Ejemplos: 1, 2, 3\n\n` +
       `Escribí el número.`;
-    await sendMessage(chatId, msg, { parse_mode: "HTML", reply_markup: replyMenu(cfg) });
+    await sendMessage(chatId, msg, { parse_mode: "HTML" });
   }
 }
 
@@ -665,7 +622,6 @@ function roundQty(n, unit) {
 }
 
 async function addToCart(chatId, prod, qty) {
-  const cfg = await getConfig();
   const st = getState(chatId);
 
   const code = safe(prod.codigo || prod.CODIGO);
@@ -685,24 +641,23 @@ async function addToCart(chatId, prod, qty) {
   await sendMessage(
     chatId,
     `✅ Agregado: <b>${escapeHtml(safe(prod.nombre || prod.NOMBRE))}</b> — <b>${q}</b> ${unit === "kg" ? "kg" : "unid"}`,
-    { parse_mode: "HTML", reply_markup: afterAddKeyboard() }
+    {
+      parse_mode: "HTML",
+      reply_markup: afterAddKeyboard(),
+    }
   );
 }
 
-// ---------------- Checkout + sellos + vendedor confirma (TU CÓDIGO ORIGINAL) ----------------
-// (Para no romperte nada, dejo todo igual a tu script desde acá hacia abajo)
-
-// ---- shipping / order id
+// ---------------- Checkout ----------------
 function shippingCost(cfg) {
   const raw = String(pick(cfg, "CostoEnvio", "0")).replace(",", ".");
   const v = Number(raw);
   return isFinite(v) ? v : 0;
 }
+
 function nextOrderId() {
   return `ORD-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
 }
-
-// ... (TODO: mantengo exactamente tu código desde startCheckout hasta el final, sin cambios)
 
 async function startCheckout(chatId) {
   const cfg = await getConfig();
@@ -728,7 +683,6 @@ async function startCheckout(chatId) {
   const rows = [];
   if (yes(cfg, "UsaEnvíoDomicilio")) rows.push([{ text: "🚚 Envío a domicilio", callback_data: "DELIVERY:HOME" }]);
   if (yes(cfg, "UsaRetiroLocal")) rows.push([{ text: "🏪 Retiro por el local", callback_data: "DELIVERY:PICKUP" }]);
-  rows.push([{ text: "🛒 Ver carrito", callback_data: "OPEN:CART" }]);
 
   await sendMessage(chatId, "Elegí cómo querés recibir tu pedido 👇", { reply_markup: { inline_keyboard: rows } });
 }
@@ -738,16 +692,19 @@ async function checkoutAskAddress(chatId) {
   st.checkout.step = "address";
   await sendMessage(chatId, "📍 Decime tu <b>dirección completa</b> (calle y número).", { parse_mode: "HTML" });
 }
+
 async function checkoutAskName(chatId) {
   const st = getState(chatId);
   st.checkout.step = "name";
   await sendMessage(chatId, "👤 Decime tu <b>nombre</b>.", { parse_mode: "HTML" });
 }
+
 async function checkoutAskPhone(chatId) {
   const st = getState(chatId);
   st.checkout.step = "phone";
   await sendMessage(chatId, "📞 Escribí tu <b>teléfono</b> (solo números, con código de área).", { parse_mode: "HTML" });
 }
+
 async function checkoutAskPayment(chatId) {
   const cfg = await getConfig();
   const st = getState(chatId);
@@ -756,7 +713,7 @@ async function checkoutAskPayment(chatId) {
   const rows = [];
   rows.push([{ text: "💵 Efectivo", callback_data: "PAY:CASH" }]);
 
-  if (yes(cfg, "PermitirPagoOnline") || safe(cfg.TipoPagoOnline).toUpperCase() === "TRANSFERENCIA") {
+  if (yes(cfg, "PermitirPagoOnline") || safe(cfg.TipoPagoOnline).toUpperCase() === "TRANSFERENCIA" || safe(cfg.TipoPagoOnline).toUpperCase() === "TRANSFERENCIA") {
     rows.push([{ text: "🏦 Transferencia", callback_data: "PAY:TRANSFER" }]);
   }
 
@@ -797,11 +754,14 @@ async function checkoutSendTransferInfo(chatId) {
   const cfg = await getConfig();
   const st = getState(chatId);
   const alias = pick(cfg, "AliasTransferencia", "");
-  const msgPendiente = pick(cfg, "MensajeTransferencia", "Perfecto. Transferí y mandá el comprobante por acá.");
+  const cbu = pick(cfg, "CBUPago", "");
+  // mensaje pendiente (NO confirmar)
+  const msgPendiente =
+    pick(cfg, "MensajeTransferencia", "").trim() ||
+    "Realizá la transferencia y pegá acá el comprobante. Tu pedido se confirmará una vez validado el pago.";
 
   let text = `🏦 <b>Transferencia</b>\n\n`;
   if (alias) text += `Alias: <b>${escapeHtml(alias)}</b>\n`;
-  const cbu = pick(cfg, "CBUPago", "");
   if (cbu) text += `CBU: <b>${escapeHtml(cbu)}</b>\n`;
   text += `\n${escapeHtml(msgPendiente)}\n\n`;
   text += `📎 Pegá acá el <b>comprobante</b> (texto o captura).`;
@@ -812,18 +772,19 @@ async function checkoutSendTransferInfo(chatId) {
   await sendMessage(chatId, text, { parse_mode: "HTML" });
 }
 
-async function notifyVendorPending(chatId) {
+async function notifyVendorPending(buyerChatId, reason = "PEDIDO") {
   const cfg = await getConfig();
-  const st = getState(chatId);
+  const st = getState(buyerChatId);
   const vendorChat = pick(cfg, "ChatIdVendedor", "");
   if (!vendorChat) return;
 
   const { text } = buildTicketText(cfg, st);
+  const aviso = pick(cfg, "TextoAvisoVendedor", "Tenés un pago pendiente de confirmación ✅");
+  const payload = `VCONF:${st.checkout.orderId}:${buyerChatId}`;
 
-  const aviso = pick(cfg, "TextoAvisoVendedor", "Tenés un pago pendiente de confirmación  ✅");
-  const payload = `VCONF:${st.checkout.orderId}:${chatId}`;
+  const header = `🧑‍💼 <b>${escapeHtml(aviso)}</b>\n<b>Motivo:</b> ${escapeHtml(reason)}\n\n`;
 
-  await sendMessage(vendorChat, `🧑‍💼 <b>${escapeHtml(aviso)}</b>\n\n${text}`, {
+  await sendMessage(vendorChat, header + text, {
     parse_mode: "HTML",
     reply_markup: {
       inline_keyboard: [
@@ -837,16 +798,16 @@ async function notifyVendorPending(chatId) {
 async function checkoutFinishPending(chatId) {
   const cfg = await getConfig();
   const st = getState(chatId);
-
   const { text } = buildTicketText(cfg, st);
 
   let msg = `✅ <b>Pedido tomado</b>\n\n${text}\n`;
   msg += `\n🕐 Queda <b>pendiente de confirmación</b>. Te avisamos apenas lo validemos ✅`;
 
   await sendMessage(chatId, msg, { parse_mode: "HTML", reply_markup: replyMenu(cfg) });
-  await notifyVendorPending(chatId);
+  await notifyVendorPending(chatId, st.checkout.payMethod === "TRANSFER" ? "TRANSFERENCIA (pendiente)" : "EFECTIVO (a coordinar)");
 }
 
+// Confirmación del vendedor
 async function vendorConfirm(orderId, buyerChatId, ok) {
   const cfg = await getConfig();
   const st = getState(buyerChatId);
@@ -856,13 +817,15 @@ async function vendorConfirm(orderId, buyerChatId, ok) {
     if (ok) {
       await sendMessage(buyerChatId, `✅ Pago confirmado. Si no ves tu pedido, escribí /start.`, { reply_markup: replyMenu(cfg) });
     } else {
-      await sendMessage(buyerChatId, `❌ No pudimos confirmar el pago. Escribinos y lo resolvemos.`, { reply_markup: replyMenu(cfg) });
+      await sendMessage(buyerChatId, `❌ No pudimos confirmar el pago. Si querés, escribinos por Ayuda y lo resolvemos.`, {
+        reply_markup: replyMenu(cfg),
+      });
     }
     return;
   }
 
   if (!ok) {
-    await sendMessage(buyerChatId, `❌ No pudimos confirmar el pago del pedido <b>${escapeHtml(orderId)}</b>. Revisá el comprobante o escribinos.`, {
+    await sendMessage(buyerChatId, `❌ No pudimos confirmar el pago del pedido <b>${escapeHtml(orderId)}</b>. Revisá el comprobante o escribinos por Ayuda.`, {
       parse_mode: "HTML",
       reply_markup: replyMenu(cfg),
     });
@@ -870,45 +833,57 @@ async function vendorConfirm(orderId, buyerChatId, ok) {
     return;
   }
 
-  const montoPorSello = Number(String(pick(cfg, "MontoPorSello", "10000")).replace(",", "."));
-  const total = cartTotal(st) + (st.checkout.delivery === "HOME" ? shippingCost(cfg) : 0);
+  // ✅ Pago confirmado: sumar sellos (antes de limpiar)
+  let earned = 0;
+  if (yes(cfg, "UsaSellos")) {
+    const montoPorSello = Number(String(pick(cfg, "MontoPorSello", "10000")).replace(",", "."));
+    const envio = st.checkout.delivery === "HOME" ? shippingCost(cfg) : 0;
+    const total = cartTotal(st) + envio;
 
-  if (isFinite(montoPorSello) && montoPorSello > 0) {
-    const earned = Math.floor(Number(total) / montoPorSello);
-    if (earned > 0) addSellos(buyerChatId, earned);
+    if (isFinite(montoPorSello) && montoPorSello > 0) {
+      earned = Math.floor(Number(total) / montoPorSello);
+      if (earned > 0) addSellos(buyerChatId, earned);
+    }
+
+    // ✅ Bonus por referido (solo 1 vez por referido que compra)
+    const bonus = Number(String(pick(cfg, "BonusSellosShare", "0")).replace(",", "."));
+    if (bonus > 0 && u.referredBy && !u.rewardedReferrer) {
+      addSellos(u.referredBy, bonus);
+      u.rewardedReferrer = true;
+      saveData(db);
+
+      await sendMessage(
+        u.referredBy,
+        `🎉 ¡Genial! Un referido compró desde tu link.\nSumaste <b>${bonus}</b> sello(s) extra ✅`,
+        { parse_mode: "HTML" }
+      );
+    }
   }
 
-  const bonus = Number(String(pick(cfg, "BonusSellosShare", "0")).replace(",", "."));
-  if (bonus > 0 && u.referredBy && !u.rewardedReferrer) {
-    addSellos(u.referredBy, bonus);
-    u.rewardedReferrer = true;
-    saveData(db);
-
-    await sendMessage(u.referredBy, `🎉 ¡Genial! Un referido compró desde tu link. Sumaste <b>${bonus}</b> sello(s) extra ✅`, {
-      parse_mode: "HTML",
-    });
-  }
-
-  const confirmText = pick(cfg, "TextoConfirmacionPedido", "Gracias. Tu compra fué confirmada y está en preparación.  ✅");
+  // ✅ Confirmación final al cliente
+  const confirmText = pick(cfg, "TextoConfirmacionPedido", "Gracias. Tu compra fue confirmada y está en preparación ✅");
   const ticket = buildTicketText(cfg, st).text;
 
-  await sendMessage(buyerChatId, `✅ <b>${escapeHtml(confirmText)}</b>\n\n${ticket}`, {
-    parse_mode: "HTML",
-    reply_markup: replyMenu(cfg),
-  });
+  let msg = `✅ <b>${escapeHtml(confirmText)}</b>\n\n${ticket}`;
+  if (earned > 0) msg += `\n\n🎫 Sumaste <b>${earned}</b> sello(s). Mirá tu progreso en <b>Sellos</b>.`;
 
+  await sendMessage(buyerChatId, msg, { parse_mode: "HTML", reply_markup: replyMenu(cfg) });
+
+  // limpiar carrito / checkout
   st.cart = new Map();
   st.awaitingQty = null;
   st.checkout = null;
+
+  u.lastOrderId = orderId;
+  saveData(db);
 }
 
-// ---------------- Tarjeta Sellos ----------------
-function progressBar(current, meta) {
-  const m = Math.max(1, Number(meta || 10));
-  const c = Math.max(0, Math.min(m, Number(current || 0)));
-  const filled = "🟩".repeat(Math.min(c, 10));
-  const empty = "⬜".repeat(Math.max(0, 10 - filled.length));
-  return filled + empty;
+// ---------------- Sellos ----------------
+function progressBar10(current, goal) {
+  const g = Math.max(1, Number(goal || 10));
+  const ratio = Math.max(0, Math.min(1, Number(current || 0) / g));
+  const filled = Math.round(ratio * 10);
+  return "🟩".repeat(filled) + "⬜".repeat(10 - filled);
 }
 
 async function showStamps(chatId) {
@@ -933,6 +908,7 @@ async function showStamps(chatId) {
     let nextMeta = null;
     let nextName = "";
     let nextBen = "";
+
     for (let i = 0; i < metas.length; i++) {
       const m = Number(String(metas[i]).replace(",", "."));
       if (isFinite(m) && sellos < m) {
@@ -942,12 +918,13 @@ async function showStamps(chatId) {
         break;
       }
     }
+
     if (nextMeta !== null) {
       const faltan = nextMeta - sellos;
       text += `\nSiguiente nivel: <b>${escapeHtml(nextName)}</b>\n`;
       text += `Te faltan: <b>${faltan}</b> sello(s)\n`;
       if (nextBen) text += `Beneficio: <i>${escapeHtml(nextBen)}</i>\n`;
-      text += `\n${progressBar(sellos, nextMeta)}\n`;
+      text += `\n${progressBar10(sellos, nextMeta)}\n`;
     } else {
       text += `\n🎉 ¡Ya estás en el nivel máximo!\n`;
     }
@@ -961,12 +938,54 @@ async function showStamps(chatId) {
   }
 }
 
-// ---------------- Handlers ----------------
+// ---------------- Ayuda ----------------
+async function showHelp(chatId) {
+  const cfg = await getConfig();
+  const negocio = pick(cfg, "NegocioNombre", "El negocio");
+  const dir = pick(cfg, "NegocioDireccion", "");
+  const hor = pick(cfg, "NegocioHorario", "");
+  const estado = pick(cfg, "Estado", "");
+  const wa = pick(cfg, "WhatsAppLink", "");
+  const ig = pick(cfg, "NegocioInstagram", "");
+  const tel = pick(cfg, "NegocioTelefono", "");
+  const email = pick(cfg, "EmailSistema", "");
+  const textoSistema = pick(cfg, "TextoSistema", "");
+
+  let text = `🆘 <b>Ayuda</b>\n\n`;
+  text += `<b>${escapeHtml(negocio)}</b>\n`;
+  if (estado) text += `🟢 ${escapeHtml(estado)}\n`;
+  if (dir) text += `📍 ${escapeHtml(dir)}\n`;
+  if (hor) text += `🕒 ${escapeHtml(hor)}\n`;
+  if (tel) text += `📞 ${escapeHtml(tel)}\n`;
+  if (ig) text += `📸 ${escapeHtml(ig)}\n`;
+
+  text += `\nSi querés hablar con una persona del local, tocá WhatsApp 👇`;
+
+  const buttons = [];
+  if (wa) buttons.push([{ text: "💬 WhatsApp (hablar con el local)", url: wa }]);
+  if (ig) buttons.push([{ text: "📸 Instagram", url: `https://instagram.com/${ig.replace("@", "")}` }]);
+
+  // vender el sistema (sin mailto, solo texto y que se contacten por email)
+  if (textoSistema || email) {
+    let sys = `\n\n💼 <b>Sistema para tu negocio</b>\n`;
+    if (textoSistema) sys += `${escapeHtml(textoSistema)}\n`;
+    if (email) sys += `📩 Email: <b>${escapeHtml(email)}</b>\n`;
+    text += sys;
+  }
+
+  await sendMessage(chatId, text, {
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: buttons },
+  });
+}
+
+// ---------------- Webhook handler ----------------
 app.post("/telegram", async (req, res) => {
   res.sendStatus(200);
 
   const update = req.body || {};
   try {
+    // Mensajes
     if (update.message) {
       const chatId = update.message.chat.id;
       const txt = safe(update.message.text);
@@ -974,12 +993,14 @@ app.post("/telegram", async (req, res) => {
       const st = getState(chatId);
       const cfg = await getConfig();
 
+      // /start con payload
       if (t.startsWith("/start")) {
         const payload = safe(txt.split(" ")[1] || "");
         await sendWelcome(chatId, payload);
         return;
       }
 
+      // si esperamos cantidad
       if (st.awaitingQty) {
         const all = await getCatalog();
         const code = st.awaitingQty.code;
@@ -1004,13 +1025,14 @@ app.post("/telegram", async (req, res) => {
 
         let qty = n;
         if (unit === "kg") {
-          if (n >= 100) qty = n / 1000;
+          if (n >= 100) qty = n / 1000; // gramos -> kg
         }
 
         await addToCart(chatId, prod, qty);
         return;
       }
 
+      // pasos de checkout por texto
       if (st.checkout && st.checkout.step) {
         const step = st.checkout.step;
 
@@ -1025,7 +1047,7 @@ app.post("/telegram", async (req, res) => {
           return;
         }
         if (step === "phone") {
-          st.checkout.phone = txt;
+          st.checkout.phone = onlyDigitsPhone(txt);
           await checkoutAskPayment(chatId);
           return;
         }
@@ -1037,21 +1059,29 @@ app.post("/telegram", async (req, res) => {
             reply_markup: replyMenu(cfg),
           });
 
+          // avisar al vendedor con comprobante
           const vendorChat = pick(cfg, "ChatIdVendedor", "");
           if (vendorChat) {
             const aviso = pick(cfg, "TextoAvisoVendedor", "Tenés un pago pendiente de confirmación ✅");
             const { text } = buildTicketText(cfg, st);
             const payload = `VCONF:${st.checkout.orderId}:${chatId}`;
 
-            await sendMessage(vendorChat, `📎 <b>Comprobante recibido</b>\n<b>${escapeHtml(aviso)}</b>\n\n<b>Pedido:</b>\n${text}\n\n<b>Comprobante:</b>\n${escapeHtml(txt)}`, {
-              parse_mode: "HTML",
-              reply_markup: {
-                inline_keyboard: [
-                  [{ text: "✅ Confirmar pago", callback_data: `${payload}:OK` }],
-                  [{ text: "❌ Rechazar", callback_data: `${payload}:NO` }],
-                ],
-              },
-            });
+            const header = `📎 <b>Comprobante recibido</b>\n`;
+            const warningSameChat = String(vendorChat) === String(chatId) ? "\n<b>⚠️ Nota:</b> Este chat es el mismo del cliente.\n" : "\n";
+
+            await sendMessage(
+              vendorChat,
+              `${header}<b>${escapeHtml(aviso)}</b>${warningSameChat}\n<b>Pedido:</b>\n${text}\n\n<b>Comprobante:</b>\n${escapeHtml(txt)}`,
+              {
+                parse_mode: "HTML",
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: "✅ Confirmar pago", callback_data: `${payload}:OK` }],
+                    [{ text: "❌ Rechazar", callback_data: `${payload}:NO` }],
+                  ],
+                },
+              }
+            );
           }
 
           await checkoutFinishPending(chatId);
@@ -1059,24 +1089,18 @@ app.post("/telegram", async (req, res) => {
         }
       }
 
+      // saludos
       if (t === "hola" || t === "buen día" || t === "buen dia" || t === "buenas") {
         await sendWelcome(chatId, "");
         return;
       }
 
+      // Menú principal
       if (txt === "🛍️ Catálogo") {
         await openCategories(chatId);
         return;
       }
-      if (txt === "🛒 Carrito") {
-        await showCart(chatId);
-        return;
-      }
-      if (txt === "✅ Finalizar compra") {
-        await startCheckout(chatId);
-        return;
-      }
-      if (txt === "🎫 Tarjeta de sellos") {
+      if (txt === "🎫 Sellos") {
         await showStamps(chatId);
         return;
       }
@@ -1084,11 +1108,17 @@ app.post("/telegram", async (req, res) => {
         await sendShareBot(chatId);
         return;
       }
+      if (txt === "🆘 Ayuda") {
+        await showHelp(chatId);
+        return;
+      }
 
+      // fallback
       await sendMessage(chatId, "Elegí una opción del menú 👇", { reply_markup: replyMenu(cfg) });
       return;
     }
 
+    // Callbacks
     if (update.callback_query) {
       const cb = update.callback_query;
       const chatId = cb.message?.chat?.id;
@@ -1104,29 +1134,27 @@ app.post("/telegram", async (req, res) => {
         await openCategories(chatId);
         return;
       }
+
       if (data === "OPEN:CART") {
         await showCart(chatId);
         return;
       }
 
-      // paginado categorías
-      if (data.startsWith("CATS:PAGE:")) {
-        const p = Number(data.split(":")[2] || "0");
-        st.catsPage = isFinite(p) ? p : 0;
-        await openCategories(chatId);
+      if (data === "CART:CLEAR") {
+        await clearCart(chatId);
         return;
       }
-      if (data === "CATS:NOOP") return;
 
+      // categorías
       if (data.startsWith("CAT:")) {
-        const f = data.slice(4);
-        st.catFilter = f === "ALL" ? "ALL" : decodeURIComponent(f);
+        st.catFilter = decodeURIComponent(data.slice(4));
         st.index = 0;
-        st.messageId = null;
+        st.messageId = null; // clave para que SIEMPRE se vea el carrusel
         await renderCarousel(chatId, true);
         return;
       }
 
+      // carrusel
       if (data === "P:NEXT") {
         const list = st.listSnapshot || [];
         if (!list.length) {
@@ -1137,6 +1165,7 @@ app.post("/telegram", async (req, res) => {
         await renderCarousel(chatId, false);
         return;
       }
+
       if (data === "P:PREV") {
         const list = st.listSnapshot || [];
         if (!list.length) {
@@ -1160,13 +1189,14 @@ app.post("/telegram", async (req, res) => {
         return;
       }
 
+      // Checkout
       if (data === "CHECKOUT:START") {
         await startCheckout(chatId);
         return;
       }
 
       if (data.startsWith("DELIVERY:")) {
-        const mode = data.split(":")[1];
+        const mode = data.split(":")[1]; // HOME / PICKUP
         if (!st.checkout) {
           st.checkout = {
             step: "delivery",
@@ -1191,7 +1221,7 @@ app.post("/telegram", async (req, res) => {
       }
 
       if (data.startsWith("PAY:")) {
-        const pm = data.split(":")[1];
+        const pm = data.split(":")[1]; // CASH / TRANSFER
         if (!st.checkout) return;
         st.checkout.payMethod = pm;
 
@@ -1200,10 +1230,12 @@ app.post("/telegram", async (req, res) => {
           return;
         }
 
+        // CASH: pedido tomado pendiente (coordina vendedor)
         await checkoutFinishPending(chatId);
         return;
       }
 
+      // Confirmación vendedor
       if (data.startsWith("VCONF:")) {
         const parts = data.split(":");
         const orderId = parts[1] || "";
@@ -1213,12 +1245,14 @@ app.post("/telegram", async (req, res) => {
 
         await vendorConfirm(orderId, buyer, ok);
 
-        await sendMessage(chatId, ok ? "✅ Listo. Pedido confirmado al cliente." : "❌ Rechazado. Se avisó al cliente.", {
+        // aviso al vendedor (si el vendedor es este chat)
+        await sendMessage(chatId, ok ? "✅ Listo. Se confirmó el pedido al cliente." : "❌ Rechazado. Se avisó al cliente.", {
           reply_markup: replyMenu(cfg),
         });
         return;
       }
 
+      // fallback
       await sendMessage(chatId, "✅", { reply_markup: replyMenu(cfg) });
       return;
     }
