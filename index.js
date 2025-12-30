@@ -97,6 +97,14 @@ function nowId() {
   return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
+// --- Reply Markup Helpers ---
+function rmMainMenu() {
+  return mainMenuKeyboardReply();
+}
+function rmRemoveKeyboard() {
+  return { remove_keyboard: true };
+}
+
 // ---------------- CSV Parser (simple y robusto) ----------------
 function splitCsvLine(line) {
   const out = [];
@@ -105,7 +113,6 @@ function splitCsvLine(line) {
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (ch === '"') {
-      // dobles comillas dentro de string
       if (inQ && line[i + 1] === '"') {
         cur += '"';
         i++;
@@ -157,18 +164,15 @@ async function fetchSmart(url) {
   const ct = (res.headers.get("content-type") || "").toLowerCase();
   const txt = await res.text();
 
-  // intentamos JSON aunque el content-type no diga json
   try {
     const j = JSON.parse(txt);
     return { kind: "json", data: j, contentType: ct, raw: txt };
   } catch (_) {}
 
-  // si viene csv
   if (ct.includes("text/csv") || txt.trim().startsWith("CLAVE,") || txt.trim().startsWith("CODIGO,")) {
     return { kind: "csv", data: parseCsv(txt), contentType: ct, raw: txt };
   }
 
-  // fallback: igual intento csv
   const maybe = parseCsv(txt);
   if (maybe.headers.length >= 2) return { kind: "csv", data: maybe, contentType: ct, raw: txt };
 
@@ -193,7 +197,6 @@ async function loadConfig() {
   if (smart.kind === "json") {
     cfg = (smart.data?.config && typeof smart.data.config === "object") ? smart.data.config : smart.data;
   } else {
-    // CSV CLAVE,VALOR
     const { rows } = smart.data;
     for (const r of rows) {
       const k = r["CLAVE"] ?? r["Clave"] ?? r["key"] ?? r["KEY"] ?? "";
@@ -221,15 +224,13 @@ async function loadCatalog() {
     rawItems = Array.isArray(cat?.items) ? cat.items : [];
     rawCats = Array.isArray(cat?.categories) ? cat.categories : [];
   } else {
-    // CSV con encabezados
     const { rows } = smart.data;
     rawItems = rows;
-    rawCats = []; // las calculamos por items
+    rawCats = [];
   }
 
   const items = rawItems
     .map((x) => {
-      // soporte JSON o CSV
       const codigo = String(x.codigo ?? x.CODIGO ?? x.id ?? x.ID ?? "").trim();
       const nombre = String(x.nombre ?? x.NOMBRE ?? "").trim();
       const precio = toNumberSafe(x.precio ?? x.PRECIO ?? 0);
@@ -440,7 +441,7 @@ async function handleCategory(chat_id, category) {
   }
 
   if (!list.length) {
-    return sendMessage(chat_id, "No hay productos en esta categoría.", { reply_markup: mainMenuKeyboardReply() });
+    return sendMessage(chat_id, "No hay productos en esta categoría.", { reply_markup: rmMainMenu() });
   }
 
   const st = getState(chat_id);
@@ -451,6 +452,7 @@ async function handleCategory(chat_id, category) {
   st.messageId = null;
   st.awaitingQty = false;
   st.pendingItem = null;
+  st.sharedItem = null; // limpia compartido
 
   const created = await showProductCarousel(chat_id, list, 0, label);
   st.messageId = created.messageId;
@@ -458,12 +460,36 @@ async function handleCategory(chat_id, category) {
 }
 
 // ---------------- Cantidad (pesable vs unidad) ----------------
-function parseQty(text) {
+
+// ✅ si escribe "200g" => gramos
+function parseQtyRaw(text) {
   const t = String(text || "").trim().toLowerCase();
-  const g = t.match(/^(\d+)\s*(g|gr|gramos)?$/);
-  if (g) return { kind: "GRAMOS", value: Number(g[1]), text: `${Number(g[1])}g` };
-  const u = t.match(/^(\d+)$/);
-  if (u) return { kind: "UNIDADES", value: Number(u[1]), text: `${Number(u[1])}` };
+
+  // gramos SOLO si viene con sufijo g/gr/gramos (para no confundir unidades)
+  const mg = t.match(/^(\d+)\s*(g|gr|gramos)$/);
+  if (mg) return { kind: "GRAMOS", value: Number(mg[1]), text: `${Number(mg[1])}g` };
+
+  // solo número
+  const mu = t.match(/^(\d+)$/);
+  if (mu) return { kind: "NUM", value: Number(mu[1]), text: `${Number(mu[1])}` };
+
+  return null;
+}
+
+// ✅ si es pesable: "200" se toma como 200g
+// ✅ si es unidad: "2" se toma como 2 unidades
+function parseQtyForItem(text, item) {
+  const raw = parseQtyRaw(text);
+  if (!raw) return null;
+
+  const pesable = isPesable(item);
+  if (raw.kind === "GRAMOS") return raw;
+
+  if (raw.kind === "NUM") {
+    if (pesable) return { kind: "GRAMOS", value: raw.value, text: `${raw.value}g` };
+    return { kind: "UNIDADES", value: raw.value, text: `${raw.value}` };
+  }
+
   return null;
 }
 
@@ -471,7 +497,7 @@ async function askQuantity(chat_id, item) {
   const pesable = isPesable(item);
 
   const txt = pesable
-    ? `🟢 <b>${escapeHtml(item.nombre)}</b>\n\nDecime cuánto querés en <b>gramos</b>.\nEj: <b>200g</b> o <b>500g</b>`
+    ? `🟢 <b>${escapeHtml(item.nombre)}</b>\n\nDecime cuánto querés en <b>gramos</b>.\nEj: <b>200</b> (son 200g) o <b>500g</b>`
     : `🟢 <b>${escapeHtml(item.nombre)}</b>\n\nDecime cuántas <b>unidades</b> querés.\nEj: <b>1</b> o <b>2</b>`;
 
   const st = getState(chat_id);
@@ -479,7 +505,8 @@ async function askQuantity(chat_id, item) {
   st.pendingItem = item;
   userState.set(chat_id, st);
 
-  return sendMessage(chat_id, txt, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+  // ✅ clave: durante cantidad NO teclado grande
+  return sendMessage(chat_id, txt, { parse_mode: "HTML", reply_markup: rmRemoveKeyboard() });
 }
 
 async function addToCart(chat_id, item, qty) {
@@ -511,6 +538,7 @@ async function addToCart(chat_id, item, qty) {
     reply_markup: {
       inline_keyboard: [
         [{ text: "🧾 Ver carrito", callback_data: "CART:VIEW" }],
+        [{ text: "✅ Finalizar compra", callback_data: "CHECKOUT:START" }],
         [{ text: "🛍️ Seguir comprando", callback_data: "CAT_MENU" }],
       ],
     },
@@ -527,7 +555,7 @@ async function showCart(chat_id) {
   if (!cart.items.length) {
     return sendMessage(chat_id, "🧾 <b>Carrito</b>\n\nTodavía no agregaste productos.\n👉 Tocá <b>Catálogo</b> para empezar 😉", {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboardReply(),
+      reply_markup: rmMainMenu(),
     });
   }
 
@@ -565,7 +593,7 @@ async function startCheckout(chat_id) {
 
   if (!cart.items.length) {
     return sendMessage(chat_id, "Tu carrito está vacío 😊 Tocá Catálogo para agregar productos.", {
-      reply_markup: mainMenuKeyboardReply(),
+      reply_markup: rmMainMenu(),
     });
   }
 
@@ -579,6 +607,9 @@ async function startCheckout(chat_id) {
   if (usaEnvio) opciones.push([{ text: `🚚 Envío a domicilio (+${money(costoEnvio, moneda)})`, callback_data: "CHECKOUT:ENVIO" }]);
   if (!opciones.length) opciones.push([{ text: "✅ Continuar", callback_data: "CHECKOUT:RETIRO" }]);
 
+  // botón volver al carrito para que no se pierdan
+  opciones.push([{ text: "⬅️ Volver al carrito", callback_data: "CART:VIEW" }]);
+
   const od = orders.get(chat_id) || {};
   od.id = nowId();
   od.delivery = null;
@@ -587,6 +618,7 @@ async function startCheckout(chat_id) {
   od.pendingProof = false;
   orders.set(chat_id, od);
 
+  // ✅ clave: durante checkout NO teclado grande
   return sendMessage(chat_id, `✅ <b>Finalizar compra</b>\n\nElegí cómo querés recibir tu pedido:`, {
     parse_mode: "HTML",
     reply_markup: { inline_keyboard: opciones },
@@ -604,9 +636,11 @@ async function chooseDelivery(chat_id, delivery) {
     const st = getState(chat_id);
     st.awaitingAddress = true;
     userState.set(chat_id, st);
+
+    // ✅ clave: pidiendo dirección NO teclado grande
     return sendMessage(chat_id, `🚚 <b>Envío a domicilio</b>\n\n${escapeHtml(texto)}`, {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboardReply(),
+      reply_markup: rmRemoveKeyboard(),
     });
   }
   return choosePaymentMenu(chat_id);
@@ -632,6 +666,8 @@ async function choosePaymentMenu(chat_id) {
   if (permitirPagoOnline && tipoPagoOnline === "TRANSFERENCIA") {
     botones.push([{ text: "🏦 Transferencia", callback_data: "PAY:TRANSFER" }]);
   }
+
+  botones.push([{ text: "⬅️ Volver", callback_data: "CHECKOUT:START" }]);
 
   return sendMessage(chat_id, `💳 <b>Forma de pago</b>\n\nTotal a pagar: <b>${escapeHtml(moneda)} ${escapeHtml(total)}</b>\nElegí una opción:`, {
     parse_mode: "HTML",
@@ -720,6 +756,7 @@ async function finalizeOrder(chat_id, needsProof) {
 
   if (needsProof) txt += `\n📌 Queda <b>pendiente</b> hasta que el negocio valide la transferencia.`;
 
+  // ✅ vuelve el teclado grande recién al final
   return sendMessage(chat_id, txt, {
     parse_mode: "HTML",
     reply_markup: {
@@ -750,7 +787,13 @@ async function setPayment(chat_id, payment) {
 
     const alias = cfg?.AliasTransferencia || "";
     const cbu = cfg?.CBUPago || "";
-    const msg = cfg?.MensajeTransferencia || "Hacé la transferencia y enviá el comprobante por acá.";
+
+    // ✅ texto correcto: NO afirmar que ya lo recibió
+    const msgCfg = (cfg?.MensajeTransferencia || "").trim();
+    const msg =
+      msgCfg
+        ? msgCfg
+        : "Realizá la transferencia y enviá el comprobante por acá. Tu pedido se prepara cuando confirmamos el pago ✅";
 
     const texto =
       `🏦 <b>Transferencia</b>\n\n` +
@@ -764,7 +807,8 @@ async function setPayment(chat_id, payment) {
     st.awaitingProof = true;
     userState.set(chat_id, st);
 
-    return sendMessage(chat_id, texto, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+    // ✅ clave: esperando comprobante NO teclado grande
+    return sendMessage(chat_id, texto, { parse_mode: "HTML", reply_markup: rmRemoveKeyboard() });
   }
 
   return choosePaymentMenu(chat_id);
@@ -799,9 +843,16 @@ async function showSharedProduct(chat_id, code) {
 
   if (!item) {
     return sendMessage(chat_id, "🧀 Te compartieron un producto, pero no lo encontré. Tocá Catálogo para verlo.", {
-      reply_markup: mainMenuKeyboardReply(),
+      reply_markup: rmMainMenu(),
     });
   }
+
+  // ✅ guarda el item compartido para que "Quiero este" funcione
+  const st = getState(chat_id);
+  st.sharedItem = item;
+  st.awaitingQty = false;
+  st.pendingItem = null;
+  userState.set(chat_id, st);
 
   const caption =
     `🎁 <b>Te compartieron este producto</b>\n\n` +
@@ -851,13 +902,13 @@ async function handleStart(chat_id, payload = "") {
     `👉 Si necesitás una mano, tocá <b>🆘 Ayuda</b>.`;
 
   if (payload && payload.startsWith("P_")) {
-    if (isHttp(logo)) await sendPhoto(chat_id, logo, bienvenida, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
-    else await sendMessage(chat_id, bienvenida, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+    if (isHttp(logo)) await sendPhoto(chat_id, logo, bienvenida, { parse_mode: "HTML", reply_markup: rmMainMenu() });
+    else await sendMessage(chat_id, bienvenida, { parse_mode: "HTML", reply_markup: rmMainMenu() });
     return showSharedProduct(chat_id, payload.slice(2));
   }
 
-  if (isHttp(logo)) return sendPhoto(chat_id, logo, bienvenida, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
-  return sendMessage(chat_id, bienvenida, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+  if (isHttp(logo)) return sendPhoto(chat_id, logo, bienvenida, { parse_mode: "HTML", reply_markup: rmMainMenu() });
+  return sendMessage(chat_id, bienvenida, { parse_mode: "HTML", reply_markup: rmMainMenu() });
 }
 
 // ---------------- Ayuda ----------------
@@ -873,7 +924,7 @@ async function handleHelp(chat_id) {
         `• Para ver lo que agregaste: <b>🧾 Carrito</b>.\n` +
         `• Para enviar tu pedido: <b>Finalizar compra</b>.\n`;
 
-  return sendMessage(chat_id, txt, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+  return sendMessage(chat_id, txt, { parse_mode: "HTML", reply_markup: rmMainMenu() });
 }
 
 // ---------------- Callbacks ----------------
@@ -915,9 +966,16 @@ async function handleCallback(cb) {
     return editMessageReplyMarkup(chat_id, st.messageId, productNavKeyboard());
   }
 
-  if (data === "P:BUY" || data === "P:BUY_SHARED") {
+  if (data === "P:BUY") {
     const st = getState(chat_id);
     const item = st?.list?.[st?.index];
+    if (!item) return;
+    return askQuantity(chat_id, item);
+  }
+
+  if (data === "P:BUY_SHARED") {
+    const st = getState(chat_id);
+    const item = st?.sharedItem;
     if (!item) return;
     return askQuantity(chat_id, item);
   }
@@ -933,7 +991,6 @@ async function handleCallback(cb) {
 
 // ---------------- Mensajes ----------------
 async function handleTextMessage(chat_id, message) {
-  const cfg = await loadConfig();
   const text = (message?.text || "").trim();
 
   if (text === "/start") return handleStart(chat_id, "");
@@ -951,34 +1008,24 @@ async function handleTextMessage(chat_id, message) {
   }
 
   if (st.awaitingQty && st.pendingItem) {
-    const qty = parseQty(text);
+    const item = st.pendingItem;
+    const qty = parseQtyForItem(text, item);
+
     if (!qty) {
-      const pesable = isPesable(st.pendingItem);
-      return sendMessage(chat_id, pesable ? "Decime gramos 😊 Ej: <b>200g</b>" : "Decime unidades 😊 Ej: <b>1</b> o <b>2</b>", {
+      const pesable = isPesable(item);
+      return sendMessage(chat_id, pesable ? "Decime gramos 😊 Ej: <b>200</b> o <b>200g</b>" : "Decime unidades 😊 Ej: <b>1</b> o <b>2</b>", {
         parse_mode: "HTML",
-        reply_markup: mainMenuKeyboardReply(),
-      });
-    }
-    if (!isPesable(st.pendingItem) && qty.kind === "GRAMOS") {
-      return sendMessage(chat_id, "Este producto se pide por <b>unidades</b>. Ej: <b>1</b> o <b>2</b> 😊", {
-        parse_mode: "HTML",
-        reply_markup: mainMenuKeyboardReply(),
-      });
-    }
-    if (isPesable(st.pendingItem) && qty.kind === "UNIDADES") {
-      return sendMessage(chat_id, "Este producto es por peso 😊 Decime gramos. Ej: <b>200g</b>", {
-        parse_mode: "HTML",
-        reply_markup: mainMenuKeyboardReply(),
+        reply_markup: rmRemoveKeyboard(),
       });
     }
 
     st.awaitingQty = false;
-    const item = st.pendingItem;
     st.pendingItem = null;
     userState.set(chat_id, st);
     return addToCart(chat_id, item, qty);
   }
 
+  // --- Menú (acá sí queremos teclado grande) ---
   if (text === "🛍️ Catálogo" || text.toUpperCase() === "CATÁLOGO" || text.toUpperCase() === "CATALOGO") return handleCatalogMenu(chat_id);
   if (text === "🧾 Carrito") return showCart(chat_id);
   if (text === "📣 Compartir bot") return handleShareBot(chat_id);
@@ -987,13 +1034,13 @@ async function handleTextMessage(chat_id, message) {
   if (text === "🏷️ Sellos") {
     return sendMessage(chat_id, `🏷️ <b>Sellos</b>\n\nEsta sección queda lista para conectar sellos reales.\nPor ahora: usá <b>Catálogo</b> + <b>Carrito</b> 😉`, {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboardReply(),
+      reply_markup: rmMainMenu(),
     });
   }
 
   return sendMessage(chat_id, "👋 Para empezar tocá <b>Catálogo</b> o <b>Carrito</b> 😊", {
     parse_mode: "HTML",
-    reply_markup: mainMenuKeyboardReply(),
+    reply_markup: rmMainMenu(),
   });
 }
 
