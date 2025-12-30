@@ -472,7 +472,6 @@ async function handleCategory(chat_id, category) {
   userState.set(chat_id, st);
 }
 
-// Abrir producto directo por /start PROD_xxx
 async function handleOpenProductByCode(chat_id, code) {
   const { items } = await loadCatalog();
   const item = items.find((x) => String(x.codigo || "").trim() === String(code || "").trim());
@@ -522,7 +521,6 @@ async function askQuantity(chat_id, item) {
 
 async function addToCart(chat_id, item, qty) {
   const cart = getCart(chat_id);
-  const cfg = await loadConfig();
 
   const priceForCalc = (isPesable(item) && Number(item.precioPorKilo || 0) > 0)
     ? Number(item.precioPorKilo || 0)
@@ -812,7 +810,6 @@ async function handleStart(chat_id, payload = "") {
     BOT_USERNAME = me?.result?.username || BOT_USERNAME;
   }
 
-  // ✅ Si entra por producto directo
   if (payload && payload.startsWith("PROD_")) {
     const code = payload.replace("PROD_", "");
     return handleOpenProductByCode(chat_id, code);
@@ -839,20 +836,10 @@ async function handleStart(chat_id, payload = "") {
     (desc ? `\n${escapeHtml(desc)}\n\n` : "\n") +
     `👉 Tocá <b>🛍️ Catálogo</b> para ver productos.\n` +
     `👉 En cada producto tocá <b>🟢 Quiero este</b> para agregar.\n` +
-    `👉 Si necesitás una mano tocá <b>🆘 Ayuda`:;
-
-  const bienvenidaFinal =
-    `👋 <b>¡Hola!</b> Bienvenido/a a <b>${escapeHtml(negocio)}</b> 🧀\n` +
-    (estadoTxt ? `${estadoTxt}\n` : "") +
-    (direccion ? `📍 ${escapeHtml(direccion)}\n` : "") +
-    (horario ? `🕒 ${escapeHtml(horario)}\n` : "") +
-    (desc ? `\n${escapeHtml(desc)}\n\n` : "\n") +
-    `👉 Tocá <b>🛍️ Catálogo</b> para ver productos.\n` +
-    `👉 En cada producto tocá <b>🟢 Quiero este</b> para agregar.\n` +
     `👉 Si necesitás una mano tocá <b>🆘 Ayuda</b>.`;
 
-  if (isHttp(logo)) return sendPhoto(chat_id, logo, bienvenidaFinal, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
-  return sendMessage(chat_id, bienvenidaFinal, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+  if (isHttp(logo)) return sendPhoto(chat_id, logo, bienvenida, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
+  return sendMessage(chat_id, bienvenida, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
 }
 
 // ---------------- Ayuda ----------------
@@ -964,7 +951,7 @@ async function handleCallback(cb) {
 async function handleTextMessage(chat_id, message) {
   const text = (message?.text || "").trim();
 
-  if (text.startsWith("/start")) return; // ya se procesa en route para capturar payload
+  if (text.startsWith("/start")) return;
   if (text === "/cancel") {
     clearFlow(chat_id);
     return sendMessage(chat_id, "✅ Listo. Reinicié el flujo. Podés tocar Catálogo para empezar de nuevo.", { reply_markup: mainMenuKeyboardReply() });
@@ -1057,7 +1044,6 @@ app.post("/", async (req, res) => {
     if (upd.message) {
       const chat_id = upd.message.chat.id;
 
-      // ✅ /start con payload (PROD_xxx)
       if (upd.message.text && upd.message.text.startsWith("/start")) {
         const parts = upd.message.text.split(" ");
         const payload = (parts[1] || "").trim();
@@ -1066,7 +1052,6 @@ app.post("/", async (req, res) => {
 
       const st = getState(chat_id);
 
-      // ✅ comprobante
       if (st.awaitingProof && (upd.message.photo || upd.message.document)) {
         return handleProof(chat_id, upd.message);
       }
