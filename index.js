@@ -1,5 +1,4 @@
 import express from "express";
-import fetch from "node-fetch";
 
 const app = express();
 app.use(express.json());
@@ -9,225 +8,187 @@ const TOKEN = process.env.TELEGRAM_TOKEN;
 const API = `https://api.telegram.org/bot${TOKEN}`;
 const DATA_API = process.env.DATA_API_URL;
 
+// Node 18+ / 20 / 22 → fetch nativo
+const tg = async (method, payload) => {
+  await fetch(`${API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+};
+
 const users = new Map();
-const carts = new Map();
 
-/* ================== HELPERS ================== */
-const tg = (m, p) => fetch(`${API}/${m}`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify(p)
-});
-
-const esc = t => String(t||"").replace(/[<>]/g,"");
-
-async function getConfig(){
+/* ================= CONFIG ================= */
+async function getConfig() {
   const r = await fetch(`${DATA_API}?type=config`);
   return await r.json();
 }
-async function getCatalog(){
+
+async function getCatalog() {
   const r = await fetch(`${DATA_API}?type=catalog`);
   return await r.json();
 }
 
-/* ================== MENÚ ================== */
+/* ================= MENÚ ================= */
 const mainMenu = {
   keyboard: [
-    [{text:"🛍️ Catálogo"}],
-    [{text:"🏷️ Sellos"}],
-    [{text:"📣 Compartir bot"}],
-    [{text:"🆘 Ayuda"}]
+    [{ text: "🛍️ Catálogo" }],
+    [{ text: "🏷️ Sellos" }],
+    [{ text: "📣 Compartir bot" }],
+    [{ text: "🆘 Ayuda" }],
   ],
-  resize_keyboard:true
+  resize_keyboard: true,
 };
 
-/* ================== START ================== */
-async function start(chatId, payload=""){
+/* ================= START ================= */
+async function start(chatId, name = "") {
   const cfg = await getConfig();
 
   const text = `
-👋 ¡Hola ${payload?.nombre||""}!
+👋 ¡Hola ${name}!
 Bienvenido/a a *${cfg.NegocioNombre}* 🧀
 
 📍 ${cfg.NegocioDireccion}
 🕒 ${cfg.NegocioHorario}
 
 ${cfg.Descripcion}
-`.replace("{NOMBRE}", payload?.nombre||"");
-
-  if(cfg.LogoURL){
-    await tg("sendPhoto",{
-      chat_id:chatId,
-      photo:cfg.LogoURL,
-      caption:text,
-      parse_mode:"Markdown",
-      reply_markup:mainMenu
-    });
-  }else{
-    await tg("sendMessage",{
-      chat_id:chatId,
-      text,
-      parse_mode:"Markdown",
-      reply_markup:mainMenu
-    });
-  }
-}
-
-/* ================== CATÁLOGO ================== */
-async function showCategories(chatId){
-  const cat = await getCatalog();
-  const rows = [];
-  for(const c of cat.categories){
-    rows.push([{text:c,callback_data:`CAT_${c}`}]);
-  }
-  await tg("sendMessage",{
-    chat_id:chatId,
-    text:"🛍️ Elegí una categoría",
-    reply_markup:{inline_keyboard:rows}
-  });
-}
-
-async function showProduct(chatId, state){
-  const item = state.items[state.index];
-  const cfg = await getConfig();
-
-  const caption = `
-🧀 *${item.nombre}*
-${cfg.CatalogoMostrarPrecios==="SI" ? `💰 ${cfg.Moneda} ${item.precio}` : ""}
-${item.descripcion||""}
 `;
 
-  await tg("sendPhoto",{
-    chat_id:chatId,
-    photo:item.imagen,
-    caption,
-    parse_mode:"Markdown",
-    reply_markup:{
-      inline_keyboard:[
-        [
-          {text:"⬅️",callback_data:"PREV"},
-          {text:"➡️",callback_data:"NEXT"}
-        ],
-        [{text:"🟢 Quiero este",callback_data:"BUY"}],
-        [{text:"📣 Compartir",callback_data:"SHARE_PROD"}]
-      ]
-    }
+  if (cfg.LogoURL) {
+    await tg("sendPhoto", {
+      chat_id: chatId,
+      photo: cfg.LogoURL,
+      caption: text,
+      parse_mode: "Markdown",
+      reply_markup: mainMenu,
+    });
+  } else {
+    await tg("sendMessage", {
+      chat_id: chatId,
+      text,
+      parse_mode: "Markdown",
+      reply_markup: mainMenu,
+    });
+  }
+}
+
+/* ================= CATÁLOGO ================= */
+async function showCategories(chatId) {
+  const cat = await getCatalog();
+  const buttons = cat.categories.map((c) => [
+    { text: c, callback_data: `CAT_${c}` },
+  ]);
+
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: "🛍️ Elegí una categoría",
+    reply_markup: { inline_keyboard: buttons },
   });
 }
 
-/* ================== CANTIDAD ================== */
-function askQty(chatId,item){
-  const text = item.unidad==="unidad"
-    ? "¿Cuántas unidades querés?"
-    : "¿Cuántos gramos querés? (ej: 200)";
-
-  users.get(chatId).awaitQty = item;
-  tg("sendMessage",{chat_id:chatId,text});
-}
-
-/* ================== SELL0S ================== */
-async function showSellos(chatId){
+/* ================= SELL0S ================= */
+async function showSellos(chatId) {
   const cfg = await getConfig();
-  const u = users.get(chatId)||{sellos:0};
+  const u = users.get(chatId) || { sellos: 0 };
 
-  const total = u.sellos||0;
-  const porNivel = cfg.SellosPorNivel.split("|").map(Number);
   const niveles = cfg.NombresNiveles.split("|");
+  const limites = cfg.SellosPorNivel.split("|").map(Number);
 
-  let nivel = niveles[0];
-  for(let i=0;i<porNivel.length;i++){
-    if(total>=porNivel[i]) nivel = niveles[i];
+  let nivelActual = niveles[0];
+  for (let i = 0; i < limites.length; i++) {
+    if (u.sellos >= limites[i]) nivelActual = niveles[i];
   }
 
-  await tg("sendMessage",{
-    chat_id:chatId,
-    text:
-`🏷️ *Tus sellos*
-Tenés *${total}* sellos
-Nivel: *${nivel}*
+  await tg("sendMessage", {
+    chat_id: chatId,
+    parse_mode: "Markdown",
+    text: `
+🏷️ *Tus sellos*
+Tenés *${u.sellos}* sellos
+Nivel: *${nivelActual}*
 
-Cada $${cfg.MontoPorSello} sumás 1 sello.`,
-    parse_mode:"Markdown",
-    reply_markup:mainMenu
+Cada $${cfg.MontoPorSello} sumás 1 sello.
+`,
+    reply_markup: mainMenu,
   });
 }
 
-/* ================== COMPARTIR BOT ================== */
-async function shareBot(chatId){
+/* ================= COMPARTIR BOT ================= */
+async function shareBot(chatId) {
   const cfg = await getConfig();
-  const link = cfg.BotLink;
-  const text = `
-✨ ${cfg.TextoSistema}
+
+  const msg = `
+🤖 ¿Querés este sistema para tu negocio?
 
 📩 ${cfg.EmailSistema}
-🤖 ${link}
+🔗 ${cfg.BotLink}
 `;
 
-  await tg("sendMessage",{
-    chat_id:chatId,
-    text,
-    reply_markup:{
-      inline_keyboard:[
-        [{text:"WhatsApp",url:`https://wa.me/?text=${encodeURIComponent(text)}`}],
-        [{text:"Telegram",url:`https://t.me/share/url?url=${link}`}]
-      ]
-    }
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: msg,
+    reply_markup: {
+      inline_keyboard: [
+        [
+          {
+            text: "WhatsApp",
+            url: `https://wa.me/?text=${encodeURIComponent(msg)}`,
+          },
+        ],
+        [
+          {
+            text: "Telegram",
+            url: `https://t.me/share/url?url=${cfg.BotLink}`,
+          },
+        ],
+      ],
+    },
   });
 }
 
-/* ================== AYUDA ================== */
-async function help(chatId){
+/* ================= AYUDA ================= */
+async function help(chatId) {
   const cfg = await getConfig();
-  await tg("sendMessage",{
-    chat_id:chatId,
-    text:
-`🆘 *¿Necesitás ayuda?*
 
-Si no encontraste algo en el catálogo,
-o querés hacer una consulta especial,
-podés acercarte a nuestro local o escribirnos.
+  await tg("sendMessage", {
+    chat_id: chatId,
+    parse_mode: "Markdown",
+    text: `
+🆘 *¿Necesitás ayuda?*
+
+Si no encontraste algo en el catálogo
+o necesitás hacer una consulta especial,
+podés escribirnos directo:
 
 📍 ${cfg.NegocioDireccion}
 🕒 ${cfg.NegocioHorario}
-📲 ${cfg.WhatsAppLink}`,
-    parse_mode:"Markdown",
-    reply_markup:mainMenu
+📲 ${cfg.WhatsAppLink}
+`,
+    reply_markup: mainMenu,
   });
 }
 
-/* ================== WEBHOOK ================== */
-app.post("/",async(req,res)=>{
+/* ================= WEBHOOK ================= */
+app.post("/", async (req, res) => {
   res.sendStatus(200);
-  const u=req.body;
-  if(!u.message && !u.callback_query) return;
 
-  const msg = u.message;
-  const cb = u.callback_query;
-  const chatId = msg?.chat.id || cb?.message.chat.id;
+  const upd = req.body;
+  if (!upd.message) return;
 
-  users.set(chatId,users.get(chatId)||{sellos:0});
+  const chatId = upd.message.chat.id;
+  const text = upd.message.text || "";
 
-  if(msg?.text){
-    if(msg.text==="/start") return start(chatId);
-    if(msg.text==="🛍️ Catálogo") return showCategories(chatId);
-    if(msg.text==="🏷️ Sellos") return showSellos(chatId);
-    if(msg.text==="📣 Compartir bot") return shareBot(chatId);
-    if(msg.text==="🆘 Ayuda") return help(chatId);
-  }
+  if (!users.has(chatId)) users.set(chatId, { sellos: 0 });
 
-  if(cb){
-    const state = users.get(chatId);
-    if(cb.data.startsWith("CAT_")){
-      const cat = await getCatalog();
-      state.items = cat.items.filter(i=>i.categoria===cb.data.replace("CAT_",""));
-      state.index = 0;
-      return showProduct(chatId,state);
-    }
-    if(cb.data==="NEXT"){ state.index++; return showProduct(chatId,state);}
-    if(cb.data==="PREV"){ state.index--; return showProduct(chatId,state);}
-    if(cb.data==="BUY"){ return askQty(chatId,state.items[state.index]);}
-  }
+  if (text === "/start") return start(chatId, upd.message.from.first_name);
+  if (text === "🛍️ Catálogo") return showCategories(chatId);
+  if (text === "🏷️ Sellos") return showSellos(chatId);
+  if (text === "📣 Compartir bot") return shareBot(chatId);
+  if (text === "🆘 Ayuda") return help(chatId);
 });
 
-/* ================== START SERVER ================== */
-app.listen(PORT,()=>console.log("BOT LISTO"));
+/* ================= SERVER ================= */
+app.listen(PORT, () => {
+  console.log("✅ EZERBOT ACTIVO");
+});
