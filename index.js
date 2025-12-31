@@ -1,21 +1,21 @@
 import express from "express";
-import fetch from "node-fetch";
 import TelegramBot from "node-telegram-bot-api";
 
 const app = express();
 app.use(express.json());
 
 // ===============================
-// VARIABLES (YA EXISTENTES)
+// VARIABLES (LAS MISMAS DE SIEMPRE)
 // ===============================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 const PUBLIC_URL = process.env.PUBLIC_URL;
 
 if (!TELEGRAM_TOKEN || !PUBLIC_URL) {
-  console.error("❌ Faltan variables obligatorias");
+  console.error("❌ Faltan variables de entorno");
   process.exit(1);
 }
 
+// Google Apps Script
 const DATA_API_URL =
   "https://script.google.com/macros/s/AKfycbzuiATw40Q9ut7BpAAf0YNFnYlyvBQX2NuyNdF9kz758TSZnq6l1IQYr7sTcoIRGsi3/exec";
 
@@ -24,11 +24,11 @@ const DATA_API_URL =
 // ===============================
 const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
 
-// 🔴 ESTO ES LO QUE FALTABA
+// 🔴 webhook correcto
 await bot.setWebHook(`${PUBLIC_URL}/webhook`);
 
 // ===============================
-// UTILS
+// HELPERS (fetch NATIVO)
 // ===============================
 async function getConfig() {
   const r = await fetch(`${DATA_API_URL}?type=config`);
@@ -140,7 +140,7 @@ bot.on("message", async (msg) => {
 });
 
 // ===============================
-// WEBHOOK REAL
+// WEBHOOK
 // ===============================
 app.post("/webhook", (req, res) => {
   bot.processUpdate(req.body);
@@ -148,7 +148,7 @@ app.post("/webhook", (req, res) => {
 });
 
 // ===============================
-// HEALTHCHECK
+// HEALTH
 // ===============================
 app.get("/", (_, res) => {
   res.send("EZERBOT OK");
