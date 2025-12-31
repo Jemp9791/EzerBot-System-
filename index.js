@@ -1,5 +1,5 @@
 /**
- * EzerBot / Todo Queso — Bot (Telegram) — ÚNICO index.js
+ * EzerBot / Todo Queso — Telegram Bot — ÚNICO index.js
  *
  * ENV (Render):
  * - TELEGRAM_TOKEN  (obligatorio)
@@ -134,9 +134,7 @@ function parseCsv(text) {
   for (let i = 1; i < lines.length; i++) {
     const cols = splitCsvLine(lines[i]);
     const row = {};
-    for (let c = 0; c < headers.length; c++) {
-      row[headers[c]] = (cols[c] ?? "").trim();
-    }
+    for (let c = 0; c < headers.length; c++) row[headers[c]] = (cols[c] ?? "").trim();
     rows.push(row);
   }
   return { headers, rows };
@@ -219,9 +217,7 @@ async function loadCatalog() {
       const precio = toNumberSafe(x.precio ?? x.PRECIO ?? 0);
       const unidad = String(x.unidad ?? x.UNIDAD ?? "").trim();
       const descripcion = String(x.descripcion ?? x.DESCRIPCION ?? "").trim();
-      const imagen = normalizeUrl(
-        x.imagen ?? x.IMAGEN ?? x.imagenUrl ?? x.IMAGENURL ?? x.imagen1 ?? x.IMAGEN1 ?? ""
-      );
+      const imagen = normalizeUrl(x.imagen ?? x.IMAGEN ?? x.imagenUrl ?? x.IMAGENURL ?? x.imagen1 ?? x.IMAGEN1 ?? "");
       const categoria = String(x.categoria ?? x.CATEGORIA ?? "Sin categoría").trim();
 
       const activoRaw = x.activo ?? x.ACTIVO;
@@ -256,7 +252,6 @@ async function loadCatalog() {
 function isPesable(item) {
   return item?.pesable === true || Number(item?.precioPorKilo || 0) > 0 || lower(item?.unidad) === "kg";
 }
-
 function getCfgBool(cfg, key) {
   return lower(cfg?.[key]) === "si" || cfg?.[key] === true;
 }
@@ -265,6 +260,9 @@ function getCfgBool(cfg, key) {
 const userState = new Map(); // chatId -> state
 const carts = new Map(); // chatId -> cart
 const orders = new Map(); // chatId -> order
+
+// demo: sellos en memoria (luego lo pasamos a Sheets)
+const seals = new Map(); // chatId -> {count, goal}
 
 function getState(chatId) {
   if (!userState.has(chatId)) userState.set(chatId, {});
@@ -619,6 +617,7 @@ async function startCheckout(chat_id) {
   od.delivery = null;
   od.customerData = "";
   od.payment = null;
+  od.status = "CREADO"; // CREADO | PENDIENTE_PAGO | PAGO_CONFIRMADO
   orders.set(chat_id, od);
 
   return sendMessage(chat_id, `✅ <b>Finalizar compra</b>\n\nElegí cómo querés recibir tu pedido:`, {
@@ -716,29 +715,58 @@ function buildOrderText(cfg, chat_id) {
   );
 }
 
-async function notifyBusiness(cfg, from_chat_id, orderText, proofMessageId = null) {
+// 📌 Notificar al vendedor con botones
+async function notifyVendorWithButtons(cfg, buyerChatId, orderId, orderText) {
   const vendorChat = String(cfg?.VendedorChatId || "").trim();
   if (!vendorChat) return { ok: false, reason: "No VendedorChatId" };
 
-  await sendMessage(vendorChat, orderText, { parse_mode: "HTML" });
+  // botones: confirmar pago (cuando el vendedor valida)
+  const kb = {
+    inline_keyboard: [
+      [{ text: "✅ Confirmar pago", callback_data: `VCONFIRM:${orderId}:${buyerChatId}` }],
+      [{ text: "📎 Pedir comprobante (WhatsApp)", url: buildWhatsAppToBuyerLink(cfg, buyerChatId, orderId) }],
+    ],
+  };
 
-  if (proofMessageId) {
-    await forwardMessage(vendorChat, from_chat_id, proofMessageId);
-  }
+  await sendMessage(vendorChat, orderText + `\n\n📌 <b>Acción del vendedor:</b> cuando validás el pago tocá <b>Confirmar pago</b>.`, {
+    parse_mode: "HTML",
+    reply_markup: kb,
+  });
+
   return { ok: true };
+}
+
+// ✅ WhatsApp hacia el comprador (opcional, solo para pedir comprobante)
+function buildWhatsAppToBuyerLink(cfg, buyerChatId, orderId) {
+  // Si querés, luego lo conectamos a un teléfono real desde Config.
+  // Por ahora: abre WhatsApp con un mensaje genérico para copiar/pegar.
+  const negocio = cfg?.NegocioNombre || "Todo Queso";
+  const msg = `Hola 😊 Te pedimos el comprobante para confirmar tu pedido ${negocio}. ID: ${orderId}`;
+  return `https://wa.me/?text=${encodeURIComponent(msg)}`;
 }
 
 async function finalizeOrderTelegramOnly(chat_id, isTransferPending) {
   const cfg = await loadConfig();
   const orderText = buildOrderText(cfg, chat_id);
-
-  await notifyBusiness(cfg, chat_id, orderText, null);
-
   const od = orders.get(chat_id) || {};
+  const orderId = od.id || nowId();
+
+  // 1) vendedor recibe pedido + botón confirmar
+  await notifyVendorWithButtons(cfg, chat_id, orderId, orderText);
+
+  // 2) comprador recibe estado
+  if (isTransferPending) {
+    od.status = "PENDIENTE_PAGO";
+    orders.set(chat_id, od);
+  } else {
+    od.status = "PAGO_CONFIRMADO";
+    orders.set(chat_id, od);
+  }
+
   const txt =
     `✅ <b>Pedido enviado al local</b>\n\n` +
-    `🆔 ID: <b>${escapeHtml(od.id || "")}</b>\n` +
-    (isTransferPending ? `📌 Estado: <b>Pendiente</b> hasta validar el comprobante.\n` : `📌 Estado: <b>En preparación</b>.\n`) +
+    `🆔 ID: <b>${escapeHtml(orderId)}</b>\n` +
+    (isTransferPending ? `📌 Estado: <b>Pendiente</b> hasta validar el comprobante.\n` : `📌 Estado: <b>Confirmado</b>.\n`) +
     `\nGracias 😊`;
 
   return sendMessage(chat_id, txt, {
@@ -796,11 +824,62 @@ async function setPayment(chat_id, payment) {
   return choosePaymentMenu(chat_id);
 }
 
-// ---------------- Compartir bot (solo leyenda) ----------------
+// ---------------- Compartir bot (mensaje listo para WA/TG) ----------------
 async function handleShareBot(chat_id) {
-  return sendMessage(chat_id, "¿Querés este sistema para tu negocio?", {
-    reply_markup: mainMenuKeyboardReply(),
+  const cfg = await loadConfig();
+  const mail = "ezerbot.assistant@gmail.com";
+  const negocio = cfg?.NegocioNombre || "Todo Queso";
+
+  const shareText =
+    `¿Querés este sistema para tu negocio?\n` +
+    `📩 Escribinos: ${mail}\n` +
+    `🤖 Demo (bot): ${botStartLink("")}\n` +
+    `✨ Funciona con catálogo + sellos/tarjeta + pedidos y confirmación.`;
+
+  const { wa, tg } = shareLinksForText(shareText);
+
+  return sendMessage(chat_id, `📣 <b>Compartir EzerBot</b>\n\n${escapeHtml(shareText)}`, {
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "📣 Enviar por WhatsApp", url: wa }],
+        [{ text: "✈️ Enviar por Telegram", url: tg }],
+      ],
+    },
   });
+}
+
+// ---------------- Sellos / Tarjeta (demo real) ----------------
+function cardUrlFor(chat_id) {
+  return `${PUBLIC_URL}/card/${chat_id}`;
+}
+
+function qrUrl(text) {
+  // genera QR como imagen (sin librerías): usa servicio público de QR (solo URL de imagen).
+  // Si después querés 100% offline, lo pasamos a lib.
+  return `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(text)}`;
+}
+
+async function handleSealsCard(chat_id) {
+  const cfg = await loadConfig();
+  const negocio = cfg?.NegocioNombre || "Todo Queso";
+  const goal = Number(cfg?.SellosMeta || 10) || 10;
+
+  if (!seals.has(chat_id)) seals.set(chat_id, { count: 0, goal });
+  const s = seals.get(chat_id);
+  s.goal = goal;
+
+  const url = cardUrlFor(chat_id);
+  const qr = qrUrl(url);
+
+  const txt =
+    `🏷️ <b>Sellos / Tarjeta virtual</b>\n\n` +
+    `🧀 <b>${escapeHtml(negocio)}</b>\n` +
+    `✅ Sellos: <b>${escapeHtml(s.count)}</b> / <b>${escapeHtml(s.goal)}</b>\n\n` +
+    `📲 Tu tarjeta virtual:\n${escapeHtml(url)}\n\n` +
+    `👉 Mostrale esta tarjeta al vendedor para sumar sellos.`;
+
+  return sendPhoto(chat_id, qr, txt, { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
 }
 
 // ---------------- Start ----------------
@@ -866,16 +945,64 @@ async function handleProof(chat_id, updateMessage) {
   st.awaitingProof = false;
   userState.set(chat_id, st);
 
-  const orderText = buildOrderText(cfg, chat_id);
-  await notifyBusiness(cfg, chat_id, orderText, updateMessage.message_id);
+  const od = orders.get(chat_id) || {};
+  od.status = "PENDIENTE_PAGO";
+  orders.set(chat_id, od);
+
+  // reenviamos comprobante al vendedor, pero confirmación la hace el vendedor con botón
+  const vendorChat = String(cfg?.VendedorChatId || "").trim();
+  if (vendorChat) await forwardMessage(vendorChat, chat_id, updateMessage.message_id);
 
   const confirmUser =
     cfg?.TextoTransferenciaComprobanteRecibido ||
-    "✅ Comprobante recibido. ¡Gracias! Ya estamos preparando tu pedido 😊";
+    "✅ Comprobante recibido. En breve validamos el pago y te confirmamos por acá 😊";
 
   await sendMessage(chat_id, escapeHtml(confirmUser), { parse_mode: "HTML", reply_markup: mainMenuKeyboardReply() });
 
-  return finalizeOrderTelegramOnly(chat_id, true);
+  // enviamos pedido al local (si aún no lo enviamos)
+  const orderText = buildOrderText(cfg, chat_id);
+  const orderId = od.id || nowId();
+  await notifyVendorWithButtons(cfg, chat_id, orderId, orderText);
+
+  return;
+}
+
+// ---------------- Confirmación del vendedor ----------------
+async function vendorConfirmPayment(vendorChatId, orderId, buyerChatId) {
+  const cfg = await loadConfig();
+
+  // marcamos estado en memoria del comprador
+  const od = orders.get(Number(buyerChatId)) || { id: orderId };
+  od.id = orderId;
+  od.status = "PAGO_CONFIRMADO";
+  orders.set(Number(buyerChatId), od);
+
+  // mensaje al comprador
+  const msgBuyer =
+    `✅ <b>Pago confirmado</b>\n\n` +
+    `🆔 ID: <b>${escapeHtml(orderId)}</b>\n` +
+    `📌 Estado: <b>Confirmado</b>\n\n` +
+    `¡Gracias! Ya seguimos con tu pedido 😊`;
+
+  await sendMessage(Number(buyerChatId), msgBuyer, {
+    parse_mode: "HTML",
+    reply_markup: {
+      inline_keyboard: [
+        [{ text: "🛍️ Volver al catálogo", callback_data: "CAT_MENU" }],
+        [{ text: "🏷️ Sellos / Tarjeta", callback_data: "SEALS" }],
+      ],
+    },
+  });
+
+  // mensaje al vendedor
+  await sendMessage(vendorChatId, `✅ Pago confirmado para ID: <b>${escapeHtml(orderId)}</b>\nSe notificó al cliente.`, {
+    parse_mode: "HTML",
+  });
+
+  // opcional: vaciar carrito del cliente cuando se confirma pago
+  carts.set(Number(buyerChatId), { items: [], total: 0 });
+
+  return;
 }
 
 // ---------------- Callbacks ----------------
@@ -888,6 +1015,7 @@ async function handleCallback(cb) {
 
   if (data === "HOME") return handleStart(chat_id);
   if (data === "CAT_MENU") return handleCatalogMenu(chat_id);
+  if (data === "SEALS") return handleSealsCard(chat_id);
 
   if (data.startsWith("CAT:")) {
     const raw = data.slice(4);
@@ -911,7 +1039,6 @@ async function handleCallback(cb) {
     return askQuantity(chat_id, item);
   }
 
-  // ✅ Compartir producto
   if (data === "P:SHARE") {
     const cfg = await loadConfig();
     const st = getState(chat_id);
@@ -943,8 +1070,16 @@ async function handleCallback(cb) {
   if (data === "CHECKOUT:RETIRO") return chooseDelivery(chat_id, "RETIRO");
   if (data === "CHECKOUT:ENVIO") return chooseDelivery(chat_id, "ENVIO");
 
-  if (data === "PAY:CASH") return setPayment(chat_id, "CASH");
+  if (data === "PAY:CASH") return finalizeOrderTelegramOnly(chat_id, false);
   if (data === "PAY:TRANSFER") return setPayment(chat_id, "TRANSFER");
+
+  // ✅ Confirmación del vendedor
+  if (data.startsWith("VCONFIRM:")) {
+    const parts = data.split(":"); // VCONFIRM:orderId:buyerChatId
+    const orderId = parts[1] || "";
+    const buyerChatId = parts[2] || "";
+    return vendorConfirmPayment(chat_id, orderId, buyerChatId);
+  }
 }
 
 // ---------------- Mensajes ----------------
@@ -999,16 +1134,12 @@ async function handleTextMessage(chat_id, message) {
     return addToCart(chat_id, item, qty);
   }
 
+  if (st.awaitingProof && (message.photo || message.document)) return handleProof(chat_id, message);
+
   if (text === "🛍️ Catálogo" || text.toUpperCase() === "CATÁLOGO" || text.toUpperCase() === "CATALOGO") return handleCatalogMenu(chat_id);
   if (text === "📣 Compartir bot") return handleShareBot(chat_id);
   if (text === "🆘 Ayuda") return handleHelp(chat_id);
-
-  if (text === "🏷️ Sellos / Tarjeta") {
-    return sendMessage(chat_id, `🏷️ <b>Sellos / Tarjeta</b>\n\nEsta sección queda lista para conectar tarjeta virtual y sellos.\nPor ahora: usá <b>Catálogo</b> para comprar 😉`, {
-      parse_mode: "HTML",
-      reply_markup: mainMenuKeyboardReply(),
-    });
-  }
+  if (text === "🏷️ Sellos / Tarjeta") return handleSealsCard(chat_id);
 
   return sendMessage(chat_id, "👋 Tocá <b>🛍️ Catálogo</b> para empezar 😊", {
     parse_mode: "HTML",
@@ -1018,6 +1149,54 @@ async function handleTextMessage(chat_id, message) {
 
 // ---------------- Routes ----------------
 app.get("/", (req, res) => res.status(200).send("OK - BOT LIVE"));
+
+app.get("/card/:chatId", async (req, res) => {
+  const chatId = String(req.params.chatId || "").trim();
+  const cfg = await loadConfig();
+  const negocio = cfg?.NegocioNombre || "Todo Queso";
+  const logo = normalizeUrl(cfg?.LogoURL || "");
+  const s = seals.get(Number(chatId)) || { count: 0, goal: Number(cfg?.SellosMeta || 10) || 10 };
+  const botLink = botStartLink("");
+
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.end(`
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>${escapeHtml(negocio)} - Tarjeta</title>
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial; background:#0b1220; color:#fff; margin:0; padding:22px;}
+.card{max-width:520px;margin:0 auto;background:#121b2d;border-radius:18px;padding:18px;box-shadow:0 10px 25px rgba(0,0,0,.35);}
+.h{display:flex;gap:12px;align-items:center}
+.logo{width:64px;height:64px;border-radius:14px;object-fit:cover;background:#0f172a}
+.title{font-size:22px;font-weight:800;margin:0}
+.sub{opacity:.85;margin:4px 0 0}
+.badge{display:inline-block;margin-top:10px;background:#1f2a44;border:1px solid rgba(255,255,255,.08);padding:10px 12px;border-radius:14px}
+.btn{display:block;text-align:center;text-decoration:none;background:#22c55e;color:#081018;font-weight:800;padding:12px;border-radius:14px;margin-top:14px}
+.small{opacity:.8;font-size:12px;margin-top:10px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="h">
+      ${logo ? `<img class="logo" src="${escapeHtml(logo)}" />` : `<div class="logo"></div>`}
+      <div>
+        <p class="title">${escapeHtml(negocio)}</p>
+        <p class="sub">Tarjeta virtual del cliente</p>
+      </div>
+    </div>
+    <div class="badge">
+      <div><b>ID Cliente:</b> ${escapeHtml(chatId)}</div>
+      <div style="margin-top:6px;"><b>Sellos:</b> ${escapeHtml(s.count)} / ${escapeHtml(s.goal)}</div>
+    </div>
+    <a class="btn" href="${escapeHtml(botLink)}">Abrir el bot</a>
+    <div class="small">Esta tarjeta es demo. Luego conectamos sellos reales a Google Sheets.</div>
+  </div>
+</body>
+</html>`);
+});
 
 app.get("/debug", async (req, res) => {
   try {
@@ -1050,13 +1229,7 @@ app.post("/", async (req, res) => {
         return handleStart(chat_id, payload);
       }
 
-      const st = getState(chat_id);
-
-      if (st.awaitingProof && (upd.message.photo || upd.message.document)) {
-        return handleProof(chat_id, upd.message);
-      }
-
-      if (upd.message.text) return handleTextMessage(chat_id, upd.message);
+      if (upd.message.text || upd.message.photo || upd.message.document) return handleTextMessage(chat_id, upd.message);
       return;
     }
   } catch (e) {
