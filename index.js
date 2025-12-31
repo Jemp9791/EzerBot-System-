@@ -6,11 +6,13 @@ const app = express();
 app.use(express.json());
 
 // ===============================
-// CONFIG BÁSICA (NO TOCAR)
+// VARIABLES (YA EXISTENTES)
 // ===============================
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-if (!TELEGRAM_TOKEN) {
-  console.error("❌ Falta TELEGRAM_TOKEN");
+const PUBLIC_URL = process.env.PUBLIC_URL;
+
+if (!TELEGRAM_TOKEN || !PUBLIC_URL) {
+  console.error("❌ Faltan variables obligatorias");
   process.exit(1);
 }
 
@@ -20,12 +22,13 @@ const DATA_API_URL =
 // ===============================
 // BOT
 // ===============================
-const bot = new TelegramBot(TELEGRAM_TOKEN, {
-  polling: false,
-});
+const bot = new TelegramBot(TELEGRAM_TOKEN, { polling: false });
+
+// 🔴 ESTO ES LO QUE FALTABA
+await bot.setWebHook(`${PUBLIC_URL}/webhook`);
 
 // ===============================
-// UTILIDADES
+// UTILS
 // ===============================
 async function getConfig() {
   const r = await fetch(`${DATA_API_URL}?type=config`);
@@ -38,7 +41,7 @@ async function getCatalog() {
 }
 
 // ===============================
-// MENÚ PRINCIPAL (FIJO)
+// MENÚ FIJO (SIN CARRITO)
 // ===============================
 function mainMenu() {
   return {
@@ -54,7 +57,7 @@ function mainMenu() {
 }
 
 // ===============================
-// HANDLERS
+// MENSAJES
 // ===============================
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
@@ -62,56 +65,40 @@ bot.on("message", async (msg) => {
 
   const config = await getConfig();
 
-  // START
   if (text === "/start") {
-    await bot.sendMessage(
-      chatId,
-      config.Descripcion || "Bienvenido 👋",
-      mainMenu()
-    );
+    await bot.sendMessage(chatId, config.Descripcion, mainMenu());
     return;
   }
 
-  // CATÁLOGO
   if (text === "🛍️ Catálogo") {
     const catalog = await getCatalog();
 
-    if (!catalog.items || !catalog.items.length) {
-      await bot.sendMessage(chatId, "No hay productos disponibles.");
-      return;
-    }
-
     for (const p of catalog.items) {
-      let unidadTxt =
+      const tipo =
         p.unidad === "unidad"
-          ? "Por unidad"
-          : "Por gramos (ej: 200, 500)";
+          ? "📦 Por unidad"
+          : "⚖️ Indicá gramos (ej: 200, 500)";
 
       await bot.sendMessage(
         chatId,
-        `🧀 *${p.nombre}*\n${p.descripcion || ""}\n💲 ${
-          p.precio
-        } ${config.Moneda}\n📦 ${unidadTxt}`,
-        {
-          parse_mode: "Markdown",
-        }
+        `🧀 *${p.nombre}*\n${p.descripcion || ""}\n💲 ${p.precio} ${
+          config.Moneda
+        }\n${tipo}`,
+        { parse_mode: "Markdown" }
       );
     }
-
     return;
   }
 
-  // SELLOS
   if (text === "🎫 Sellos") {
     await bot.sendMessage(
       chatId,
-      `🎫 *Tu tarjeta virtual*\n\nCada $${config.MontoPorSello} sumás 1 sello.\n\n📲 Mirala acá:\n${config.CARD_URL}`,
+      `🎫 *Tarjeta de sellos*\n\nCada $${config.MontoPorSello} = 1 sello\n\n📲 ${config.CARD_URL}`,
       { parse_mode: "Markdown" }
     );
     return;
   }
 
-  // COMPARTIR BOT
   if (text === "📣 Compartir bot") {
     await bot.sendMessage(
       chatId,
@@ -121,18 +108,16 @@ bot.on("message", async (msg) => {
           inline_keyboard: [
             [
               {
-                text: "📲 Compartir por WhatsApp",
+                text: "WhatsApp",
                 url: `https://wa.me/?text=${encodeURIComponent(
                   config.TextoSistema + " " + config.BotLink
                 )}`,
               },
-            ],
-            [
               {
-                text: "✈️ Compartir por Telegram",
+                text: "Telegram",
                 url: `https://t.me/share/url?url=${encodeURIComponent(
                   config.BotLink
-                )}&text=${encodeURIComponent(config.TextoSistema)}`,
+                )}`,
               },
             ],
           ],
@@ -142,30 +127,31 @@ bot.on("message", async (msg) => {
     return;
   }
 
-  // AYUDA
   if (text === "🆘 Ayuda") {
     await bot.sendMessage(
       chatId,
-      `🆘 *¿Necesitás ayuda?*\n\nSi te faltó algo en tu pedido o no encontraste un producto en el catálogo, escribinos directo:\n\n📱 WhatsApp:\n${config.WhatsAppLink}\n📸 Instagram: ${config.NegocioInstagram}\n\n¡Gracias por elegir ${config.NegocioNombre}! 🧀`,
+      `🆘 *Ayuda*\n\nSi necesitás algo que no viste en el catálogo o querés hacer una consulta:\n\n📱 ${config.WhatsAppLink}\n📸 ${config.NegocioInstagram}`,
       { parse_mode: "Markdown" }
     );
     return;
   }
 
-  // DEFAULT
-  await bot.sendMessage(
-    chatId,
-    "Usá el menú 👇",
-    mainMenu()
-  );
+  await bot.sendMessage(chatId, "Usá el menú 👇", mainMenu());
 });
 
 // ===============================
-// WEBHOOK (ESTE ERA EL PROBLEMA)
+// WEBHOOK REAL
 // ===============================
-app.post("/", (req, res) => {
+app.post("/webhook", (req, res) => {
   bot.processUpdate(req.body);
   res.sendStatus(200);
+});
+
+// ===============================
+// HEALTHCHECK
+// ===============================
+app.get("/", (_, res) => {
+  res.send("EZERBOT OK");
 });
 
 // ===============================
