@@ -1,194 +1,231 @@
 import express from "express";
+import TelegramBot from "node-telegram-bot-api";
 
+/* ===============================
+   ENV
+================================ */
+const BOT_TOKEN = process.env.BOT_TOKEN;
+const CONFIG_URL = process.env.CONFIG_CSV_URL;     // Google Sheets CSV KEY,VALUE
+const CATALOG_URL = process.env.CATALOG_CSV_URL;   // ya funcionando
+const PORT = process.env.PORT || 10000;
+
+if (!BOT_TOKEN || !CONFIG_URL || !CATALOG_URL) {
+  console.error("❌ Faltan variables de entorno");
+  process.exit(1);
+}
+
+/* ===============================
+   APP
+================================ */
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 10000;
-const TOKEN = process.env.TELEGRAM_TOKEN;
-const API = `https://api.telegram.org/bot${TOKEN}`;
-const DATA_API = process.env.DATA_API_URL;
+const bot = new TelegramBot(BOT_TOKEN);
+bot.setWebHook(`/bot${BOT_TOKEN}`);
 
-// Node 18+ / 20 / 22 → fetch nativo
-const tg = async (method, payload) => {
-  await fetch(`${API}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-};
-
-const users = new Map();
-
-/* ================= CONFIG ================= */
-async function getConfig() {
-  const r = await fetch(`${DATA_API}?type=config`);
-  return await r.json();
-}
-
-async function getCatalog() {
-  const r = await fetch(`${DATA_API}?type=catalog`);
-  return await r.json();
-}
-
-/* ================= MENÚ ================= */
-const mainMenu = {
-  keyboard: [
-    [{ text: "🛍️ Catálogo" }],
-    [{ text: "🏷️ Sellos" }],
-    [{ text: "📣 Compartir bot" }],
-    [{ text: "🆘 Ayuda" }],
-  ],
-  resize_keyboard: true,
-};
-
-/* ================= START ================= */
-async function start(chatId, name = "") {
-  const cfg = await getConfig();
-
-  const text = `
-👋 ¡Hola ${name}!
-Bienvenido/a a *${cfg.NegocioNombre}* 🧀
-
-📍 ${cfg.NegocioDireccion}
-🕒 ${cfg.NegocioHorario}
-
-${cfg.Descripcion}
-`;
-
-  if (cfg.LogoURL) {
-    await tg("sendPhoto", {
-      chat_id: chatId,
-      photo: cfg.LogoURL,
-      caption: text,
-      parse_mode: "Markdown",
-      reply_markup: mainMenu,
-    });
-  } else {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text,
-      parse_mode: "Markdown",
-      reply_markup: mainMenu,
-    });
-  }
-}
-
-/* ================= CATÁLOGO ================= */
-async function showCategories(chatId) {
-  const cat = await getCatalog();
-  const buttons = cat.categories.map((c) => [
-    { text: c, callback_data: `CAT_${c}` },
-  ]);
-
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: "🛍️ Elegí una categoría",
-    reply_markup: { inline_keyboard: buttons },
-  });
-}
-
-/* ================= SELL0S ================= */
-async function showSellos(chatId) {
-  const cfg = await getConfig();
-  const u = users.get(chatId) || { sellos: 0 };
-
-  const niveles = cfg.NombresNiveles.split("|");
-  const limites = cfg.SellosPorNivel.split("|").map(Number);
-
-  let nivelActual = niveles[0];
-  for (let i = 0; i < limites.length; i++) {
-    if (u.sellos >= limites[i]) nivelActual = niveles[i];
-  }
-
-  await tg("sendMessage", {
-    chat_id: chatId,
-    parse_mode: "Markdown",
-    text: `
-🏷️ *Tus sellos*
-Tenés *${u.sellos}* sellos
-Nivel: *${nivelActual}*
-
-Cada $${cfg.MontoPorSello} sumás 1 sello.
-`,
-    reply_markup: mainMenu,
-  });
-}
-
-/* ================= COMPARTIR BOT ================= */
-async function shareBot(chatId) {
-  const cfg = await getConfig();
-
-  const msg = `
-🤖 ¿Querés este sistema para tu negocio?
-
-📩 ${cfg.EmailSistema}
-🔗 ${cfg.BotLink}
-`;
-
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: msg,
-    reply_markup: {
-      inline_keyboard: [
-        [
-          {
-            text: "WhatsApp",
-            url: `https://wa.me/?text=${encodeURIComponent(msg)}`,
-          },
-        ],
-        [
-          {
-            text: "Telegram",
-            url: `https://t.me/share/url?url=${cfg.BotLink}`,
-          },
-        ],
-      ],
-    },
-  });
-}
-
-/* ================= AYUDA ================= */
-async function help(chatId) {
-  const cfg = await getConfig();
-
-  await tg("sendMessage", {
-    chat_id: chatId,
-    parse_mode: "Markdown",
-    text: `
-🆘 *¿Necesitás ayuda?*
-
-Si no encontraste algo en el catálogo
-o necesitás hacer una consulta especial,
-podés escribirnos directo:
-
-📍 ${cfg.NegocioDireccion}
-🕒 ${cfg.NegocioHorario}
-📲 ${cfg.WhatsAppLink}
-`,
-    reply_markup: mainMenu,
-  });
-}
-
-/* ================= WEBHOOK ================= */
-app.post("/", async (req, res) => {
+app.post(`/bot${BOT_TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
   res.sendStatus(200);
-
-  const upd = req.body;
-  if (!upd.message) return;
-
-  const chatId = upd.message.chat.id;
-  const text = upd.message.text || "";
-
-  if (!users.has(chatId)) users.set(chatId, { sellos: 0 });
-
-  if (text === "/start") return start(chatId, upd.message.from.first_name);
-  if (text === "🛍️ Catálogo") return showCategories(chatId);
-  if (text === "🏷️ Sellos") return showSellos(chatId);
-  if (text === "📣 Compartir bot") return shareBot(chatId);
-  if (text === "🆘 Ayuda") return help(chatId);
 });
 
-/* ================= SERVER ================= */
+app.get("/", (_, res) => {
+  res.send("EZERBOT ACTIVO");
+});
+
+/* ===============================
+   HELPERS
+================================ */
+async function fetchCSV(url) {
+  const res = await fetch(url);
+  const text = await res.text();
+  return text;
+}
+
+function parseConfig(csv) {
+  const lines = csv.split("\n").slice(1);
+  const cfg = {};
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    const [key, ...rest] = line.split(",");
+    cfg[key.trim()] = rest.join(",").trim();
+  }
+  return cfg;
+}
+
+function parseCatalog(csv) {
+  const lines = csv.split("\n");
+  const headers = lines[0].split(",");
+  return lines.slice(1).map(row => {
+    const values = row.split(",");
+    const obj = {};
+    headers.forEach((h, i) => obj[h.trim()] = values[i]?.trim());
+    return obj;
+  }).filter(p => p.codigo);
+}
+
+function isByWeight(product) {
+  return product.unidad?.toLowerCase() === "kg";
+}
+
+function calculateSellos(total, montoPorSello) {
+  return Math.floor(total / montoPorSello);
+}
+
+/* ===============================
+   DATA (MEMORIA SIMPLE)
+================================ */
+const sessions = {};
+const clientes = {}; // en producción va a Sheets
+
+/* ===============================
+   LOAD CONFIG / CATALOG
+================================ */
+let CONFIG = {};
+let CATALOG = [];
+
+async function loadData() {
+  CONFIG = parseConfig(await fetchCSV(CONFIG_URL));
+  CATALOG = parseCatalog(await fetchCSV(CATALOG_URL));
+  console.log("✅ Config y catálogo cargados");
+}
+
+await loadData();
+
+/* ===============================
+   MENÚ PRINCIPAL (FIJO)
+================================ */
+function mainMenu() {
+  return {
+    reply_markup: {
+      keyboard: [
+        ["🛍️ Catálogo"],
+        ["🏷️ Sellos / Tarjeta"],
+        ["📣 Compartir bot"],
+        ["🆘 Ayuda"]
+      ],
+      resize_keyboard: true
+    }
+  };
+}
+
+/* ===============================
+   START
+================================ */
+bot.onText(/\/start/, msg => {
+  const chatId = msg.chat.id;
+  if (!clientes[chatId]) {
+    clientes[chatId] = { sellos: 0, referidos: 0 };
+  }
+
+  bot.sendMessage(
+    chatId,
+    CONFIG.Descripcion.replace("{NOMBRE}", msg.from.first_name || ""),
+    mainMenu()
+  );
+});
+
+/* ===============================
+   CATÁLOGO
+================================ */
+bot.onText(/🛍️ Catálogo/, msg => {
+  const chatId = msg.chat.id;
+  const buttons = CATALOG.map(p => [{ text: p.nombre, callback_data: `prod_${p.codigo}` }]);
+  bot.sendMessage(chatId, "Elegí un producto:", {
+    reply_markup: { inline_keyboard: buttons }
+  });
+});
+
+bot.on("callback_query", query => {
+  const chatId = query.message.chat.id;
+  const data = query.data;
+
+  if (data.startsWith("prod_")) {
+    const code = data.replace("prod_", "");
+    const product = CATALOG.find(p => p.codigo === code);
+    sessions[chatId] = { product };
+
+    if (isByWeight(product)) {
+      bot.sendMessage(chatId, "Indicá la cantidad en gramos (ej: 200)");
+    } else {
+      addToCart(chatId, 1);
+    }
+  }
+
+  if (data === "confirm_payment") {
+    bot.sendMessage(chatId, CONFIG.TextoConfirmacionPedido);
+  }
+});
+
+function addToCart(chatId, qty) {
+  const s = sessions[chatId];
+  const p = s.product;
+  const price = isByWeight(p)
+    ? (parseFloat(p.precio) / 1000) * qty
+    : parseFloat(p.precio);
+
+  s.total = (s.total || 0) + price;
+
+  bot.sendMessage(
+    chatId,
+    `✅ Agregado ${p.nombre}\nTotal parcial: ARS ${Math.round(s.total)}`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "Finalizar compra", callback_data: "finish" }]
+        ]
+      }
+    }
+  );
+}
+
+bot.on("message", msg => {
+  const chatId = msg.chat.id;
+  const s = sessions[chatId];
+  if (!s || !s.product) return;
+
+  if (isByWeight(s.product)) {
+    const grams = parseInt(msg.text);
+    if (isNaN(grams)) return;
+    addToCart(chatId, grams);
+    s.product = null;
+  }
+});
+
+/* ===============================
+   SELLLOS / TARJETA
+================================ */
+bot.onText(/🏷️ Sellos/, msg => {
+  const c = clientes[msg.chat.id] || { sellos: 0 };
+  bot.sendMessage(
+    msg.chat.id,
+    `🏷️ Tus sellos actuales: ${c.sellos}\n\nVer tarjeta:\n${CONFIG.CARD_URL}`
+  );
+});
+
+/* ===============================
+   COMPARTIR BOT
+================================ */
+bot.onText(/📣 Compartir bot/, msg => {
+  bot.sendMessage(
+    msg.chat.id,
+    `${CONFIG.TextoSistema}\n\n📧 ${CONFIG.EmailSistema}\n🤖 ${CONFIG.BotLink}`
+  );
+});
+
+/* ===============================
+   AYUDA
+================================ */
+bot.onText(/🆘 Ayuda/, msg => {
+  bot.sendMessage(
+    msg.chat.id,
+    `Si necesitás hacer una consulta, reclamo o no encontraste algo en el catálogo,
+podés escribirnos directo:\n\n📱 WhatsApp:\n${CONFIG.WhatsAppLink}\n📸 Instagram: ${CONFIG.NegocioInstagram}\n\nGracias por elegir ${CONFIG.NegocioNombre} 🧀`
+  );
+});
+
+/* ===============================
+   SERVER
+================================ */
 app.listen(PORT, () => {
-  console.log("✅ EZERBOT ACTIVO");
+  console.log("🚀 EZERBOT ACTIVO");
 });
