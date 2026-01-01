@@ -17,16 +17,9 @@ const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
 const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
 const DATA_API_URL = (process.env.DATA_API_URL || "").replace(/\/+$/, "");
 
-if (!TELEGRAM_TOKEN || !PUBLIC_URL || !DATA_API_URL) {
-  console.error("Faltan variables de entorno. Requeridas: TELEGRAM_TOKEN, PUBLIC_URL, DATA_API_URL");
-}
-
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 const WEBHOOK_PATH = `/tg-webhook/${crypto.createHash("sha1").update(TELEGRAM_TOKEN).digest("hex")}`;
 
-// ==============================
-// Helpers
-// ==============================
 function escHtml(s = "") {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -36,27 +29,6 @@ function escHtml(s = "") {
     .replaceAll("'", "&#39;");
 }
 
-function parseCSV(csvText) {
-  // CSV simple con comillas, soporta \n
-  const text = (csvText || "").trim();
-  if (!text) return [];
-  const lines = text.split(/\r?\n/);
-  if (lines.length < 1) return [];
-  const headers = splitCSVLine(lines[0]).map(h => h.trim());
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || !line.trim()) continue;
-    const cols = splitCSVLine(line);
-    const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = (cols[idx] ?? "").trim();
-    });
-    rows.push(obj);
-  }
-  return rows;
-}
-
 function splitCSVLine(line) {
   const out = [];
   let cur = "";
@@ -64,7 +36,6 @@ function splitCSVLine(line) {
   for (let i = 0; i < line.length; i++) {
     const ch = line[i];
     if (ch === '"') {
-      // doble comilla escapada
       if (inQ && line[i + 1] === '"') {
         cur += '"';
         i++;
@@ -82,53 +53,73 @@ function splitCSVLine(line) {
   return out;
 }
 
+function parseCSV(csvText) {
+  const text = (csvText || "").trim();
+  if (!text) return [];
+  const lines = text.split(/\r?\n/);
+  if (!lines.length) return [];
+  const headers = splitCSVLine(lines[0]).map((h) => h.trim());
+  const rows = [];
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line || !line.trim()) continue;
+    const cols = splitCSVLine(line);
+    const obj = {};
+    headers.forEach((h, idx) => {
+      obj[h] = (cols[idx] ?? "").trim();
+    });
+    rows.push(obj);
+  }
+  return rows;
+}
+
 async function tg(method, payload) {
   const r = await fetch(`${TG_API}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
   });
-  const j = await r.json().catch(() => null);
-  return j;
+  return await r.json().catch(() => null);
 }
 
 async function getTabCSV(tabName) {
   const url = `${DATA_API_URL}?tab=${encodeURIComponent(tabName)}`;
-  const r = await fetch(url, { method: "GET" });
+  const r = await fetch(url);
   const txt = await r.text();
-  // si devolvió JSON de error, lo dejamos ver igual
-  if (txt.trim().startsWith("{") || txt.trim().startsWith("[")) {
-    const j = JSON.parse(txt);
-    // si viene {ok:true, message:"..."} => lo tratamos como error
-    if (j && typeof j === "object" && ("message" in j)) {
+
+  // Si Apps Script devolvió JSON con message => error
+  const t = txt.trim();
+  if (t.startsWith("{") || t.startsWith("[")) {
+    const j = JSON.parse(t);
+    if (j && typeof j === "object" && "message" in j) {
       throw new Error(j.message || "Error DATA_API_URL");
     }
   }
   return parseCSV(txt);
 }
 
+function cfgGet(cfg, ...keys) {
+  for (const k of keys) {
+    if (k in cfg && String(cfg[k] || "").trim() !== "") return String(cfg[k]).trim();
+  }
+  return "";
+}
+
 async function loadConfig() {
-  // Config se espera como tabla key/value o como headers
-  // Opción A: columnas KEY, VALUE
-  // Opción B: una sola fila con columnas por nombre
   const rows = await getTabCSV("Config");
   const cfg = {};
   if (!rows.length) return cfg;
 
-  // Si existe KEY y VALUE
-  const hasKV = Object.keys(rows[0]).some(k => k.toLowerCase() === "key") &&
-                Object.keys(rows[0]).some(k => k.toLowerCase() === "value");
+  const keys = Object.keys(rows[0]);
+  const hasKV = keys.some((k) => k.toLowerCase() === "key") && keys.some((k) => k.toLowerCase() === "value");
+
   if (hasKV) {
     for (const r of rows) {
       const k = r.KEY ?? r.Key ?? r.key;
       const v = r.VALUE ?? r.Value ?? r.value;
       if (k) cfg[String(k).trim()] = String(v ?? "").trim();
     }
-    return cfg;
-  }
-
-  // Si viene 1 fila con muchas columnas
-  if (rows.length >= 1) {
+  } else {
     Object.entries(rows[0]).forEach(([k, v]) => {
       if (k) cfg[String(k).trim()] = String(v ?? "").trim();
     });
@@ -137,10 +128,8 @@ async function loadConfig() {
 }
 
 async function loadCatalog() {
-  // Tab name exacto: "Catalogo" (sin tilde)
   const rows = await getTabCSV("Catalogo");
-  // Normalizamos nombres posibles
-  return rows.map(r => ({
+  return rows.map((r) => ({
     CODIGO: r.CODIGO || r.Codigo || r.codigo || "",
     NOMBRE: r.NOMBRE || r.Nombre || r.nombre || "",
     PRECIO: r.PRECIO || r.Precio || r.precio || "",
@@ -153,23 +142,21 @@ async function loadCatalog() {
   }));
 }
 
-function cfgGet(cfg, ...keys) {
-  for (const k of keys) {
-    if (k in cfg && String(cfg[k] || "").trim() !== "") return String(cfg[k]).trim();
-  }
-  return "";
+function parseIntSafe(v) {
+  const n = String(v ?? "").replace(/[^0-9]/g, "");
+  return n ? parseInt(n, 10) : 0;
+}
+
+function isWeightUnit(unidadRaw) {
+  const u = String(unidadRaw || "").toLowerCase().trim();
+  return u === "kg" || u === "kilo" || u === "kilos" || u === "gramos" || u === "gr" || u === "g";
 }
 
 // ==============================
 // Web endpoints
 // ==============================
-app.get("/", (req, res) => {
-  res.status(200).send("OK");
-});
-
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+app.get("/", (req, res) => res.status(200).send("OK"));
+app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/catalog", async (req, res) => {
   try {
@@ -179,7 +166,7 @@ app.get("/catalog", async (req, res) => {
     const wa = cfgGet(cfg, "whatsapp", "WHATSAPP", "WHATSAPP_NUMBER") || "";
     const ig = cfgGet(cfg, "instagram", "INSTAGRAM") || "";
 
-    const categories = Array.from(new Set(catalog.map(p => (p.CATEGORIA || "General").trim()))).sort();
+    const categories = Array.from(new Set(catalog.map((p) => (p.CATEGORIA || "General").trim()))).sort();
     const catalogJson = JSON.stringify(catalog);
 
     res.setHeader("content-type", "text/html; charset=utf-8");
@@ -210,7 +197,7 @@ app.get("/catalog", async (req, res) => {
   .meta{display:flex;justify-content:space-between;align-items:center;margin-top:10px}
   .price{font-weight:900}
   .pill{font-size:11px;opacity:.85;border:1px solid #2a2a2a;border-radius:999px;padding:4px 8px}
-  .qty{display:flex;gap:6px;align-items:center;margin-top:10px}
+  .qty{display:flex;gap:6px;align-items:center;margin-top:10px;flex-wrap:wrap}
   .qty button{padding:8px 10px}
   .footerbar{position:sticky;bottom:0;background:#0f0f10;border-top:1px solid #222;padding:10px 14px}
   .cartline{display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -234,7 +221,7 @@ app.get("/catalog", async (req, res) => {
     <input id="q" placeholder="Buscar…" style="flex:1;min-width:170px" />
     <select id="cat">
       <option value="">Todas las categorías</option>
-      ${categories.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join("")}
+      ${categories.map((c) => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join("")}
     </select>
     <button id="clear" class="danger">Vaciar carrito</button>
   </div>
@@ -258,11 +245,49 @@ app.get("/catalog", async (req, res) => {
 <script>
 const CATALOG = ${catalogJson};
 const money = (n)=> String(Math.round(n)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ".");
-const cart = JSON.parse(localStorage.getItem("cart_v1")||"{}");
+const cart = JSON.parse(localStorage.getItem("cart_v2")||"{}");
 
-function priceOf(p){
-  const v = String(p.PRECIO||"").replace(/[^0-9]/g,"");
-  return v ? parseInt(v,10) : 0;
+// Config de pesado:
+const GRAMS_STEP = 100; // 100g por toque (cambialo si querés)
+
+function parseIntSafe(v){
+  const s = String(v ?? "").replace(/[^0-9]/g,"");
+  return s ? parseInt(s,10) : 0;
+}
+
+function isWeightUnit(unidadRaw){
+  const u = String(unidadRaw||"").toLowerCase().trim();
+  return (u==="kg"||u==="kilo"||u==="kilos"||u==="gramos"||u==="gr"||u==="g");
+}
+
+function unitLabel(p){
+  const u = String(p.UNIDAD||"").toLowerCase().trim();
+  if(isWeightUnit(u)) return "g";
+  return "u";
+}
+
+function displayQty(p, qty){
+  if(isWeightUnit(p.UNIDAD)) return qty + "g";
+  return qty + "u";
+}
+
+function pricePerKg(p){
+  // Usa PRECIOPORKILO si está, sino usa PRECIO como precio por kg
+  const pk = parseIntSafe(p.PRECIOPORKILO);
+  if(pk>0) return pk;
+  return parseIntSafe(p.PRECIO);
+}
+
+function pricePerUnit(p){
+  return parseIntSafe(p.PRECIO);
+}
+
+function itemSubtotal(p, qty){
+  if(isWeightUnit(p.UNIDAD)){
+    const pk = pricePerKg(p);
+    return (qty/1000) * pk;
+  }
+  return qty * pricePerUnit(p);
 }
 
 function render(){
@@ -279,8 +304,13 @@ function render(){
 
   grid.innerHTML = list.map(p=>{
     const code = p.CODIGO || "";
+    const isW = isWeightUnit(p.UNIDAD);
     const qty = cart[code]?.qty || 0;
-    const price = priceOf(p);
+
+    const priceTxt = isW
+      ? ("$ " + money(pricePerKg(p)) + " / kg")
+      : ("$ " + money(pricePerUnit(p)) + " c/u");
+
     return \`
       <div class="card">
         \${p.IMAGEN ? \`<img class="img" src="\${p.IMAGEN}" alt="">\` : \`<div class="img"></div>\`}
@@ -288,13 +318,15 @@ function render(){
           <div class="name">\${p.NOMBRE || "Producto"}</div>
           <div class="desc">\${p.DESCRIPCION || ""}</div>
           <div class="meta">
-            <div class="price">$ \${money(price)}</div>
+            <div class="price">\${priceTxt}</div>
             <div class="pill">\${p.CATEGORIA || "General"}</div>
           </div>
+
           <div class="qty">
             <button onclick="dec('\${code}')">-</button>
-            <div><b>\${qty}</b></div>
+            <div><b>\${qty ? displayQty(p, qty) : "0" + unitLabel(p)}</b></div>
             <button onclick="inc('\${code}')">+</button>
+            \${isW ? \`<span class="muted" style="font-size:12px">(+/- \${GRAMS_STEP}g)</span>\` : \`\`}
           </div>
         </div>
       </div>
@@ -307,29 +339,57 @@ function render(){
 function inc(code){
   const p = CATALOG.find(x=>x.CODIGO===code);
   if(!p) return;
+
+  const isW = isWeightUnit(p.UNIDAD);
   const cur = cart[code]?.qty || 0;
-  cart[code] = { qty: cur+1, nombre: p.NOMBRE||"", precio: priceOf(p) };
-  localStorage.setItem("cart_v1", JSON.stringify(cart));
+
+  const next = isW ? (cur + GRAMS_STEP) : (cur + 1);
+
+  cart[code] = {
+    qty: next,
+    nombre: p.NOMBRE||"",
+    unidad: p.UNIDAD||"",
+    precio: parseIntSafe(p.PRECIO),
+    precioPorKilo: parseIntSafe(p.PRECIOPORKILO),
+  };
+
+  localStorage.setItem("cart_v2", JSON.stringify(cart));
   render();
 }
 
 function dec(code){
+  const p = CATALOG.find(x=>x.CODIGO===code);
+  if(!p) return;
+
+  const isW = isWeightUnit(p.UNIDAD);
   const cur = cart[code]?.qty || 0;
-  if(cur<=1){ delete cart[code]; }
-  else{ cart[code].qty = cur-1; }
-  localStorage.setItem("cart_v1", JSON.stringify(cart));
+  if(cur<=0) return;
+
+  const next = isW ? (cur - GRAMS_STEP) : (cur - 1);
+
+  if(next<=0){
+    delete cart[code];
+  }else{
+    cart[code].qty = next;
+  }
+
+  localStorage.setItem("cart_v2", JSON.stringify(cart));
   render();
 }
 
 function refreshTotals(){
   let total = 0;
   let count = 0;
-  Object.values(cart).forEach(it=>{
-    total += (it.precio||0) * (it.qty||0);
-    count += (it.qty||0);
+
+  Object.entries(cart).forEach(([code,it])=>{
+    const p = CATALOG.find(x=>x.CODIGO===code);
+    if(!p) return;
+    total += itemSubtotal(p, it.qty||0);
+    count += 1; // cuenta líneas del pedido
   });
+
   document.getElementById("total").textContent = money(total);
-  document.getElementById("count").textContent = count + (count===1 ? " ítem" : " ítems");
+  document.getElementById("count").textContent = count + (count===1 ? " producto" : " productos");
 }
 
 document.getElementById("q").addEventListener("input", render);
@@ -337,26 +397,33 @@ document.getElementById("cat").addEventListener("change", render);
 
 document.getElementById("clear").addEventListener("click", ()=>{
   for(const k of Object.keys(cart)) delete cart[k];
-  localStorage.setItem("cart_v1", JSON.stringify(cart));
+  localStorage.setItem("cart_v2", JSON.stringify(cart));
   render();
 });
 
 document.getElementById("send").addEventListener("click", ()=>{
   const items = Object.entries(cart);
   if(!items.length){ alert("Carrito vacío"); return; }
+
   let msg = "Pedido:\\n";
   let total = 0;
+
   items.forEach(([code,it])=>{
-    const sub = (it.precio||0)*(it.qty||0);
+    const p = CATALOG.find(x=>x.CODIGO===code);
+    if(!p) return;
+
+    const qtyTxt = isWeightUnit(p.UNIDAD) ? (it.qty + "g") : (it.qty + "u");
+    const sub = itemSubtotal(p, it.qty||0);
     total += sub;
-    msg += "- " + (it.nombre||code) + " x" + it.qty + " = $" + money(sub) + "\\n";
+
+    msg += "- " + (p.NOMBRE||code) + " (" + qtyTxt + ") = $" + money(sub) + "\\n";
   });
+
   msg += "\\nTotal: $" + money(total);
+
   const wa = ${JSON.stringify(wa)};
-  if(!wa){
-    alert("Falta WhatsApp en Config para enviar pedido.");
-    return;
-  }
+  if(!wa){ alert("Falta WhatsApp en Config."); return; }
+
   const num = wa.replace(/[^0-9]/g,"");
   const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(msg);
   window.open(url, "_blank");
@@ -371,7 +438,6 @@ render();
   }
 });
 
-// Tarjeta / sellos simple
 app.get("/card/:uid", async (req, res) => {
   try {
     const uid = String(req.params.uid || "").trim();
@@ -380,7 +446,9 @@ app.get("/card/:uid", async (req, res) => {
     const brand = cfgGet(cfg, "brand_name", "BRAND_NAME") || "Todo Queso";
     const logo = cfgGet(cfg, "logo_url", "LOGO_URL") || "";
 
-    const row = clients.find(r => String(r.UserIdTG || r.USERIDTG || "").trim() === uid) || {};
+    const row =
+      clients.find((r) => String(r.UserIdTG || r.USERIDTG || "").trim() === uid) || {};
+
     const nombre = row.Nombre || row.NOMBRE || "Cliente";
     const sellos = row.Sellos || row.SELLOS || "0";
     const total = row.TotalConfirmado || row.TOTALCONFIRMADO || "0";
@@ -415,7 +483,7 @@ h1{margin:10px 0 0;font-size:18px}
     <h1>${escHtml(nombre)}</h1>
     <div class="big">${escHtml(sellos)} ✅</div>
     <div class="badge">Total confirmado: ${escHtml(total)}</div>
-    <div class="muted" style="margin-top:10px">Esta tarjeta se actualiza con tus compras.</div>
+    <div class="muted" style="margin-top:10px">Se actualiza con tus compras.</div>
   </div>
 </div>
 </body></html>`);
@@ -425,12 +493,9 @@ h1{margin:10px 0 0;font-size:18px}
 });
 
 // ==============================
-// Telegram webhook
+// Telegram
 // ==============================
-async function buildMainKeyboard(cfg, chatId) {
-  const shareText = cfgGet(cfg, "share_text", "SHARE_TEXT") || "¿Querés este sistema para tu negocio? Contactános";
-  const contactEmail = cfgGet(cfg, "contact_email", "CONTACT_EMAIL") || "ezerbot.assistant@gmail.com";
-
+async function buildMainKeyboard() {
   return {
     reply_markup: {
       keyboard: [
@@ -441,7 +506,6 @@ async function buildMainKeyboard(cfg, chatId) {
       resize_keyboard: true,
       one_time_keyboard: false,
     },
-    _extra: { shareText, contactEmail }
   };
 }
 
@@ -449,10 +513,11 @@ async function sendWelcome(chatId, firstName) {
   const cfg = await loadConfig();
   const brand = cfgGet(cfg, "brand_name", "BRAND_NAME") || "Todo Queso";
   const logo = cfgGet(cfg, "logo_url", "LOGO_URL") || "";
-  const welcome = cfgGet(cfg, "welcome_text", "WELCOME_TEXT") ||
+  const welcome =
+    cfgGet(cfg, "welcome_text", "WELCOME_TEXT") ||
     `👋 Bienvenido/a a ${brand} 🧀\n\n🧀 ¡Hola ${firstName || "👋"}!\n\n🛍️ Mirá el catálogo y acumulá sellos.`;
 
-  const kb = await buildMainKeyboard(cfg, chatId);
+  const kb = await buildMainKeyboard();
 
   if (logo) {
     await tg("sendPhoto", {
@@ -481,18 +546,14 @@ async function handleText(chatId, text, from) {
 
   const t = (text || "").trim();
 
-  // Comandos
-  if (t === "/start" || t.toLowerCase() === "menu" || t === "📋 Menú") {
+  if (t === "/start" || t.toLowerCase() === "menu") {
     await sendWelcome(chatId, from?.first_name || "");
     return;
   }
 
   if (t === "🛍️ Catálogo" || t.toLowerCase() === "catálogo" || t.toLowerCase() === "catalogo") {
     const url = `${PUBLIC_URL}/catalog`;
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `🛍️ Catálogo online:\n${url}`,
-    });
+    await tg("sendMessage", { chat_id: chatId, text: `🛍️ Catálogo online:\n${url}` });
     return;
   }
 
@@ -503,10 +564,7 @@ async function handleText(chatId, text, from) {
   }
 
   if (t === "📣 Compartir bot" || t.toLowerCase().includes("compartir")) {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: `🤖 ${shareText}\n\n✉️ ${contactEmail}`,
-    });
+    await tg("sendMessage", { chat_id: chatId, text: `🤖 ${shareText}\n\n✉️ ${contactEmail}` });
     return;
   }
 
@@ -519,21 +577,15 @@ async function handleText(chatId, text, from) {
     return;
   }
 
-  // Default: volver a menú corto
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: `Escribí /start para ver el menú.`,
-  });
+  await tg("sendMessage", { chat_id: chatId, text: `Escribí /start para ver el menú.` });
 }
 
 app.post(WEBHOOK_PATH, async (req, res) => {
   try {
     const update = req.body || {};
     const msg = update.message || update.edited_message;
-    if (msg && msg.chat && msg.chat.id) {
-      const chatId = msg.chat.id;
-      const text = msg.text || "";
-      await handleText(chatId, text, msg.from || {});
+    if (msg?.chat?.id) {
+      await handleText(msg.chat.id, msg.text || "", msg.from || {});
     }
     res.json({ ok: true });
   } catch (e) {
@@ -543,7 +595,7 @@ app.post(WEBHOOK_PATH, async (req, res) => {
 });
 
 // ==============================
-// Startup: set webhook + listen
+// Startup
 // ==============================
 async function setWebhook() {
   if (!TELEGRAM_TOKEN || !PUBLIC_URL) return;
