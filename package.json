@@ -3,11 +3,15 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "body-parser": "^1.20.3",
     "express": "^4.19.2",
-    "node-telegram-bot-api": "^0.66.0"
+    "googleapis": "^144.0.0"
   }
 }
