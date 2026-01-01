@@ -1,617 +1,818 @@
-/* ==============================
-   EZERBOT - index.js (Render/Node 22)
-   ENV REQUIRED:
-   - TELEGRAM_TOKEN
-   - PUBLIC_URL         (ej: https://ezerbot-system.onrender.com)
-   - DATA_API_URL       (tu Apps Script /exec)
-   ============================== */
+// index.js (ESM) — UN SOLO SCRIPT COMPLETO
+// Variables en Render (solo estas 3):
+// TELEGRAM_TOKEN
+// DATA_API_URL   (tu Apps Script URL /exec)
+// PUBLIC_URL     (https://ezerbot-system.onrender.com)
+
+// ✅ Telegram con carrusel (foto + botones)
+// ✅ Catálogo por botones (no link vacío)
+// ✅ Sellos en web /card/:userId con logo de Todo Queso y sellos llenos por compras
+// ✅ Lee TODO desde Sheets (Config + Catalogo + Clientes + Referidos)
+// ✅ Sin node-fetch (usa fetch nativo de Node 18+ / 22)
+// ✅ Sin requerir cambiar más variables
 
 import express from "express";
-import crypto from "crypto";
 
 const app = express();
 app.use(express.json({ limit: "2mb" }));
-app.use(express.urlencoded({ extended: true }));
 
-const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN || "";
-const PUBLIC_URL = (process.env.PUBLIC_URL || "").replace(/\/+$/, "");
-const DATA_API_URL = (process.env.DATA_API_URL || "").replace(/\/+$/, "");
+const TOKEN = process.env.TELEGRAM_TOKEN || "";
+const DATA_API_URL = (process.env.DATA_API_URL || "").trim();
+const PUBLIC_URL = (process.env.PUBLIC_URL || "").trim().replace(/\/+$/, "");
 
-const TG_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
-const WEBHOOK_PATH = `/tg-webhook/${crypto.createHash("sha1").update(TELEGRAM_TOKEN).digest("hex")}`;
-
-function escHtml(s = "") {
-  return String(s)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+if (!TOKEN || !DATA_API_URL || !PUBLIC_URL) {
+  console.error("Faltan variables: TELEGRAM_TOKEN, DATA_API_URL, PUBLIC_URL");
+  process.exit(1);
 }
 
-function splitCSVLine(line) {
-  const out = [];
+const API = `https://api.telegram.org/bot${TOKEN}`;
+const WEBHOOK_PATH = `/tg/${TOKEN}`;
+
+const PORT = process.env.PORT || 3000;
+
+// =========================
+// Helpers Telegram
+// =========================
+async function tg(method, payload) {
+  const r = await fetch(`${API}/${method}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const j = await r.json().catch(() => ({}));
+  return j;
+}
+
+function safeText(x) {
+  return (x ?? "").toString().trim();
+}
+
+function escHtml(s) {
+  return safeText(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+// =========================
+// CSV utils
+// =========================
+function parseCSV(csvText) {
+  const text = safeText(csvText);
+  if (!text) return [];
+  const rows = [];
+  let row = [];
   let cur = "";
-  let inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const ch = line[i];
-    if (ch === '"') {
-      if (inQ && line[i + 1] === '"') {
-        cur += '"';
-        i++;
-      } else {
-        inQ = !inQ;
-      }
-    } else if (ch === "," && !inQ) {
-      out.push(cur);
-      cur = "";
-    } else {
-      cur += ch;
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+
+    if (ch === '"' && inQuotes && next === '"') {
+      cur += '"';
+      i++;
+      continue;
     }
+    if (ch === '"') {
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && (ch === "," || ch === ";")) {
+      row.push(cur);
+      cur = "";
+      continue;
+    }
+    if (!inQuotes && (ch === "\n" || ch === "\r")) {
+      if (ch === "\r" && next === "\n") i++;
+      row.push(cur);
+      rows.push(row);
+      row = [];
+      cur = "";
+      continue;
+    }
+    cur += ch;
   }
-  out.push(cur);
+  row.push(cur);
+  rows.push(row);
+
+  const cleaned = rows
+    .map((r) => r.map((c) => safeText(c)))
+    .filter((r) => r.some((c) => c !== ""));
+  if (!cleaned.length) return [];
+
+  const header = cleaned[0];
+  const out = [];
+  for (let i = 1; i < cleaned.length; i++) {
+    const obj = {};
+    for (let k = 0; k < header.length; k++) obj[header[k]] = cleaned[i][k] ?? "";
+    out.push(obj);
+  }
   return out;
 }
 
-function parseCSV(csvText) {
-  const text = (csvText || "").trim();
-  if (!text) return [];
-  const lines = text.split(/\r?\n/);
-  if (!lines.length) return [];
-  const headers = splitCSVLine(lines[0]).map((h) => h.trim());
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line || !line.trim()) continue;
-    const cols = splitCSVLine(line);
-    const obj = {};
-    headers.forEach((h, idx) => {
-      obj[h] = (cols[idx] ?? "").trim();
-    });
-    rows.push(obj);
-  }
-  return rows;
-}
-
-async function tg(method, payload) {
-  const r = await fetch(`${TG_API}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-  return await r.json().catch(() => null);
-}
-
-async function getTabCSV(tabName) {
+async function fetchTabCSV(tabName) {
   const url = `${DATA_API_URL}?tab=${encodeURIComponent(tabName)}`;
-  const r = await fetch(url);
+  const r = await fetch(url, { method: "GET" });
   const txt = await r.text();
-
-  // Si Apps Script devolvió JSON con message => error
-  const t = txt.trim();
-  if (t.startsWith("{") || t.startsWith("[")) {
-    const j = JSON.parse(t);
-    if (j && typeof j === "object" && "message" in j) {
-      throw new Error(j.message || "Error DATA_API_URL");
+  // si el Apps Script devuelve JSON con "csv", lo soportamos
+  try {
+    const j = JSON.parse(txt);
+    if (j && typeof j === "object") {
+      if (j.csv) return safeText(j.csv);
+      if (j.data && Array.isArray(j.data) && j.data.length) {
+        // no es csv, pero algo devolvió
+      }
+      if (j.ok === true && j.message) {
+        // sigue
+      }
     }
-  }
-  return parseCSV(txt);
+  } catch {}
+  return txt;
 }
 
-function cfgGet(cfg, ...keys) {
-  for (const k of keys) {
-    if (k in cfg && String(cfg[k] || "").trim() !== "") return String(cfg[k]).trim();
+// =========================
+// Carga de datos
+// =========================
+let CACHE = {
+  ts: 0,
+  config: null,
+  catalogo: null,
+  clientes: null,
+  referidos: null,
+};
+
+const CACHE_MS = 7000;
+
+async function loadAll() {
+  const now = Date.now();
+  if (now - CACHE.ts < CACHE_MS && CACHE.config && CACHE.catalogo) return CACHE;
+
+  const [configCSV, catalogCSV, clientesCSV, referidosCSV] = await Promise.all([
+    fetchTabCSV("Config").catch(() => ""),
+    fetchTabCSV("Catalogo").catch(() => ""),
+    fetchTabCSV("Clientes").catch(() => ""),
+    fetchTabCSV("Referidos").catch(() => ""),
+  ]);
+
+  const configRows = parseCSV(configCSV);
+  const catalogRows = parseCSV(catalogCSV);
+  const clientesRows = parseCSV(clientesCSV);
+  const referidosRows = parseCSV(referidosCSV);
+
+  const config = {};
+  for (const r of configRows) {
+    const k = safeText(r.KEY || r.Key || r.key);
+    const v = safeText(r.VALUE || r.Value || r.value);
+    if (k) config[k] = v;
   }
-  return "";
+
+  CACHE = {
+    ts: now,
+    config,
+    catalogo: catalogRows,
+    clientes: clientesRows,
+    referidos: referidosRows,
+  };
+  return CACHE;
 }
 
-async function loadConfig() {
-  const rows = await getTabCSV("Config");
-  const cfg = {};
-  if (!rows.length) return cfg;
+function pickConfig(config, key, fallback = "") {
+  const v = safeText(config?.[key]);
+  return v || fallback;
+}
 
-  const keys = Object.keys(rows[0]);
-  const hasKV = keys.some((k) => k.toLowerCase() === "key") && keys.some((k) => k.toLowerCase() === "value");
+// =========================
+// Lógica negocio: unidades/gramos
+// =========================
+function isPeso(unidad) {
+  const u = safeText(unidad).toLowerCase();
+  return ["kg", "kilo", "kilos", "g", "gr", "gramos"].includes(u);
+}
 
-  if (hasKV) {
-    for (const r of rows) {
-      const k = r.KEY ?? r.Key ?? r.key;
-      const v = r.VALUE ?? r.Value ?? r.value;
-      if (k) cfg[String(k).trim()] = String(v ?? "").trim();
+function precioTexto(p) {
+  const unidad = safeText(p.UNIDAD);
+  const precio = safeText(p.PRECIO);
+  const ppk = safeText(p.PRECIOPORKILO);
+
+  if (isPeso(unidad)) {
+    if (ppk) return `$${ppk} / kg`;
+    if (precio) return `$${precio} / kg`;
+    return `$0 / kg`;
+  }
+  return `$${precio || "0"} c/u`;
+}
+
+function descripcionProducto(p) {
+  const desc = safeText(p.DESCRIPCION);
+  if (!desc) return "";
+  return desc.length > 800 ? desc.slice(0, 800) + "…" : desc;
+}
+
+// =========================
+// Estado en memoria (carritos / paginación)
+// =========================
+const STATE = {
+  cart: new Map(), // userId -> {items: {codigo: qtyOrGrams}, lastMsgId, lastChatId}
+  page: new Map(), // userId -> {cat, idx}
+};
+
+function getUserCart(userId) {
+  if (!STATE.cart.has(userId)) STATE.cart.set(userId, { items: {}, lastMsgId: null, lastChatId: null });
+  return STATE.cart.get(userId);
+}
+
+function setUserPage(userId, cat, idx) {
+  STATE.page.set(userId, { cat, idx });
+}
+function getUserPage(userId) {
+  return STATE.page.get(userId) || { cat: "ALL", idx: 0 };
+}
+
+// =========================
+// Catálogo en Telegram estilo carrusel (1 producto por mensaje + botones, paginado)
+// =========================
+function buildProductList(catalogo, cat) {
+  const list = catalogo
+    .map((p) => ({
+      CODIGO: safeText(p.CODIGO),
+      NOMBRE: safeText(p.NOMBRE),
+      PRECIO: safeText(p.PRECIO),
+      UNIDAD: safeText(p.UNIDAD),
+      PRECIOPORKILO: safeText(p.PRECIOPORKILO),
+      CODIGOBARRAS: safeText(p.CODIGOBARRAS),
+      DESCRIPCION: safeText(p.DESCRIPCION),
+      IMAGEN: safeText(p.IMAGEN),
+      CATEGORIA: safeText(p.CATEGORIA || "General"),
+    }))
+    .filter((p) => p.CODIGO && p.NOMBRE);
+
+  if (!cat || cat === "ALL") return list;
+  return list.filter((p) => safeText(p.CATEGORIA).toLowerCase() === safeText(cat).toLowerCase());
+}
+
+function uniqueCategories(catalogo) {
+  const set = new Set();
+  for (const p of catalogo) {
+    const c = safeText(p.CATEGORIA || "General");
+    if (c) set.add(c);
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b));
+}
+
+function cartTotalText(catalogo, items) {
+  let total = 0;
+  let lines = [];
+  for (const [codigo, qty] of Object.entries(items || {})) {
+    if (!qty || qty <= 0) continue;
+    const p = catalogo.find((x) => safeText(x.CODIGO) === codigo);
+    if (!p) continue;
+
+    if (isPeso(p.UNIDAD)) {
+      const grams = qty;
+      const ppk = Number(safeText(p.PRECIOPORKILO || p.PRECIO) || 0);
+      const subtotal = Math.round((grams / 1000) * ppk);
+      total += subtotal;
+      lines.push(`• ${p.NOMBRE} — ${grams}g — $${subtotal}`);
+    } else {
+      const units = qty;
+      const pu = Number(safeText(p.PRECIO) || 0);
+      const subtotal = units * pu;
+      total += subtotal;
+      lines.push(`• ${p.NOMBRE} — ${units}u — $${subtotal}`);
     }
+  }
+  if (!lines.length) return "🛒 Carrito vacío.";
+  return `🛒 Tu carrito:\n${lines.join("\n")}\n\n💰 Total: $${total}`;
+}
+
+async function sendProduct(chatId, userId, producto, idx, totalCount, catLabel) {
+  const cart = getUserCart(userId);
+  const qty = cart.items[producto.CODIGO] || 0;
+
+  const title = `🧀 ${producto.NOMBRE}`;
+  const price = precioTexto(producto);
+  const desc = descripcionProducto(producto);
+
+  const qtyText = isPeso(producto.UNIDAD) ? `${qty}g` : `${qty}u`;
+
+  const caption =
+`${title}
+${price}
+${desc ? "\n" + desc : ""}
+
+📍 Categoría: ${producto.CATEGORIA || "General"}
+📦 En carrito: ${qtyText}
+
+📄 ${idx + 1}/${totalCount} ${catLabel ? "— " + catLabel : ""}`;
+
+  const addStep = isPeso(producto.UNIDAD) ? 100 : 1;
+  const addLabel = isPeso(producto.UNIDAD) ? "➕ 100g" : "➕ 1";
+  const minusLabel = "➖";
+  const nextLabel = "➡️";
+  const prevLabel = "⬅️";
+
+  const keyboard = {
+    inline_keyboard: [
+      [
+        { text: prevLabel, callback_data: `nav|prev` },
+        { text: nextLabel, callback_data: `nav|next` },
+      ],
+      [
+        { text: minusLabel, callback_data: `cart|menos|${producto.CODIGO}|${addStep}` },
+        { text: addLabel, callback_data: `cart|mas|${producto.CODIGO}|${addStep}` },
+      ],
+      [
+        { text: "🧾 Ver carrito", callback_data: `cart|ver` },
+        { text: "✅ Finalizar", callback_data: `cart|fin` },
+      ],
+      [
+        { text: "📂 Categorías", callback_data: `cats|open` },
+      ],
+    ],
+  };
+
+  // Preferimos sendPhoto si hay IMAGEN válida; si no, sendMessage
+  const photo = safeText(producto.IMAGEN);
+  let sent;
+  if (photo) {
+    sent = await tg("sendPhoto", {
+      chat_id: chatId,
+      photo,
+      caption,
+      reply_markup: keyboard,
+    });
   } else {
-    Object.entries(rows[0]).forEach(([k, v]) => {
-      if (k) cfg[String(k).trim()] = String(v ?? "").trim();
+    sent = await tg("sendMessage", {
+      chat_id: chatId,
+      text: caption,
+      reply_markup: keyboard,
     });
   }
-  return cfg;
+
+  // guardar último msg para editar (si hace falta)
+  if (sent?.ok && sent.result?.message_id) {
+    cart.lastMsgId = sent.result.message_id;
+    cart.lastChatId = chatId;
+  }
 }
 
-async function loadCatalog() {
-  const rows = await getTabCSV("Catalogo");
-  return rows.map((r) => ({
-    CODIGO: r.CODIGO || r.Codigo || r.codigo || "",
-    NOMBRE: r.NOMBRE || r.Nombre || r.nombre || "",
-    PRECIO: r.PRECIO || r.Precio || r.precio || "",
-    UNIDAD: r.UNIDAD || r.Unidad || r.unidad || "",
-    PRECIOPORKILO: r.PRECIOPORKILO || r.PrecioPorKilo || r.precioPorKilo || r.precio_porkilo || "",
-    CODIGOBARRAS: r.CODIGOBARRAS || r.CodigoBarras || r.codigobarras || "",
-    DESCRIPCION: r.DESCRIPCION || r.Descripcion || r.descripcion || "",
-    IMAGEN: r.IMAGEN || r.Imagen || r.imagen || "",
-    CATEGORIA: r.CATEGORIA || r.Categoria || r.categoria || "General",
-  }));
+async function showCatalog(chatId, userId, forceCat = null, forceIdx = null) {
+  const { config, catalogo } = await loadAll();
+
+  const cats = uniqueCategories(catalogo);
+  const page = getUserPage(userId);
+  const cat = forceCat ?? page.cat ?? "ALL";
+  const idx = forceIdx ?? page.idx ?? 0;
+
+  const list = buildProductList(catalogo, cat);
+  if (!list.length) {
+    await tg("sendMessage", { chat_id: chatId, text: "No hay productos para mostrar." });
+    return;
+  }
+
+  const realIdx = Math.max(0, Math.min(idx, list.length - 1));
+  setUserPage(userId, cat, realIdx);
+
+  const catLabel = cat === "ALL" ? "Todas" : cat;
+  await sendProduct(chatId, userId, list[realIdx], realIdx, list.length, catLabel);
+
+  // Si es primera vez y hay categorías, opcional: no spamear
+  const msgCatalogo = pickConfig(config, "CATALOGO_TEXTO", "");
+  if (msgCatalogo) {
+    // no repetimos siempre
+  }
 }
 
-function parseIntSafe(v) {
-  const n = String(v ?? "").replace(/[^0-9]/g, "");
-  return n ? parseInt(n, 10) : 0;
+// =========================
+// Categorías inline
+// =========================
+async function showCategories(chatId) {
+  const { catalogo } = await loadAll();
+  const cats = uniqueCategories(catalogo);
+  const rows = [];
+  const chunk = 2;
+  for (let i = 0; i < cats.length; i += chunk) {
+    const r = [];
+    for (let j = i; j < i + chunk && j < cats.length; j++) {
+      const c = cats[j];
+      r.push({ text: c, callback_data: `cats|set|${c}` });
+    }
+    rows.push(r);
+  }
+  rows.push([{ text: "📦 Ver todo", callback_data: `cats|set|ALL` }]);
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: "📂 Elegí una categoría:",
+    reply_markup: { inline_keyboard: rows },
+  });
 }
 
-function isWeightUnit(unidadRaw) {
-  const u = String(unidadRaw || "").toLowerCase().trim();
-  return u === "kg" || u === "kilo" || u === "kilos" || u === "gramos" || u === "gr" || u === "g";
+// =========================
+// Clientes / Referidos (lectura + fallback)
+// =========================
+function findClient(clientes, userId) {
+  return (clientes || []).find((c) => safeText(c.UserIdTG) === safeText(userId)) || null;
 }
 
-// ==============================
-// Web endpoints
-// ==============================
-app.get("/", (req, res) => res.status(200).send("OK"));
-app.get("/health", (req, res) => res.json({ ok: true }));
+function genCode(len = 6) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let s = "";
+  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
+  return s;
+}
 
-app.get("/catalog", async (req, res) => {
+// Intento de escritura opcional (si tu Apps Script lo soporta). Si no, no rompe.
+async function tryUpsertClient(payload) {
   try {
-    const [cfg, catalog] = await Promise.all([loadConfig(), loadCatalog()]);
-    const brand = cfgGet(cfg, "brand_name", "BRAND_NAME") || "Todo Queso";
-    const logo = cfgGet(cfg, "logo_url", "LOGO_URL") || "";
-    const wa = cfgGet(cfg, "whatsapp", "WHATSAPP", "WHATSAPP_NUMBER") || "";
-    const ig = cfgGet(cfg, "instagram", "INSTAGRAM") || "";
+    const r = await fetch(DATA_API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "upsertClient", ...payload }),
+    });
+    const txt = await r.text();
+    return txt;
+  } catch {
+    return null;
+  }
+}
 
-    const categories = Array.from(new Set(catalog.map((p) => (p.CATEGORIA || "General").trim()))).sort();
-    const catalogJson = JSON.stringify(catalog);
+async function ensureClient(userId, name, phone, referidoPorCode = "") {
+  const data = await loadAll();
+  let cli = findClient(data.clientes, userId);
 
-    res.setHeader("content-type", "text/html; charset=utf-8");
-    res.send(`<!doctype html>
+  if (cli) return cli;
+
+  // crear en memoria (y tratar de persistir si tu Apps Script lo permite)
+  const nuevo = {
+    UserIdTG: String(userId),
+    Nombre: safeText(name) || "",
+    Telefono: safeText(phone) || "",
+    Sellos: "0",
+    TotalConfirmado: "0",
+    CodigoReferido: genCode(6),
+    ReferidoPor: safeText(referidoPorCode),
+    UltAct: new Date().toISOString(),
+  };
+
+  await tryUpsertClient(nuevo);
+  // refrescar cache
+  CACHE.ts = 0;
+  const refreshed = await loadAll();
+  cli = findClient(refreshed.clientes, userId) || nuevo;
+  return cli;
+}
+
+// =========================
+// Mensajes (Config)
+// =========================
+function applyVars(tpl, vars) {
+  let s = safeText(tpl);
+  for (const [k, v] of Object.entries(vars || {})) {
+    const re = new RegExp(`\\{${k}\\}`, "g");
+    s = s.replace(re, safeText(v));
+  }
+  return s;
+}
+
+async function sendWelcome(chatId, from) {
+  const { config, clientes } = await loadAll();
+
+  const saludo = pickConfig(
+    config,
+    "SALUDO",
+    "👋 Bienvenido/a a Todo Queso 🧀\n\n¡Hola {NOMBRE}! 👋\n\n🛍️ Mirá el catálogo y acumulá sellos."
+  );
+
+  const nombre = safeText(from?.first_name || from?.username || "!");
+  const text = applyVars(saludo, { NOMBRE: nombre });
+
+  const keyboard = {
+    keyboard: [
+      [{ text: "🛍️ Catálogo" }],
+      [{ text: "🏷️ Sellos" }, { text: "📣 Compartir bot" }],
+      [{ text: "🆘 Ayuda" }],
+    ],
+    resize_keyboard: true,
+  };
+
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text,
+    reply_markup: keyboard,
+  });
+}
+
+async function sendAyuda(chatId) {
+  const { config } = await loadAll();
+  const whatsapp = pickConfig(config, "WHATSAPP", "");
+  const instagram = pickConfig(config, "INSTAGRAM", "");
+
+  const ayudaTpl = pickConfig(
+    config,
+    "AYUDA_TEXTO",
+    "📌 Si necesitás hacer una consulta o reclamo:\n\n✅ WhatsApp: {WHATSAPP}\n📸 Instagram: {INSTAGRAM}\n\nGracias por elegir Todo Queso 🧀"
+  );
+
+  const text = applyVars(ayudaTpl, { WHATSAPP: whatsapp, INSTAGRAM: instagram });
+  await tg("sendMessage", { chat_id: chatId, text });
+}
+
+async function sendCompartir(chatId, userId) {
+  const { config, clientes } = await loadAll();
+  const botUser = pickConfig(config, "BOT_USERNAME", "Todo_Queso"); // ponelo en Config si querés exacto
+  const cli = findClient(clientes, userId);
+
+  const code = safeText(cli?.CodigoReferido) || genCode(6);
+  const link = `https://t.me/${botUser}?start=${code}`;
+
+  const tpl = pickConfig(
+    config,
+    "COMPARTIR_TEXTO",
+    "🤖 ¿Querés este sistema para tu negocio?\n\n📩 {MAIL}\n🔗 {LINK}"
+  );
+  const mail = pickConfig(config, "MAIL", "ezerbot.assistant@gmail.com");
+
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: applyVars(tpl, { MAIL: mail, LINK: link }),
+    disable_web_page_preview: true,
+  });
+}
+
+async function sendSellos(chatId, userId) {
+  const url = `${PUBLIC_URL}/card/${encodeURIComponent(userId)}`;
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: `🏷️ Tu tarjeta / sellos:\n${url}`,
+    disable_web_page_preview: false,
+  });
+}
+
+// =========================
+// Web: Tarjeta/Sellos
+// =========================
+function renderCardHTML(cfg, cliente, userId) {
+  const logo = pickConfig(cfg, "LOGO_URL", "");
+  const brand = pickConfig(cfg, "BRAND_NAME", "Todo Queso");
+  const maxSellos = Number(pickConfig(cfg, "SELLOS_MAX", "10")) || 10;
+
+  const nombre = escHtml(safeText(cliente?.Nombre || "Cliente"));
+  const sellos = Math.max(0, Number(safeText(cliente?.Sellos || "0")) || 0);
+  const filled = Math.min(sellos, maxSellos);
+
+  const bg = pickConfig(cfg, "CARD_BG", "#0b0f14");
+  const card = pickConfig(cfg, "CARD_COLOR", "#111827");
+  const accent = pickConfig(cfg, "ACCENT", "#f59e0b");
+
+  const stamps = [];
+  for (let i = 1; i <= maxSellos; i++) {
+    const isOn = i <= filled;
+    stamps.push(`
+      <div class="stamp ${isOn ? "on" : ""}">
+        ${logo ? `<img src="${escHtml(logo)}" alt="logo">` : `<div class="txt">🧀</div>`}
+        <div class="n">${i}</div>
+      </div>
+    `);
+  }
+
+  return `<!doctype html>
 <html lang="es">
 <head>
-<meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>${escHtml(brand)} - Catálogo</title>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>${escHtml(brand)} — Sellos</title>
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;margin:0;background:#0f0f10;color:#fff}
-  header{position:sticky;top:0;background:#111;z-index:10;padding:12px 14px;border-bottom:1px solid #222}
-  .row{display:flex;gap:10px;align-items:center}
-  .logo{width:44px;height:44px;border-radius:10px;object-fit:cover;background:#222}
-  .brand{font-weight:800;font-size:18px;line-height:1.1}
-  .sub{opacity:.8;font-size:12px}
-  .wrap{padding:12px 14px;max-width:980px;margin:0 auto}
-  .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px}
-  input,select,button{border-radius:12px;border:1px solid #2a2a2a;background:#151518;color:#fff;padding:10px 12px;font-size:14px}
-  button{cursor:pointer;font-weight:700}
-  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-  @media (min-width:720px){.grid{grid-template-columns:repeat(3,minmax(0,1fr));}}
-  .card{background:#121215;border:1px solid #242428;border-radius:16px;overflow:hidden;display:flex;flex-direction:column}
-  .img{width:100%;aspect-ratio:1/1;background:#1a1a1e;object-fit:cover}
-  .p{padding:10px 10px 12px}
-  .name{font-weight:800}
-  .desc{opacity:.85;font-size:12px;white-space:pre-line;margin-top:6px;min-height:34px}
-  .meta{display:flex;justify-content:space-between;align-items:center;margin-top:10px}
-  .price{font-weight:900}
-  .pill{font-size:11px;opacity:.85;border:1px solid #2a2a2a;border-radius:999px;padding:4px 8px}
-  .qty{display:flex;gap:6px;align-items:center;margin-top:10px;flex-wrap:wrap}
-  .qty button{padding:8px 10px}
-  .footerbar{position:sticky;bottom:0;background:#0f0f10;border-top:1px solid #222;padding:10px 14px}
-  .cartline{display:flex;justify-content:space-between;align-items:center;gap:10px}
-  .muted{opacity:.8}
-  .danger{background:#2a1414;border-color:#4a1f1f}
+  body{margin:0;font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial;background:${escHtml(bg)};color:#fff}
+  .wrap{max-width:900px;margin:0 auto;padding:18px}
+  .head{display:flex;gap:14px;align-items:center;margin-bottom:14px}
+  .head .brand{font-weight:800;font-size:22px}
+  .badge{background:${escHtml(card)};border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:14px}
+  .row{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .k{opacity:.75;font-size:13px}
+  .v{font-weight:700}
+  .grid{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-top:14px}
+  .stamp{position:relative;background:#0f172a;border:1px dashed rgba(255,255,255,.18);border-radius:14px;min-height:88px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .stamp.on{border:2px solid ${escHtml(accent)};box-shadow:0 0 0 2px rgba(245,158,11,.15) inset}
+  .stamp img{width:64px;height:64px;object-fit:contain;opacity:.95;filter:drop-shadow(0 6px 16px rgba(0,0,0,.4))}
+  .stamp .txt{font-size:34px}
+  .stamp .n{position:absolute;bottom:6px;right:8px;font-size:12px;opacity:.75}
+  .foot{margin-top:14px;opacity:.75;font-size:12px}
+  @media (max-width:520px){.grid{grid-template-columns:repeat(2,1fr)}}
 </style>
 </head>
 <body>
-<header>
-  <div class="row">
-    ${logo ? `<img class="logo" src="${escHtml(logo)}" alt="logo">` : `<div class="logo"></div>`}
-    <div>
-      <div class="brand">${escHtml(brand)}</div>
-      <div class="sub">Catálogo online · Armá tu pedido</div>
-    </div>
-  </div>
-</header>
-
-<div class="wrap">
-  <div class="toolbar">
-    <input id="q" placeholder="Buscar…" style="flex:1;min-width:170px" />
-    <select id="cat">
-      <option value="">Todas las categorías</option>
-      ${categories.map((c) => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join("")}
-    </select>
-    <button id="clear" class="danger">Vaciar carrito</button>
-  </div>
-
-  <div id="grid" class="grid"></div>
-</div>
-
-<div class="footerbar">
-  <div class="cartline">
-    <div>
-      <div><b>Total:</b> $<span id="total">0</span></div>
-      <div class="muted" id="count">0 ítems</div>
-    </div>
-    <button id="send">Enviar pedido</button>
-  </div>
-  <div class="muted" style="font-size:12px;margin-top:6px">
-    ${wa ? `WhatsApp: ${escHtml(wa)} · ` : ""}${ig ? `Instagram: ${escHtml(ig)}` : ""}
-  </div>
-</div>
-
-<script>
-const CATALOG = ${catalogJson};
-const money = (n)=> String(Math.round(n)).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ".");
-const cart = JSON.parse(localStorage.getItem("cart_v2")||"{}");
-
-// Config de pesado:
-const GRAMS_STEP = 100; // 100g por toque (cambialo si querés)
-
-function parseIntSafe(v){
-  const s = String(v ?? "").replace(/[^0-9]/g,"");
-  return s ? parseInt(s,10) : 0;
-}
-
-function isWeightUnit(unidadRaw){
-  const u = String(unidadRaw||"").toLowerCase().trim();
-  return (u==="kg"||u==="kilo"||u==="kilos"||u==="gramos"||u==="gr"||u==="g");
-}
-
-function unitLabel(p){
-  const u = String(p.UNIDAD||"").toLowerCase().trim();
-  if(isWeightUnit(u)) return "g";
-  return "u";
-}
-
-function displayQty(p, qty){
-  if(isWeightUnit(p.UNIDAD)) return qty + "g";
-  return qty + "u";
-}
-
-function pricePerKg(p){
-  // Usa PRECIOPORKILO si está, sino usa PRECIO como precio por kg
-  const pk = parseIntSafe(p.PRECIOPORKILO);
-  if(pk>0) return pk;
-  return parseIntSafe(p.PRECIO);
-}
-
-function pricePerUnit(p){
-  return parseIntSafe(p.PRECIO);
-}
-
-function itemSubtotal(p, qty){
-  if(isWeightUnit(p.UNIDAD)){
-    const pk = pricePerKg(p);
-    return (qty/1000) * pk;
-  }
-  return qty * pricePerUnit(p);
-}
-
-function render(){
-  const q = (document.getElementById("q").value||"").toLowerCase().trim();
-  const cat = document.getElementById("cat").value||"";
-  const grid = document.getElementById("grid");
-
-  const list = CATALOG.filter(p=>{
-    const okCat = !cat || (String(p.CATEGORIA||"")===cat);
-    const hay = (String(p.NOMBRE||"")+" "+String(p.DESCRIPCION||"")+" "+String(p.CODIGO||"")).toLowerCase();
-    const okQ = !q || hay.includes(q);
-    return okCat && okQ;
-  });
-
-  grid.innerHTML = list.map(p=>{
-    const code = p.CODIGO || "";
-    const isW = isWeightUnit(p.UNIDAD);
-    const qty = cart[code]?.qty || 0;
-
-    const priceTxt = isW
-      ? ("$ " + money(pricePerKg(p)) + " / kg")
-      : ("$ " + money(pricePerUnit(p)) + " c/u");
-
-    return \`
-      <div class="card">
-        \${p.IMAGEN ? \`<img class="img" src="\${p.IMAGEN}" alt="">\` : \`<div class="img"></div>\`}
-        <div class="p">
-          <div class="name">\${p.NOMBRE || "Producto"}</div>
-          <div class="desc">\${p.DESCRIPCION || ""}</div>
-          <div class="meta">
-            <div class="price">\${priceTxt}</div>
-            <div class="pill">\${p.CATEGORIA || "General"}</div>
-          </div>
-
-          <div class="qty">
-            <button onclick="dec('\${code}')">-</button>
-            <div><b>\${qty ? displayQty(p, qty) : "0" + unitLabel(p)}</b></div>
-            <button onclick="inc('\${code}')">+</button>
-            \${isW ? \`<span class="muted" style="font-size:12px">(+/- \${GRAMS_STEP}g)</span>\` : \`\`}
-          </div>
-        </div>
-      </div>
-    \`;
-  }).join("");
-
-  refreshTotals();
-}
-
-function inc(code){
-  const p = CATALOG.find(x=>x.CODIGO===code);
-  if(!p) return;
-
-  const isW = isWeightUnit(p.UNIDAD);
-  const cur = cart[code]?.qty || 0;
-
-  const next = isW ? (cur + GRAMS_STEP) : (cur + 1);
-
-  cart[code] = {
-    qty: next,
-    nombre: p.NOMBRE||"",
-    unidad: p.UNIDAD||"",
-    precio: parseIntSafe(p.PRECIO),
-    precioPorKilo: parseIntSafe(p.PRECIOPORKILO),
-  };
-
-  localStorage.setItem("cart_v2", JSON.stringify(cart));
-  render();
-}
-
-function dec(code){
-  const p = CATALOG.find(x=>x.CODIGO===code);
-  if(!p) return;
-
-  const isW = isWeightUnit(p.UNIDAD);
-  const cur = cart[code]?.qty || 0;
-  if(cur<=0) return;
-
-  const next = isW ? (cur - GRAMS_STEP) : (cur - 1);
-
-  if(next<=0){
-    delete cart[code];
-  }else{
-    cart[code].qty = next;
-  }
-
-  localStorage.setItem("cart_v2", JSON.stringify(cart));
-  render();
-}
-
-function refreshTotals(){
-  let total = 0;
-  let count = 0;
-
-  Object.entries(cart).forEach(([code,it])=>{
-    const p = CATALOG.find(x=>x.CODIGO===code);
-    if(!p) return;
-    total += itemSubtotal(p, it.qty||0);
-    count += 1; // cuenta líneas del pedido
-  });
-
-  document.getElementById("total").textContent = money(total);
-  document.getElementById("count").textContent = count + (count===1 ? " producto" : " productos");
-}
-
-document.getElementById("q").addEventListener("input", render);
-document.getElementById("cat").addEventListener("change", render);
-
-document.getElementById("clear").addEventListener("click", ()=>{
-  for(const k of Object.keys(cart)) delete cart[k];
-  localStorage.setItem("cart_v2", JSON.stringify(cart));
-  render();
-});
-
-document.getElementById("send").addEventListener("click", ()=>{
-  const items = Object.entries(cart);
-  if(!items.length){ alert("Carrito vacío"); return; }
-
-  let msg = "Pedido:\\n";
-  let total = 0;
-
-  items.forEach(([code,it])=>{
-    const p = CATALOG.find(x=>x.CODIGO===code);
-    if(!p) return;
-
-    const qtyTxt = isWeightUnit(p.UNIDAD) ? (it.qty + "g") : (it.qty + "u");
-    const sub = itemSubtotal(p, it.qty||0);
-    total += sub;
-
-    msg += "- " + (p.NOMBRE||code) + " (" + qtyTxt + ") = $" + money(sub) + "\\n";
-  });
-
-  msg += "\\nTotal: $" + money(total);
-
-  const wa = ${JSON.stringify(wa)};
-  if(!wa){ alert("Falta WhatsApp en Config."); return; }
-
-  const num = wa.replace(/[^0-9]/g,"");
-  const url = "https://wa.me/" + num + "?text=" + encodeURIComponent(msg);
-  window.open(url, "_blank");
-});
-
-render();
-</script>
-</body>
-</html>`);
-  } catch (e) {
-    res.status(500).send(`Error catálogo: ${escHtml(e.message || String(e))}`);
-  }
-});
-
-app.get("/card/:uid", async (req, res) => {
-  try {
-    const uid = String(req.params.uid || "").trim();
-    const [cfg, clients] = await Promise.all([loadConfig(), getTabCSV("Clientes")]);
-
-    const brand = cfgGet(cfg, "brand_name", "BRAND_NAME") || "Todo Queso";
-    const logo = cfgGet(cfg, "logo_url", "LOGO_URL") || "";
-
-    const row =
-      clients.find((r) => String(r.UserIdTG || r.USERIDTG || "").trim() === uid) || {};
-
-    const nombre = row.Nombre || row.NOMBRE || "Cliente";
-    const sellos = row.Sellos || row.SELLOS || "0";
-    const total = row.TotalConfirmado || row.TOTALCONFIRMADO || "0";
-
-    res.setHeader("content-type", "text/html; charset=utf-8");
-    res.send(`<!doctype html>
-<html lang="es"><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${escHtml(brand)} - Sellos</title>
-<style>
-body{font-family:system-ui;background:#0f0f10;color:#fff;margin:0}
-.wrap{max-width:560px;margin:0 auto;padding:18px}
-.card{background:#121215;border:1px solid #242428;border-radius:18px;padding:14px}
-.row{display:flex;gap:10px;align-items:center}
-.logo{width:56px;height:56px;border-radius:14px;background:#222;object-fit:cover}
-h1{margin:10px 0 0;font-size:18px}
-.big{font-size:42px;font-weight:900;margin:8px 0}
-.muted{opacity:.8}
-.badge{display:inline-block;border:1px solid #2a2a2a;border-radius:999px;padding:6px 10px;margin-top:8px}
-</style>
-</head>
-<body>
-<div class="wrap">
-  <div class="card">
-    <div class="row">
-      ${logo ? `<img class="logo" src="${escHtml(logo)}" alt="">` : `<div class="logo"></div>`}
+  <div class="wrap">
+    <div class="head">
+      ${logo ? `<img src="${escHtml(logo)}" style="width:44px;height:44px;border-radius:10px;object-fit:contain;background:${escHtml(card)};padding:8px;border:1px solid rgba(255,255,255,.08)">` : ""}
       <div>
-        <div style="font-weight:900">${escHtml(brand)}</div>
-        <div class="muted">Tarjeta de sellos</div>
+        <div class="brand">${escHtml(brand)}</div>
+        <div class="k">Tarjeta de sellos</div>
       </div>
     </div>
-    <h1>${escHtml(nombre)}</h1>
-    <div class="big">${escHtml(sellos)} ✅</div>
-    <div class="badge">Total confirmado: ${escHtml(total)}</div>
-    <div class="muted" style="margin-top:10px">Se actualiza con tus compras.</div>
+
+    <div class="badge">
+      <div class="row">
+        <div><div class="k">Nombre</div><div class="v">${nombre}</div></div>
+        <div><div class="k">Sellos</div><div class="v">${filled} / ${maxSellos}</div></div>
+        <div><div class="k">ID</div><div class="v">${escHtml(String(userId))}</div></div>
+      </div>
+
+      <div class="grid">${stamps.join("")}</div>
+      <div class="foot">Si no ves los sellos actualizados, cerrá y volvé a abrir el link.</div>
+    </div>
   </div>
-</div>
-</body></html>`);
+</body>
+</html>`;
+}
+
+app.get("/card/:userId", async (req, res) => {
+  try {
+    const userId = req.params.userId;
+    const { config, clientes } = await loadAll();
+    const cli = findClient(clientes, userId);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(renderCardHTML(config, cli, userId));
   } catch (e) {
-    res.status(500).send(`Error tarjeta: ${escHtml(e.message || String(e))}`);
+    res.status(500).send("Error");
   }
 });
 
-// ==============================
-// Telegram
-// ==============================
-async function buildMainKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [
-        [{ text: "🛍️ Catálogo" }],
-        [{ text: "🏷️ Sellos" }, { text: "📣 Compartir bot" }],
-        [{ text: "🆘 Ayuda" }],
-      ],
-      resize_keyboard: true,
-      one_time_keyboard: false,
-    },
-  };
-}
+// =========================
+// Web: health
+// =========================
+app.get("/", (req, res) => res.status(200).send("OK"));
+app.get("/health", (req, res) => res.status(200).json({ ok: true }));
 
-async function sendWelcome(chatId, firstName) {
-  const cfg = await loadConfig();
-  const brand = cfgGet(cfg, "brand_name", "BRAND_NAME") || "Todo Queso";
-  const logo = cfgGet(cfg, "logo_url", "LOGO_URL") || "";
-  const welcome =
-    cfgGet(cfg, "welcome_text", "WELCOME_TEXT") ||
-    `👋 Bienvenido/a a ${brand} 🧀\n\n🧀 ¡Hola ${firstName || "👋"}!\n\n🛍️ Mirá el catálogo y acumulá sellos.`;
-
-  const kb = await buildMainKeyboard();
-
-  if (logo) {
-    await tg("sendPhoto", {
-      chat_id: chatId,
-      photo: logo,
-      caption: welcome,
-      ...kb,
-    });
-  } else {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: welcome,
-      ...kb,
-    });
-  }
-}
-
-async function handleText(chatId, text, from) {
-  const cfg = await loadConfig();
-  const brand = cfgGet(cfg, "brand_name", "BRAND_NAME") || "Todo Queso";
-  const wa = cfgGet(cfg, "whatsapp", "WHATSAPP", "WHATSAPP_NUMBER") || "";
-  const ig = cfgGet(cfg, "instagram", "INSTAGRAM") || "";
-  const helpTitle = cfgGet(cfg, "help_title", "HELP_TITLE") || "📌 Si necesitás hacer una consulta o reclamo:";
-  const shareText = cfgGet(cfg, "share_text", "SHARE_TEXT") || "¿Querés este sistema para tu negocio? Contactános";
-  const contactEmail = cfgGet(cfg, "contact_email", "CONTACT_EMAIL") || "ezerbot.assistant@gmail.com";
-
-  const t = (text || "").trim();
-
-  if (t === "/start" || t.toLowerCase() === "menu") {
-    await sendWelcome(chatId, from?.first_name || "");
-    return;
-  }
-
-  if (t === "🛍️ Catálogo" || t.toLowerCase() === "catálogo" || t.toLowerCase() === "catalogo") {
-    const url = `${PUBLIC_URL}/catalog`;
-    await tg("sendMessage", { chat_id: chatId, text: `🛍️ Catálogo online:\n${url}` });
-    return;
-  }
-
-  if (t === "🏷️ Sellos" || t.toLowerCase() === "sellos") {
-    const url = `${PUBLIC_URL}/card/${chatId}`;
-    await tg("sendMessage", { chat_id: chatId, text: `🏷️ Tu tarjeta / sellos:\n${url}` });
-    return;
-  }
-
-  if (t === "📣 Compartir bot" || t.toLowerCase().includes("compartir")) {
-    await tg("sendMessage", { chat_id: chatId, text: `🤖 ${shareText}\n\n✉️ ${contactEmail}` });
-    return;
-  }
-
-  if (t === "🆘 Ayuda" || t.toLowerCase() === "ayuda") {
-    let msg = `${helpTitle}\n\n`;
-    if (wa) msg += `✅ WhatsApp: ${wa}\n`;
-    if (ig) msg += `📸 Instagram: ${ig}\n`;
-    msg += `\nGracias por elegir ${brand} 🧀`;
-    await tg("sendMessage", { chat_id: chatId, text: msg });
-    return;
-  }
-
-  await tg("sendMessage", { chat_id: chatId, text: `Escribí /start para ver el menú.` });
-}
-
+// =========================
+// Telegram Webhook
+// =========================
 app.post(WEBHOOK_PATH, async (req, res) => {
   try {
     const update = req.body || {};
-    const msg = update.message || update.edited_message;
-    if (msg?.chat?.id) {
-      await handleText(msg.chat.id, msg.text || "", msg.from || {});
+
+    // callbacks (botones inline)
+    if (update.callback_query) {
+      const q = update.callback_query;
+      const data = safeText(q.data);
+      const chatId = q.message?.chat?.id;
+      const userId = q.from?.id;
+
+      // nav
+      if (data.startsWith("nav|")) {
+        const dir = data.split("|")[1];
+        const { catalogo } = await loadAll();
+        const page = getUserPage(userId);
+        const list = buildProductList(catalogo, page.cat);
+        let idx = page.idx;
+
+        if (dir === "next") idx++;
+        if (dir === "prev") idx--;
+
+        if (idx < 0) idx = list.length - 1;
+        if (idx >= list.length) idx = 0;
+
+        setUserPage(userId, page.cat, idx);
+        await showCatalog(chatId, userId, page.cat, idx);
+
+        await tg("answerCallbackQuery", { callback_query_id: q.id });
+        return res.send("ok");
+      }
+
+      // categorias
+      if (data === "cats|open") {
+        await showCategories(chatId);
+        await tg("answerCallbackQuery", { callback_query_id: q.id });
+        return res.send("ok");
+      }
+      if (data.startsWith("cats|set|")) {
+        const cat = data.split("|").slice(2).join("|");
+        setUserPage(userId, cat === "ALL" ? "ALL" : cat, 0);
+        await showCatalog(chatId, userId, cat === "ALL" ? "ALL" : cat, 0);
+        await tg("answerCallbackQuery", { callback_query_id: q.id });
+        return res.send("ok");
+      }
+
+      // carrito
+      if (data.startsWith("cart|")) {
+        const parts = data.split("|");
+        const action = parts[1];
+        const cart = getUserCart(userId);
+        const { catalogo } = await loadAll();
+
+        if (action === "mas" || action === "menos") {
+          const codigo = parts[2];
+          const step = Number(parts[3] || "1") || 1;
+          if (!cart.items[codigo]) cart.items[codigo] = 0;
+
+          if (action === "mas") cart.items[codigo] += step;
+          if (action === "menos") cart.items[codigo] -= step;
+
+          if (cart.items[codigo] < 0) cart.items[codigo] = 0;
+
+          await tg("answerCallbackQuery", {
+            callback_query_id: q.id,
+            text: "Listo ✅",
+            show_alert: false,
+          });
+
+          // refrescar el producto actual
+          const page = getUserPage(userId);
+          const list = buildProductList(catalogo, page.cat);
+          const prod = list[page.idx] || list[0];
+          await sendProduct(chatId, userId, prod, page.idx, list.length, page.cat === "ALL" ? "Todas" : page.cat);
+
+          return res.send("ok");
+        }
+
+        if (action === "ver") {
+          const txt = cartTotalText(catalogo, cart.items);
+          await tg("sendMessage", { chat_id: chatId, text: txt });
+          await tg("answerCallbackQuery", { callback_query_id: q.id });
+          return res.send("ok");
+        }
+
+        if (action === "fin") {
+          const txt = cartTotalText(catalogo, cart.items);
+          await tg("sendMessage", {
+            chat_id: chatId,
+            text: `${txt}\n\n📩 Para confirmar, escribinos por WhatsApp.`,
+          });
+          await tg("answerCallbackQuery", { callback_query_id: q.id });
+          return res.send("ok");
+        }
+      }
+
+      await tg("answerCallbackQuery", { callback_query_id: q.id });
+      return res.send("ok");
     }
-    res.json({ ok: true });
+
+    // mensajes
+    if (update.message) {
+      const m = update.message;
+      const chatId = m.chat.id;
+      const userId = m.from.id;
+      const text = safeText(m.text);
+      const from = m.from;
+
+      // /start con referido
+      if (text.startsWith("/start")) {
+        const parts = text.split(" ");
+        const ref = safeText(parts[1] || "");
+        await ensureClient(userId, from.first_name, "", ref);
+        await sendWelcome(chatId, from);
+        return res.send("ok");
+      }
+
+      // botones principales
+      if (text === "🛍️ Catálogo" || text.toLowerCase() === "catalogo" || text.toLowerCase() === "catálogo") {
+        await showCatalog(chatId, userId, null, null);
+        return res.send("ok");
+      }
+
+      if (text === "🏷️ Sellos" || text.toLowerCase() === "sellos") {
+        await sendSellos(chatId, userId);
+        return res.send("ok");
+      }
+
+      if (text === "📣 Compartir bot" || text.toLowerCase().includes("compartir")) {
+        await sendCompartir(chatId, userId);
+        return res.send("ok");
+      }
+
+      if (text === "🆘 Ayuda" || text.toLowerCase() === "ayuda") {
+        await sendAyuda(chatId);
+        return res.send("ok");
+      }
+
+      // fallback mínimo
+      // si escribe cualquier cosa, mostramos menú corto
+      await tg("sendMessage", {
+        chat_id: chatId,
+        text: "Usá el menú 👇",
+      });
+      return res.send("ok");
+    }
+
+    res.send("ok");
   } catch (e) {
     console.error("Webhook error:", e);
-    res.json({ ok: true });
+    res.send("ok");
   }
 });
 
-// ==============================
-// Startup
-// ==============================
+// =========================
+// Webhook setup en inicio
+// =========================
 async function setWebhook() {
-  if (!TELEGRAM_TOKEN || !PUBLIC_URL) return;
   const url = `${PUBLIC_URL}${WEBHOOK_PATH}`;
-  const r = await fetch(`${TG_API}/setWebhook`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ url }),
-  });
-  const j = await r.json().catch(() => null);
-  console.log("setWebhook:", j);
+  const r = await tg("setWebhook", { url });
+  console.log("setWebhook:", r?.ok ? "OK" : r);
 }
 
-const PORT = process.env.PORT || 10000;
 app.listen(PORT, async () => {
   console.log("EZERBOT ACTIVO");
-  console.log("Listening on", PORT);
+  console.log("URL:", PUBLIC_URL);
   await setWebhook();
 });
+```0
