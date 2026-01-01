@@ -1,547 +1,534 @@
-// index.js
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 import { google } from "googleapis";
 
-const app = express();
-app.use(express.json());
+const {
+  TELEGRAM_BOT_TOKEN,
+  GOOGLE_SHEET_ID,
+  GOOGLE_SERVICE_ACCOUNT_JSON,
+  GOOGLE_SERVICE_ACCOUNT_B64,
+  PORT,
+} = process.env;
 
-const PORT = process.env.PORT || 3000;
+if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta variable de entorno: TELEGRAM_BOT_TOKEN");
+if (!GOOGLE_SHEET_ID) throw new Error("Falta variable de entorno: GOOGLE_SHEET_ID");
 
-const TELEGRAM_BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
-const SHEET_ID = (process.env.SHEET_ID || "").trim();
-const GOOGLE_SERVICE_ACCOUNT_JSON = (process.env.GOOGLE_SERVICE_ACCOUNT_JSON || "").trim();
-const GOOGLE_SERVICE_ACCOUNT_B64 = (process.env.GOOGLE_SERVICE_ACCOUNT_B64 || "").trim();
-
-if (!SHEET_ID) throw new Error("Falta SHEET_ID");
-if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
-if (!GOOGLE_SERVICE_ACCOUNT_JSON && !GOOGLE_SERVICE_ACCOUNT_B64) {
-  throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_JSON o GOOGLE_SERVICE_ACCOUNT_B64");
+function loadServiceAccount() {
+  if (GOOGLE_SERVICE_ACCOUNT_B64 && GOOGLE_SERVICE_ACCOUNT_B64.trim()) {
+    const json = Buffer.from(GOOGLE_SERVICE_ACCOUNT_B64.trim(), "base64").toString("utf8");
+    return JSON.parse(json);
+  }
+  if (GOOGLE_SERVICE_ACCOUNT_JSON && GOOGLE_SERVICE_ACCOUNT_JSON.trim()) {
+    return JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON.trim());
+  }
+  throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64 o GOOGLE_SERVICE_ACCOUNT_JSON");
 }
 
-const svcJson = GOOGLE_SERVICE_ACCOUNT_JSON
-  ? JSON.parse(GOOGLE_SERVICE_ACCOUNT_JSON)
-  : JSON.parse(Buffer.from(GOOGLE_SERVICE_ACCOUNT_B64, "base64").toString("utf8"));
+const SA = loadServiceAccount();
 
 const auth = new google.auth.JWT({
-  email: svcJson.client_email,
-  key: svcJson.private_key,
+  email: SA.client_email,
+  key: SA.private_key,
   scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
 
 const sheets = google.sheets({ version: "v4", auth });
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-
-const state = {
-  config: {},
-  catalog: [],
-  catalogByCat: new Map(),
-  lastLoadAt: 0,
-  loading: false,
-};
-
-const sessions = new Map(); // chatId -> { step, cart: [{code,name,price,qty}], current: {code,...}, cat, page }
-
-function norm(s) {
-  return String(s ?? "")
-    .trim()
-    .replace(/\s+/g, " ")
-    .toLowerCase();
-}
-
-function num(v) {
-  const s = String(v ?? "").replace(/\./g, "").replace(/,/g, ".").trim();
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function money(n) {
-  const currency = state.config.currency || "$";
-  const decimals = Number(state.config.money_decimals ?? 0);
-  const fixed = Number.isFinite(decimals) ? decimals : 0;
-  const val = Number(n || 0).toFixed(fixed);
-  return `${currency}${val}`;
-}
-
-async function sheetValues(rangeA1) {
+async function readRange(range) {
   const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: rangeA1,
+    spreadsheetId: GOOGLE_SHEET_ID,
+    range,
     valueRenderOption: "UNFORMATTED_VALUE",
   });
   return res.data.values || [];
 }
 
-async function loadConfig() {
-  const values = await sheetValues("Config!A:B");
-  const cfg = {};
-  for (let i = 0; i < values.length; i++) {
-    const k = String(values[i][0] ?? "").trim();
-    const v = values[i][1];
-    if (!k) continue;
-    cfg[k] = v;
-  }
-  state.config = cfg;
-}
-
-function rowToObj(headers, row) {
-  const o = {};
-  for (let i = 0; i < headers.length; i++) {
-    const h = headers[i];
-    o[h] = row[i] ?? "";
-  }
-  return o;
-}
-
-async function loadCatalog() {
-  const values = await sheetValues("Catalogo!A:Z");
-  if (!values.length) {
-    state.catalog = [];
-    state.catalogByCat = new Map();
-    return;
-  }
-  const headersRaw = values[0].map((h) => String(h ?? "").trim());
-  const headers = headersRaw.map((h) => norm(h));
-
-  const idx = {
-    codigo: headers.indexOf("codigo"),
-    nombre: headers.indexOf("nombre"),
-    precio: headers.indexOf("precio"),
-    categoria: headers.indexOf("categoria"),
-    unidad: headers.indexOf("unidad"),
-    precioporkg: headers.indexOf("precio por kg"),
-    codigobarras: headers.indexOf("codigo de barras"),
-    descripcion: headers.indexOf("descripcion"),
-    imagen: headers.indexOf("imagen"),
-    activo: headers.indexOf("activo"),
-  };
-
-  const out = [];
-  for (let r = 1; r < values.length; r++) {
-    const row = values[r];
-    if (!row || row.every((c) => String(c ?? "").trim() === "")) continue;
-
-    const codigo = idx.codigo >= 0 ? String(row[idx.codigo] ?? "").trim() : "";
-    const nombre = idx.nombre >= 0 ? String(row[idx.nombre] ?? "").trim() : "";
-    const categoria = idx.categoria >= 0 ? String(row[idx.categoria] ?? "").trim() : "Sin categoría";
-    const unidad = idx.unidad >= 0 ? String(row[idx.unidad] ?? "").trim() : "";
-    const precio = idx.precio >= 0 ? num(row[idx.precio]) : 0;
-    const precioPorKg = idx.precioporkg >= 0 ? num(row[idx.precioporkg]) : 0;
-
-    const activoRaw = idx.activo >= 0 ? String(row[idx.activo] ?? "").trim() : "";
-    const activo = activoRaw ? !["0", "no", "false", "inactivo"].includes(norm(activoRaw)) : true;
-
-    if (!activo) continue;
-    if (!codigo && !nombre) continue;
-
-    out.push({
-      codigo,
-      nombre,
-      categoria,
-      unidad,
-      precio,
-      precioPorKg,
-      descripcion: idx.descripcion >= 0 ? String(row[idx.descripcion] ?? "").trim() : "",
-      imagen: idx.imagen >= 0 ? String(row[idx.imagen] ?? "").trim() : "",
-      codigoBarras: idx.codigobarras >= 0 ? String(row[idx.codigobarras] ?? "").trim() : "",
-    });
-  }
-
-  const byCat = new Map();
-  for (const p of out) {
-    const cat = p.categoria || "Sin categoría";
-    if (!byCat.has(cat)) byCat.set(cat, []);
-    byCat.get(cat).push(p);
-  }
-
-  for (const [cat, arr] of byCat.entries()) {
-    arr.sort((a, b) => (a.nombre || "").localeCompare(b.nombre || "", "es"));
-    byCat.set(cat, arr);
-  }
-
-  state.catalog = out;
-  state.catalogByCat = byCat;
-}
+// Cache liviano para no golpear Sheets a cada click
+let cache = {
+  ts: 0,
+  config: null,
+  catalog: null,
+};
+const CACHE_MS = 30_000;
 
 async function loadAll(force = false) {
   const now = Date.now();
-  const ttlMs = Number(state.config.cache_ms ?? 60000);
-  if (!force && state.lastLoadAt && now - state.lastLoadAt < ttlMs) return;
-  if (state.loading) return;
-  state.loading = true;
-  try {
-    await loadConfig();
-    await loadCatalog();
-    state.lastLoadAt = Date.now();
-  } finally {
-    state.loading = false;
-  }
+  if (!force && cache.config && cache.catalog && now - cache.ts < CACHE_MS) return cache;
+
+  const configRows = await readRange("Config!A:B");
+  const catalogRows = await readRange("Catalogo!A:Z");
+
+  const config = parseConfig(configRows);
+  const catalog = parseCatalog(catalogRows);
+
+  cache = { ts: now, config, catalog };
+  return cache;
 }
 
-function getCfgText(key, fallback = "") {
-  const v = state.config[key];
-  if (v === undefined || v === null) return fallback;
-  return String(v);
+function parseConfig(rows) {
+  // Espera formato: A=key, B=value (sin tocar tu hoja)
+  const obj = {};
+  for (const r of rows) {
+    const k = (r?.[0] ?? "").toString().trim();
+    if (!k) continue;
+    const v = (r?.[1] ?? "").toString().trim();
+    obj[k] = v;
+  }
+
+  // Defaults (si no existen en Config, igual funciona)
+  const brand_name = obj.brand_name || "Todo Queso";
+  const currency = obj.currency || "$";
+  const catalog_per_page = Number(obj.catalog_per_page || 8);
+  const welcome_message =
+    obj.welcome_message ||
+    `🧀 *${brand_name}*\n\nElegí una opción 👇`;
+  const help_message =
+    obj.help_message ||
+    `Si te faltó algo, no encontraste un producto o querés hacer una consulta, escribinos y te ayudamos 😊\n\nGracias por elegir *${brand_name}* 🧀`;
+
+  const sellos_message =
+    obj.sellos_message ||
+    "📌 *Sellos*\nAbrí tu tarjeta para ver tus sellos y beneficios.";
+
+  const share_message =
+    obj.share_message ||
+    "📣 ¿Querés este sistema para tu negocio? Contactános:";
+
+  return {
+    ...obj,
+    brand_name,
+    currency,
+    catalog_per_page: Number.isFinite(catalog_per_page) && catalog_per_page > 0 ? catalog_per_page : 8,
+    welcome_message,
+    help_message,
+    sellos_message,
+    share_message,
+  };
+}
+
+function normalizeHeader(s) {
+  return (s || "")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[áàä]/g, "a")
+    .replace(/[éèë]/g, "e")
+    .replace(/[íìï]/g, "i")
+    .replace(/[óòö]/g, "o")
+    .replace(/[úùü]/g, "u")
+    .replace(/ñ/g, "n");
+}
+
+function parseCatalog(rows) {
+  if (!rows.length) return { items: [], categories: ["Todas"] };
+
+  const header = rows[0].map(normalizeHeader);
+  const idx = (nameCandidates) => {
+    for (const c of nameCandidates) {
+      const i = header.indexOf(normalizeHeader(c));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  const iCodigo = idx(["codigo", "code", "id", "sku"]);
+  const iNombre = idx(["nombre", "producto", "name"]);
+  const iPrecio = idx(["precio", "price"]);
+  const iCategoria = idx(["categoria", "categoría", "rubro"]);
+  const iUnidad = idx(["unidad", "unit"]);
+  const iImagen = idx(["imagen", "image", "foto"]);
+  const iDescripcion = idx(["descripcion", "descripción", "desc"]);
+
+  const items = [];
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    const codigo = (row?.[iCodigo] ?? "").toString().trim();
+    const nombre = (row?.[iNombre] ?? "").toString().trim();
+    const precio = row?.[iPrecio];
+    const categoria = (row?.[iCategoria] ?? "").toString().trim() || "Sin categoría";
+    const unidad = (row?.[iUnidad] ?? "").toString().trim();
+    const imagen = (row?.[iImagen] ?? "").toString().trim();
+    const descripcion = (row?.[iDescripcion] ?? "").toString().trim();
+
+    if (!codigo && !nombre) continue;
+
+    items.push({
+      codigo: codigo || `ROW${r}`,
+      nombre: nombre || codigo || `Producto ${r}`,
+      precio: typeof precio === "number" ? precio : Number(precio || 0),
+      categoria,
+      unidad,
+      imagen,
+      descripcion,
+    });
+  }
+
+  const categories = Array.from(new Set(items.map((x) => x.categoria))).sort((a, b) => a.localeCompare(b));
+  categories.unshift("Todas");
+
+  return { items, categories };
+}
+
+// Carritos en memoria por usuario (simple y funciona)
+const carts = new Map(); // userId -> { [codigo]: qty }
+
+function getCart(userId) {
+  if (!carts.has(userId)) carts.set(userId, {});
+  return carts.get(userId);
+}
+function cartCount(cart) {
+  return Object.values(cart).reduce((a, b) => a + (Number(b) || 0), 0);
 }
 
 function mainKeyboard() {
   return {
-    resize_keyboard: true,
-    keyboard: [
-      [{ text: "🛍️ Catálogo" }],
-      [{ text: "🎟️ Sellos" }, { text: "📣 Compartir bot" }],
-      [{ text: "🆘 Ayuda" }],
-    ],
+    reply_markup: {
+      keyboard: [
+        [{ text: "🛍️ Catálogo" }],
+        [{ text: "🎟️ Sellos" }, { text: "📣 Compartir bot" }],
+        [{ text: "🆘 Ayuda" }],
+      ],
+      resize_keyboard: true,
+      one_time_keyboard: false,
+    },
+    parse_mode: "Markdown",
   };
 }
 
-function catKeyboard() {
-  return {
-    resize_keyboard: true,
-    keyboard: [
-      [{ text: "📚 Categorías" }, { text: "📚 Todas" }],
-      [{ text: "🛒 Ver carrito" }, { text: "✅ Finalizar compra" }],
-      [{ text: "🏠 Menú" }],
-    ],
-  };
-}
-
-function inlineCategories() {
-  const cats = Array.from(state.catalogByCat.keys());
-  cats.sort((a, b) => a.localeCompare(b, "es"));
+function categoriesKeyboard(categories) {
   const rows = [];
-  const perRow = 2;
-  for (let i = 0; i < cats.length; i += perRow) {
-    rows.push(
-      cats.slice(i, i + perRow).map((c) => ({
-        text: c,
-        callback_data: `CAT|${c}`,
-      }))
-    );
+  const row = [];
+  for (const c of categories) {
+    row.push({ text: `📚 ${c}` });
+    if (row.length === 2) {
+      rows.push([...row]);
+      row.length = 0;
+    }
   }
-  rows.push([{ text: "Volver", callback_data: "BACK_MENU" }]);
-  return { reply_markup: { inline_keyboard: rows } };
+  if (row.length) rows.push([...row]);
+  rows.push([{ text: "🏠 Menú" }]);
+  return { reply_markup: { keyboard: rows, resize_keyboard: true } };
 }
 
-function productPage(cat, page, perPage) {
-  const list = cat === "__ALL__" ? state.catalog : state.catalogByCat.get(cat) || [];
-  const total = list.length;
-  const pages = Math.max(1, Math.ceil(total / perPage));
-  const p = Math.min(Math.max(1, page), pages);
+function money(n, currency) {
+  const num = Number(n || 0);
+  const rounded = Math.round(num);
+  return `${currency} ${rounded.toLocaleString("es-AR")}`;
+}
+
+function buildCatalogPage({ items, category, page, perPage }) {
+  const filtered = category && category !== "Todas"
+    ? items.filter((x) => x.categoria === category)
+    : items;
+
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const p = Math.min(Math.max(1, page), totalPages);
   const start = (p - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
-  return { slice, total, page: p, pages };
+  const slice = filtered.slice(start, start + perPage);
+
+  return { slice, total, totalPages, page: p, category: category || "Todas" };
 }
 
-function productText(p) {
-  const line1 = p.nombre ? `*${escapeMd(p.nombre)}*` : "*Producto*";
-  const code = p.codigo ? `\nCódigo: \`${escapeMd(p.codigo)}\`` : "";
-  const desc = p.descripcion ? `\n${escapeMd(p.descripcion)}` : "";
-  const unit = p.unidad ? `\nUnidad: ${escapeMd(p.unidad)}` : "";
-  const price =
-    p.precioPorKg > 0
-      ? `\nPrecio: ${money(p.precioPorKg)} / kg`
-      : p.precio > 0
-      ? `\nPrecio: ${money(p.precio)}`
-      : "";
-  return `${line1}${code}${price}${unit}${desc}`;
-}
-
-function escapeMd(s) {
-  return String(s)
-    .replace(/[_*[\]()~`>#+-=|{}.!]/g, "\\$&")
-    .trim();
-}
-
-async function showProducts(chatId, cat, page = 1) {
-  await loadAll(false);
-
-  const perPage = Number(state.config.catalog_per_page ?? 6);
-  const { slice, total, pages, page: p } = productPage(cat, page, perPage);
-
-  if (total === 0) {
-    await bot.sendMessage(chatId, "No hay productos cargados en el catálogo.", { reply_markup: catKeyboard() });
-    return;
-  }
-
+function inlineCatalogKeyboard({ category, page, totalPages, slice }) {
   const rows = [];
-  for (const prod of slice) {
-    const labelPrice = prod.precioPorKg > 0 ? `${money(prod.precioPorKg)}/kg` : prod.precio > 0 ? money(prod.precio) : "";
-    const label = `${prod.nombre || prod.codigo}${labelPrice ? " • " + labelPrice : ""}`;
-    rows.push([{ text: label.slice(0, 60), callback_data: `PROD|${cat}|${p}|${prod.codigo || prod.nombre}` }]);
+  for (const it of slice) {
+    rows.push([
+      { text: `➕ ${it.nombre}`, callback_data: `ADD|${it.codigo}` },
+    ]);
   }
 
   const nav = [];
-  if (p > 1) nav.push({ text: "⬅️", callback_data: `PAGE|${cat}|${p - 1}` });
-  nav.push({ text: `Página ${p}/${pages}`, callback_data: "NOOP" });
-  if (p < pages) nav.push({ text: "➡️", callback_data: `PAGE|${cat}|${p + 1}` });
+  if (page > 1) nav.push({ text: "⬅️", callback_data: `PAGE|${category}|${page - 1}` });
+  nav.push({ text: `📄 ${page}/${totalPages}`, callback_data: "NOP" });
+  if (page < totalPages) nav.push({ text: "➡️", callback_data: `PAGE|${category}|${page + 1}` });
+
   rows.push(nav);
 
-  rows.push([{ text: "🛒 Ver carrito", callback_data: "CART" }, { text: "✅ Finalizar", callback_data: "CHECKOUT" }]);
-  rows.push([{ text: "🏠 Menú", callback_data: "BACK_MENU" }]);
+  rows.push([
+    { text: "🛒 Ver carrito", callback_data: "CART" },
+    { text: "📚 Categorías", callback_data: "CATS" },
+  ]);
 
-  const title = cat === "__ALL__" ? "Catálogo (todas)" : `Catálogo (${cat})`;
-  await bot.sendMessage(chatId, `${title}\nProductos: ${total}`, {
-    reply_markup: { inline_keyboard: rows },
-  });
-
-  const sess = sessions.get(chatId) || {};
-  sessions.set(chatId, { ...sess, cat, page: p, step: "BROWSING", cart: sess.cart || [] });
+  return { reply_markup: { inline_keyboard: rows } };
 }
 
-function getProductByKey(cat, key) {
-  const list = cat === "__ALL__" ? state.catalog : state.catalogByCat.get(cat) || [];
-  const k = String(key || "").trim();
-  return (
-    list.find((p) => p.codigo && p.codigo === k) ||
-    list.find((p) => p.nombre && p.nombre === k) ||
-    state.catalog.find((p) => p.codigo && p.codigo === k) ||
-    state.catalog.find((p) => p.nombre && p.nombre === k) ||
-    null
-  );
+function safeUrl(u) {
+  if (!u) return "";
+  const s = u.toString().trim();
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) return "";
+  return s;
 }
 
-function cartTotal(cart) {
-  let t = 0;
-  for (const it of cart) t += (it.price || 0) * (it.qty || 0);
-  return t;
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
+
+// Web server (Render)
+const app = express();
+app.get("/", async (_req, res) => {
+  res.status(200).send("OK");
+});
+app.listen(Number(PORT || 3000), () => {});
+
+async function sendWelcome(chatId) {
+  const { config } = await loadAll();
+  await bot.sendMessage(chatId, config.welcome_message, mainKeyboard());
 }
 
-function cartText(cart) {
-  if (!cart.length) return "Tu carrito está vacío.";
-  let txt = "🛒 *Tu carrito*\n\n";
-  cart.forEach((it, i) => {
-    txt += `${i + 1}) ${escapeMd(it.name)} • ${it.qty} x ${money(it.price)} = ${money(it.qty * it.price)}\n`;
-  });
-  txt += `\nTotal: *${money(cartTotal(cart))}*`;
-  return txt;
-}
-
-function buildOrderWhatsApp(cart, extra = "") {
-  const wa = String(state.config.whatsapp_order || state.config.whatsapp || "").trim();
-  const phone = wa.replace(/[^\d]/g, "");
-  const header = getCfgText("order_header", "Hola! Quiero hacer este pedido:");
-  let msg = `${header}\n\n`;
-  cart.forEach((it) => {
-    msg += `- ${it.name} x${it.qty}\n`;
-  });
-  msg += `\nTotal aprox: ${money(cartTotal(cart))}`;
-  if (extra) msg += `\n\n${extra}`;
-  const url = `https://wa.me/${phone}?text=${encodeURIComponent(msg)}`;
-  return { phone, url };
-}
-
-async function sendWelcome(chatId, firstName = "") {
-  await loadAll(false);
-  const brand = getCfgText("brand_name", "Todo Queso");
-  const welcome =
-    getCfgText("welcome_message", "") ||
-    `Hola ${firstName || ""} 👋\nBienvenido/a a ${brand} 🧀\nElegí una opción 👇`;
-  await bot.sendMessage(chatId, welcome.trim(), { reply_markup: mainKeyboard() });
-}
-
-async function sendHelp(chatId) {
-  await loadAll(false);
-  const help =
-    getCfgText("help_message", "") ||
-    "Si te faltó algo, no encontraste un producto o querés hacer una consulta, escribinos y te ayudamos 😊";
-  await bot.sendMessage(chatId, help.trim(), { reply_markup: mainKeyboard() });
-}
-
-async function sendSellos(chatId) {
-  await loadAll(false);
-  const cardUrl = getCfgText("card_url", "").trim();
-  const sellosText = getCfgText("sellos_message", "Abrí tu tarjeta acá:");
-  if (cardUrl) {
-    await bot.sendMessage(chatId, `${sellosText}\n${cardUrl}`, { reply_markup: mainKeyboard() });
-  } else {
-    await bot.sendMessage(chatId, "Falta card_url en Config.", { reply_markup: mainKeyboard() });
+bot.onText(/\/start/, async (msg) => {
+  try {
+    await sendWelcome(msg.chat.id);
+  } catch (e) {
+    await bot.sendMessage(msg.chat.id, `Error: ${e.message}`);
   }
-}
-
-async function sendShare(chatId) {
-  await loadAll(false);
-  const email = getCfgText("contact_email", "ezerbot.assistant@gmail.com");
-  const demo = getCfgText("demo_bot", "");
-  const wa = getCfgText("contact_whatsapp", "");
-  const tg = getCfgText("contact_telegram", "");
-  const txt =
-    getCfgText("share_message", "¿Querés este sistema para tu negocio? Contactános") +
-    `\n\n📩 Email: ${email}` +
-    (demo ? `\n🔗 Demo: ${demo}` : "") +
-    `\n\n${wa ? "📣 WhatsApp: " + wa : ""}${tg ? "\n✈️ Telegram: " + tg : ""}`;
-  await bot.sendMessage(chatId, txt.trim(), { reply_markup: mainKeyboard() });
-}
-
-bot.onText(/^\/start$/i, async (msg) => {
-  const chatId = msg.chat.id;
-  sessions.set(chatId, { step: "MENU", cart: [] });
-  await sendWelcome(chatId, msg.from?.first_name || "");
 });
 
 bot.on("message", async (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from?.id;
   const text = (msg.text || "").trim();
-  if (!text || text.startsWith("/")) return;
 
-  const sess = sessions.get(chatId) || { step: "MENU", cart: [] };
-  sessions.set(chatId, sess);
+  try {
+    const { config, catalog } = await loadAll();
 
-  if (text === "🏠 Menú") {
-    sess.step = "MENU";
-    await sendWelcome(chatId, msg.from?.first_name || "");
-    return;
-  }
-
-  if (text === "🛍️ Catálogo") {
-    sess.step = "CAT_MENU";
-    await bot.sendMessage(chatId, "Elegí una opción:", { reply_markup: catKeyboard() });
-    return;
-  }
-
-  if (text === "📚 Categorías") {
-    await loadAll(false);
-    await bot.sendMessage(chatId, "Categorías (elegí una):", inlineCategories());
-    return;
-  }
-
-  if (text === "📚 Todas") {
-    await showProducts(chatId, "__ALL__", 1);
-    return;
-  }
-
-  if (text === "🎟️ Sellos") {
-    await sendSellos(chatId);
-    return;
-  }
-
-  if (text === "📣 Compartir bot") {
-    await sendShare(chatId);
-    return;
-  }
-
-  if (text === "🆘 Ayuda") {
-    await sendHelp(chatId);
-    return;
-  }
-
-  if (text === "🛒 Ver carrito") {
-    const cart = sess.cart || [];
-    await bot.sendMessage(chatId, cartText(cart), { parse_mode: "MarkdownV2", reply_markup: catKeyboard() });
-    return;
-  }
-
-  if (text === "✅ Finalizar compra") {
-    const cart = sess.cart || [];
-    if (!cart.length) {
-      await bot.sendMessage(chatId, "Tu carrito está vacío.", { reply_markup: catKeyboard() });
+    if (text === "🏠 Menú") {
+      await bot.sendMessage(chatId, config.welcome_message, mainKeyboard());
       return;
     }
-    const { url } = buildOrderWhatsApp(cart);
-    if (!url) {
-      await bot.sendMessage(chatId, "Falta whatsapp_order en Config.", { reply_markup: catKeyboard() });
-      return;
-    }
-    await bot.sendMessage(chatId, `Listo ✅\nEnviá tu pedido por WhatsApp:\n${url}`, { reply_markup: catKeyboard() });
-    return;
-  }
 
-  if (sess.step === "ASK_QTY" && sess.current) {
-    const q = Number(String(text).replace(",", "."));
-    if (!Number.isFinite(q) || q <= 0) {
-      await bot.sendMessage(chatId, "Ingresá una cantidad válida (ej: 1, 2, 0.25).");
+    if (text === "🛍️ Catálogo") {
+      if (!catalog.items.length) {
+        await bot.sendMessage(
+          chatId,
+          `🛍️ *Catálogo*\n\nTodavía no hay productos cargados en *Catalogo* o no se están leyendo.\n\n✅ Revisá:\n- Que la hoja se llame *Catalogo*\n- Que tenga encabezados (Código/Nombre/Precio/Categoría)\n- Que la service account tenga acceso al Sheet`,
+          { parse_mode: "Markdown" }
+        );
+        return;
+      }
+
+      await bot.sendMessage(chatId, "📚 *Categorías*\nElegí una:", {
+        parse_mode: "Markdown",
+        ...categoriesKeyboard(catalog.categories),
+      });
       return;
     }
-    const prod = sess.current;
-    const item = { code: prod.codigo || prod.nombre, name: prod.nombre || prod.codigo, price: prod.price, qty: q };
-    sess.cart = sess.cart || [];
-    sess.cart.push(item);
-    sess.current = null;
-    sess.step = "BROWSING";
-    await bot.sendMessage(chatId, `Agregado ✅\n${item.name} x${item.qty}`, { reply_markup: catKeyboard() });
-    if (sess.cat) await showProducts(chatId, sess.cat, sess.page || 1);
-    return;
+
+    if (text.startsWith("📚 ")) {
+      const category = text.replace("📚 ", "").trim();
+      const perPage = config.catalog_per_page;
+
+      const pageData = buildCatalogPage({
+        items: catalog.items,
+        category,
+        page: 1,
+        perPage,
+      });
+
+      const lines = [];
+      lines.push(`🛍️ *${config.brand_name}*`);
+      lines.push(`📚 *${pageData.category}*`);
+      lines.push("");
+      for (const it of pageData.slice) {
+        const p = money(it.precio, config.currency);
+        const unit = it.unidad ? ` (${it.unidad})` : "";
+        lines.push(`• *${it.nombre}*${unit} — ${p}`);
+      }
+      lines.push("");
+      lines.push("Elegí un producto para agregar al carrito 👇");
+
+      await bot.sendMessage(chatId, lines.join("\n"), {
+        parse_mode: "Markdown",
+        ...inlineCatalogKeyboard({
+          category: pageData.category,
+          page: pageData.page,
+          totalPages: pageData.totalPages,
+          slice: pageData.slice,
+        }),
+      });
+      return;
+    }
+
+    if (text === "🎟️ Sellos") {
+      const cardUrl = safeUrl(config.card_url);
+      const lines = [];
+      lines.push(config.sellos_message);
+      if (cardUrl) lines.push(`\n🔗 ${cardUrl}`);
+      await bot.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown", ...mainKeyboard() });
+      return;
+    }
+
+    if (text === "🆘 Ayuda") {
+      await bot.sendMessage(chatId, config.help_message, { parse_mode: "Markdown", ...mainKeyboard() });
+      return;
+    }
+
+    if (text === "📣 Compartir bot") {
+      const demo = safeUrl(config.demo_bot);
+      const email = config.contact_email || "";
+      const wa = config.contact_whatsapp || "";
+      const tg = config.contact_telegram || "";
+
+      const parts = [];
+      parts.push(config.share_message);
+      if (email) parts.push(`✉️ Email: ${email}`);
+      if (demo) parts.push(`🔗 Demo: ${demo}`);
+      if (wa) parts.push(`📣 WhatsApp: ${wa}`);
+      if (tg) parts.push(`✈️ Telegram: ${tg}`);
+
+      await bot.sendMessage(chatId, parts.join("\n"), { ...mainKeyboard() });
+      return;
+    }
+
+    // Si escriben algo random, volvemos a menú
+    if (text && !text.startsWith("/")) {
+      await bot.sendMessage(chatId, config.welcome_message, mainKeyboard());
+      return;
+    }
+  } catch (e) {
+    try {
+      await bot.sendMessage(chatId, `Error: ${e.message}`);
+    } catch {}
   }
 });
 
 bot.on("callback_query", async (q) => {
   const chatId = q.message?.chat?.id;
-  if (!chatId) return;
-
+  const userId = q.from?.id;
   const data = q.data || "";
-  const sess = sessions.get(chatId) || { step: "MENU", cart: [] };
-  sessions.set(chatId, sess);
 
   try {
-    if (data === "NOOP") {
+    if (!chatId || !userId) return;
+
+    const { config, catalog } = await loadAll();
+
+    if (data === "NOP") {
       await bot.answerCallbackQuery(q.id);
       return;
     }
 
-    if (data === "BACK_MENU") {
+    if (data === "CATS") {
       await bot.answerCallbackQuery(q.id);
-      await sendWelcome(chatId, "");
-      return;
-    }
-
-    if (data.startsWith("CAT|")) {
-      await bot.answerCallbackQuery(q.id);
-      const cat = data.split("|").slice(1).join("|");
-      await showProducts(chatId, cat, 1);
+      await bot.sendMessage(chatId, "📚 *Categorías*\nElegí una:", {
+        parse_mode: "Markdown",
+        ...categoriesKeyboard(catalog.categories),
+      });
       return;
     }
 
     if (data.startsWith("PAGE|")) {
+      const [, category, pageStr] = data.split("|");
+      const page = Number(pageStr || 1);
+      const perPage = config.catalog_per_page;
+
+      const pageData = buildCatalogPage({
+        items: catalog.items,
+        category,
+        page,
+        perPage,
+      });
+
+      const lines = [];
+      lines.push(`🛍️ *${config.brand_name}*`);
+      lines.push(`📚 *${pageData.category}*`);
+      lines.push("");
+      for (const it of pageData.slice) {
+        const p = money(it.precio, config.currency);
+        const unit = it.unidad ? ` (${it.unidad})` : "";
+        lines.push(`• *${it.nombre}*${unit} — ${p}`);
+      }
+      lines.push("");
+      lines.push("Elegí un producto para agregar al carrito 👇");
+
       await bot.answerCallbackQuery(q.id);
-      const [, cat, pageStr] = data.split("|");
-      const page = Number(pageStr || "1");
-      await showProducts(chatId, cat, page);
+      await bot.editMessageText(lines.join("\n"), {
+        chat_id: chatId,
+        message_id: q.message.message_id,
+        parse_mode: "Markdown",
+        ...inlineCatalogKeyboard({
+          category: pageData.category,
+          page: pageData.page,
+          totalPages: pageData.totalPages,
+          slice: pageData.slice,
+        }),
+      });
+      return;
+    }
+
+    if (data.startsWith("ADD|")) {
+      const [, code] = data.split("|");
+      const item = catalog.items.find((x) => x.codigo === code);
+      if (!item) {
+        await bot.answerCallbackQuery(q.id, { text: "No encontré ese producto." });
+        return;
+      }
+
+      const cart = getCart(userId);
+      cart[code] = (Number(cart[code] || 0) + 1);
+
+      await bot.answerCallbackQuery(q.id, { text: `Agregado: ${item.nombre}` });
       return;
     }
 
     if (data === "CART") {
+      const cart = getCart(userId);
+      const codes = Object.keys(cart);
+      if (!codes.length) {
+        await bot.answerCallbackQuery(q.id);
+        await bot.sendMessage(chatId, "🛒 Tu carrito está vacío.", { ...mainKeyboard() });
+        return;
+      }
+
+      let total = 0;
+      const lines = [];
+      lines.push("🛒 *Tu carrito*");
+      lines.push("");
+
+      for (const code of codes) {
+        const qty = Number(cart[code] || 0);
+        const it = catalog.items.find((x) => x.codigo === code);
+        if (!it || qty <= 0) continue;
+
+        const sub = (Number(it.precio || 0) * qty);
+        total += sub;
+
+        lines.push(`• *${it.nombre}* x${qty} — ${money(sub, config.currency)}`);
+      }
+
+      lines.push("");
+      lines.push(`*Total:* ${money(total, config.currency)}`);
+
+      const orderText = lines.join("\n").replace(/\*/g, "");
+      const waOrder = safeUrl(config.whatsapp_order);
+
+      const inline = {
+        inline_keyboard: [
+          waOrder
+            ? [{ text: "✅ Comprar por WhatsApp", url: `${waOrder}${encodeURIComponent("\n\n" + orderText)}` }]
+            : [{ text: "✅ Comprar", callback_data: "BUYINFO" }],
+          [{ text: "🗑️ Vaciar carrito", callback_data: "CLEARCART" }],
+        ],
+      };
+
       await bot.answerCallbackQuery(q.id);
-      const cart = sess.cart || [];
-      await bot.sendMessage(chatId, cartText(cart), { parse_mode: "MarkdownV2", reply_markup: catKeyboard() });
+      await bot.sendMessage(chatId, lines.join("\n"), { parse_mode: "Markdown", reply_markup: inline });
       return;
     }
 
-    if (data === "CHECKOUT") {
-      await bot.answerCallbackQuery(q.id);
-      const cart = sess.cart || [];
-      if (!cart.length) {
-        await bot.sendMessage(chatId, "Tu carrito está vacío.", { reply_markup: catKeyboard() });
-        return;
-      }
-      const { url } = buildOrderWhatsApp(cart);
-      if (!url) {
-        await bot.sendMessage(chatId, "Falta whatsapp_order en Config.", { reply_markup: catKeyboard() });
-        return;
-      }
-      await bot.sendMessage(chatId, `Listo ✅\nEnviá tu pedido por WhatsApp:\n${url}`, { reply_markup: catKeyboard() });
+    if (data === "CLEARCART") {
+      carts.set(userId, {});
+      await bot.answerCallbackQuery(q.id, { text: "Carrito vaciado." });
+      await bot.sendMessage(chatId, "🗑️ Listo. Carrito vacío.", { ...mainKeyboard() });
       return;
     }
 
-    if (data.startsWith("PROD|")) {
+    if (data === "BUYINFO") {
       await bot.answerCallbackQuery(q.id);
-      await loadAll(false);
-
-      const [, cat, pageStr, key] = data.split("|");
-      const prod = getProductByKey(cat, key);
-      if (!prod) {
-        await bot.sendMessage(chatId, "No pude encontrar ese producto.", { reply_markup: catKeyboard() });
-        return;
-      }
-
-      const price = prod.precioPorKg > 0 ? prod.precioPorKg : prod.precio;
-      sess.current = { ...prod, price };
-      sess.cat = cat;
-      sess.page = Number(pageStr || "1");
-      sess.step = "ASK_QTY";
-
-      await bot.sendMessage(chatId, productText(prod), { parse_mode: "MarkdownV2" });
-      await bot.sendMessage(chatId, "¿Qué cantidad querés? (ej: 1, 2, 0.25)", { reply_markup: catKeyboard() });
+      await bot.sendMessage(
+        chatId,
+        "Para habilitar compra directa por WhatsApp sin tocar tu Catálogo, cargá en *Config* la clave `whatsapp_order` con tu link base (wa.me/... ?text=). Si no querés tocar Config, decime y lo hardcodeo en ENV.",
+        { parse_mode: "Markdown" }
+      );
       return;
     }
 
@@ -549,13 +536,7 @@ bot.on("callback_query", async (q) => {
   } catch (e) {
     try {
       await bot.answerCallbackQuery(q.id, { text: "Error" });
+      await bot.sendMessage(chatId, `Error: ${e.message}`);
     } catch {}
-    await bot.sendMessage(chatId, "Ocurrió un error. Reintentá con /start");
   }
 });
-
-app.get("/health", (_req, res) => {
-  res.json({ ok: true, ts: new Date().toISOString() });
-});
-
-app.listen(PORT, () => console.log(`RUN ${PORT}`));
