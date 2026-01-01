@@ -1,82 +1,80 @@
 import https from "https";
+import http from "http";
 
-/* ================================
-   CONFIG FIJA (NO TOCAR)
-================================ */
+/* =====================
+   ENV
+===================== */
 
 const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
-const DATA_API_URL = process.env.DATA_API_URL; // tu Google Apps Script
-const PUBLIC_URL = process.env.PUBLIC_URL;     // https://ezerbot-system.onrender.com
+const DATA_API_URL  = process.env.DATA_API_URL;
+const PUBLIC_URL    = process.env.PUBLIC_URL;
 
 if (!TELEGRAM_TOKEN || !DATA_API_URL || !PUBLIC_URL) {
-  console.error("FALTAN VARIABLES DE ENTORNO");
+  console.error("❌ Faltan variables de entorno");
   process.exit(1);
 }
 
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_TOKEN}`;
 
-/* ================================
-   UTILIDADES
-================================ */
+/* =====================
+   HELPERS
+===================== */
 
 function tg(method, data) {
-  return new Promise((resolve, reject) => {
+  return new Promise(resolve => {
     const body = JSON.stringify(data);
-    const req = https.request(
-      `${TG_API}/${method}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Content-Length": Buffer.byteLength(body),
-        },
-      },
-      res => {
-        let out = "";
-        res.on("data", d => out += d);
-        res.on("end", () => resolve(JSON.parse(out)));
+    const req = https.request(`${TG_API}/${method}`, {
+      method: "POST",
+      family: 4,
+      timeout: 8000,
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body)
       }
-    );
-    req.on("error", reject);
+    }, res => {
+      res.on("data", ()=>{});
+      res.on("end", resolve);
+    });
+    req.on("error", () => resolve());
     req.write(body);
     req.end();
   });
 }
 
 function fetchJSON(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, res => {
+  return new Promise(resolve => {
+    const req = https.request(url, {
+      method: "GET",
+      family: 4,
+      timeout: 8000
+    }, res => {
       let data = "";
       res.on("data", d => data += d);
       res.on("end", () => {
-        try {
-          resolve(JSON.parse(data));
-        } catch {
-          reject("JSON inválido");
-        }
+        try { resolve(JSON.parse(data)); }
+        catch { resolve(null); }
       });
-    }).on("error", reject);
+    });
+    req.on("timeout", () => { req.destroy(); resolve(null); });
+    req.on("error", () => resolve(null));
+    req.end();
   });
 }
 
-/* ================================
-   LECTURA DE CONFIG
-================================ */
+/* =====================
+   DATA
+===================== */
 
-async function getConfig() {
-  return fetchJSON(`${DATA_API_URL}?tab=Config`);
-}
+const getConfig   = () => fetchJSON(`${DATA_API_URL}?tab=Config`);
+const getCatalogo = () => fetchJSON(`${DATA_API_URL}?tab=Catalogo`);
 
-async function getCatalogo() {
-  return fetchJSON(`${DATA_API_URL}?tab=Catalogo`);
-}
-
-/* ================================
-   MENSAJES
-================================ */
+/* =====================
+   BOT LOGIC
+===================== */
 
 async function saludo(chatId, user) {
   const cfg = await getConfig();
+  if (!cfg) return;
 
   const texto =
 `👋 Bienvenido/a a ${cfg.NegocioNombre}
@@ -97,108 +95,76 @@ ${cfg.Descripcion.replace("{NOMBRE}", user.first_name || "")}`;
   });
 }
 
-async function enviarCatalogo(chatId) {
+async function catalogo(chatId) {
   const items = await getCatalogo();
-
-  if (!items.length) {
-    await tg("sendMessage", {
-      chat_id: chatId,
-      text: "❌ No hay productos disponibles por el momento."
-    });
+  if (!items || !items.length) {
+    await tg("sendMessage", { chat_id: chatId, text: "Catálogo no disponible." });
     return;
   }
 
   for (const p of items) {
-    const texto =
-`🧀 *${p.NOMBRE}*
-💰 ${p.PRECIO}
-${p.DESCRIPCION || ""}`;
-
     await tg("sendPhoto", {
       chat_id: chatId,
       photo: p.IMAGEN,
-      caption: texto,
-      parse_mode: "Markdown",
+      caption:
+`🧀 ${p.NOMBRE}
+💰 ${p.PRECIO}
+${p.DESCRIPCION || ""}`,
       reply_markup: {
-        inline_keyboard: [
-          [
-            {
-              text: "🛒 Comprar",
-              url: `${PUBLIC_URL}/buy/${p.CODIGO}`
-            }
-          ]
-        ]
+        inline_keyboard: [[
+          { text: "🛒 Comprar", url: `${PUBLIC_URL}/buy/${p.CODIGO}` }
+        ]]
       }
     });
   }
 }
 
-async function enviarSellos(chatId, userId) {
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: `🏷️ Tu tarjeta de sellos:\n${PUBLIC_URL}/card/${userId}`
-  });
-}
+const sellos = (chatId, id) =>
+  tg("sendMessage", { chat_id: chatId, text: `🏷️ ${PUBLIC_URL}/card/${id}` });
 
-async function compartirBot(chatId) {
+async function compartir(chatId) {
   const cfg = await getConfig();
-  await tg("sendMessage", {
-    chat_id: chatId,
-    text: cfg.TextoSistema
-  });
+  if (!cfg) return;
+  await tg("sendMessage", { chat_id: chatId, text: cfg.TextoSistema });
 }
 
 async function ayuda(chatId) {
   const cfg = await getConfig();
+  if (!cfg) return;
   await tg("sendMessage", {
     chat_id: chatId,
     text:
-`📌 Si necesitás hacer una consulta o reclamo:
-
-✅ WhatsApp:
-${cfg.WhatsAppLink}
-
-📸 Instagram:
-${cfg.NegocioInstagram}
-
-Gracias por elegir ${cfg.NegocioNombre} 🧀`
+`📌 Consultas o reclamos:
+✅ WhatsApp: ${cfg.WhatsAppLink}
+📸 Instagram: ${cfg.NegocioInstagram}`
   });
 }
 
-/* ================================
-   WEBHOOK HANDLER
-================================ */
+/* =====================
+   UPDATE HANDLER
+===================== */
 
-async function handleUpdate(update) {
-  if (!update.message) return;
+async function handle(update) {
+  const m = update.message;
+  if (!m) return;
 
-  const msg = update.message;
-  const chatId = msg.chat.id;
-  const text = msg.text || "";
-  const user = msg.from;
+  const chatId = m.chat.id;
+  const txt = m.text || "";
+  const user = m.from;
 
-  if (text === "/start") {
-    await saludo(chatId, user);
-  } else if (text === "🛍️ Catálogo") {
-    await enviarCatalogo(chatId);
-  } else if (text === "🏷️ Sellos") {
-    await enviarSellos(chatId, user.id);
-  } else if (text === "📣 Compartir bot") {
-    await compartirBot(chatId);
-  } else if (text === "🆘 Ayuda") {
-    await ayuda(chatId);
-  }
+  if (txt === "/start") return saludo(chatId, user);
+  if (txt === "🛍️ Catálogo") return catalogo(chatId);
+  if (txt === "🏷️ Sellos") return sellos(chatId, user.id);
+  if (txt === "📣 Compartir bot") return compartir(chatId);
+  if (txt === "🆘 Ayuda") return ayuda(chatId);
 }
 
-/* ================================
-   SERVIDOR WEBHOOK
-================================ */
+/* =====================
+   SERVER
+===================== */
 
-import http from "http";
-
-const server = http.createServer(async (req, res) => {
+http.createServer((req, res) => {
   if (req.method !== "POST") {
-    res.writeHead(200);
     res.end("OK");
     return;
   }
@@ -206,18 +172,10 @@ const server = http.createServer(async (req, res) => {
   let body = "";
   req.on("data", c => body += c);
   req.on("end", async () => {
-    try {
-      const update = JSON.parse(body);
-      await handleUpdate(update);
-    } catch {}
-    res.writeHead(200);
+    try { await handle(JSON.parse(body)); } catch {}
     res.end("OK");
   });
-});
-
-server.listen(3000, async () => {
-  await tg("setWebhook", {
-    url: PUBLIC_URL
-  });
-  console.log("EZERBOT ACTIVO");
+}).listen(3000, async () => {
+  await tg("setWebhook", { url: PUBLIC_URL });
+  console.log("✅ EZERBOT ACTIVO");
 });
