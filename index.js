@@ -1,8 +1,10 @@
 // ===============================
-// EZERBOT — BOT FINAL ESTABLE
+// EZERBOT — SCRIPT FINAL ESTABLE
 // ===============================
 
 import express from "express";
+import fetch from "node-fetch"; // ← CLAVE (faltaba)
+
 const app = express();
 app.use(express.json());
 
@@ -13,7 +15,7 @@ const DATA_API_URL = process.env.DATA_API_URL.replace(/\/$/, "");
 
 const TG = (m) => `https://api.telegram.org/bot${TOKEN}/${m}`;
 
-const fetchTG = (m, b) =>
+const tg = (m, b) =>
   fetch(TG(m), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -26,7 +28,7 @@ const fetchTG = (m, b) =>
 const isHttp = (u) => /^https?:\/\//i.test(u || "");
 const money = (n) => "$ " + Number(n || 0).toLocaleString("es-AR");
 
-async function getJSON(type) {
+async function getData(type) {
   const r = await fetch(`${DATA_API_URL}?type=${type}`);
   return r.json();
 }
@@ -34,22 +36,16 @@ async function getJSON(type) {
 /* ===============================
    CACHE
 ================================*/
-let CFG = null;
-let CAT = null;
-
-async function loadAll() {
-  if (!CFG) CFG = await getJSON("config");
-  if (!CAT) CAT = await getJSON("catalog");
-}
+let CONFIG = null;
+let CATALOG = null;
 
 /* ===============================
-   USER STATE
+   STATE
 ================================*/
-const state = {};
-const cart = {};
+const userState = {};
 
 /* ===============================
-   MENUS
+   MENÚ PRINCIPAL
 ================================*/
 const mainMenu = {
   keyboard: [
@@ -61,24 +57,14 @@ const mainMenu = {
   resize_keyboard: true,
 };
 
-function productKeyboard() {
-  return {
-    inline_keyboard: [
-      [
-        { text: "⬅️", callback_data: "PREV" },
-        { text: "➡️", callback_data: "NEXT" },
-      ],
-      [{ text: "🟢 Quiero este", callback_data: "ADD" }],
-    ],
-  };
-}
-
 /* ===============================
    START
 ================================*/
 async function start(chatId) {
-  await loadAll();
-  const c = CFG;
+  if (!CONFIG) CONFIG = await getData("config");
+
+  const c = CONFIG;
+
   const text = `👋 *Bienvenido/a a ${c.NegocioNombre}* 🧀
 
 📍 ${c.NegocioDireccion}
@@ -87,7 +73,7 @@ async function start(chatId) {
 ${c.Descripcion}`;
 
   if (isHttp(c.LogoURL)) {
-    await fetchTG("sendPhoto", {
+    await tg("sendPhoto", {
       chat_id: chatId,
       photo: c.LogoURL,
       caption: text,
@@ -95,7 +81,7 @@ ${c.Descripcion}`;
       reply_markup: mainMenu,
     });
   } else {
-    await fetchTG("sendMessage", {
+    await tg("sendMessage", {
       chat_id: chatId,
       text,
       parse_mode: "Markdown",
@@ -105,25 +91,39 @@ ${c.Descripcion}`;
 }
 
 /* ===============================
-   CATÁLOGO (CARRUSEL)
+   CATÁLOGO (CARRUSEL SIMPLE)
 ================================*/
-async function showProduct(chatId, i) {
-  const p = CAT.items[i];
-  state[chatId].index = i;
+async function showCatalog(chatId, idx = 0) {
+  if (!CATALOG) CATALOG = await getData("catalog");
 
-  const txt = `🧀 *${p.nombre}*
+  const items = CATALOG.items;
+  if (!items.length) return;
+
+  if (!userState[chatId]) userState[chatId] = {};
+  userState[chatId].idx = idx;
+
+  const p = items[idx];
+
+  const caption = `🧀 *${p.nombre}*
 ${p.descripcion || ""}
 
 💰 ${money(p.precio)} ${
-    p.unidad === "unidad" ? "por unidad" : "por 100g"
+    p.unidad === "unidad" ? "por unidad" : "por gramos"
   }`;
 
-  await fetchTG("sendPhoto", {
+  await tg("sendPhoto", {
     chat_id: chatId,
     photo: p.imagen,
-    caption: txt,
+    caption,
     parse_mode: "Markdown",
-    reply_markup: productKeyboard(),
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: "⬅️", callback_data: "PREV" },
+          { text: "➡️", callback_data: "NEXT" },
+        ],
+      ],
+    },
   });
 }
 
@@ -131,20 +131,13 @@ ${p.descripcion || ""}
    SELL0S
 ================================*/
 async function showSellos(chatId) {
-  const clientes = await getJSON("clientes");
-  const cli = clientes.find((c) => c.UserIdTG == chatId);
+  const clientes = await getData("clientes");
+  const c = clientes.find((x) => String(x.UserIdTG) === String(chatId));
+  const sellos = c ? Number(c.Sellos || 0) : 0;
 
-  const sellos = cli ? cli.Sellos : 0;
-  const txt = `🏷️ *Tus sellos*
-
-Tenés *${sellos || 0}* sellos acumulados.
-🎁 1 sello cada $10.000 de compra.
-
-¡Seguí comprando y ganá beneficios!`;
-
-  await fetchTG("sendMessage", {
+  await tg("sendMessage", {
     chat_id: chatId,
-    text: txt,
+    text: `🏷️ *Tus sellos*\n\nTenés *${sellos}* sellos acumulados.\n\n1 sello cada $10.000 de compra.`,
     parse_mode: "Markdown",
     reply_markup: mainMenu,
   });
@@ -153,20 +146,14 @@ Tenés *${sellos || 0}* sellos acumulados.
 /* ===============================
    AYUDA
 ================================*/
-async function help(chatId) {
-  const c = CFG;
-  const txt = `🆘 *¿Necesitás ayuda?*
-
-Si no encontraste algo en el catálogo o necesitás hacer una consulta especial, podés comunicarte directamente con nosotros.
-
-📍 ${c.NegocioDireccion}
-📲 ${c.NegocioTelefono}
-
-Estamos para ayudarte 😊`;
-
-  await fetchTG("sendMessage", {
+async function ayuda(chatId) {
+  await tg("sendMessage", {
     chat_id: chatId,
-    text: txt,
+    text: `🆘 *¿Necesitás ayuda?*
+
+Si no encontraste algo en el catálogo o querés hacer una consulta especial, podés comunicarte directamente con nosotros.
+
+Estamos para ayudarte 😊`,
     parse_mode: "Markdown",
     reply_markup: mainMenu,
   });
@@ -175,17 +162,14 @@ Estamos para ayudarte 😊`;
 /* ===============================
    COMPARTIR BOT
 ================================*/
-async function shareBot(chatId) {
-  const txt = `🤖 *EzerBot*
+async function compartir(chatId) {
+  await tg("sendMessage", {
+    chat_id: chatId,
+    text: `🤖 *EzerBot*
 
 ¿Querés este sistema para tu negocio?
-Automatizá ventas, sellos y clientes.
 
-📩 ${CFG.EmailSistema}`;
-
-  await fetchTG("sendMessage", {
-    chat_id: chatId,
-    text: txt,
+📩 ezerbot.assistant@gmail.com`,
     parse_mode: "Markdown",
     reply_markup: mainMenu,
   });
@@ -203,26 +187,30 @@ app.post("/", async (req, res) => {
     const t = u.message.text;
 
     if (t === "/start") return start(chatId);
-    if (t === "🛍️ Catálogo") {
-      state[chatId] = { index: 0 };
-      return showProduct(chatId, 0);
-    }
+    if (t === "🛍️ Catálogo") return showCatalog(chatId, 0);
     if (t === "🏷️ Sellos") return showSellos(chatId);
-    if (t === "🆘 Ayuda") return help(chatId);
-    if (t === "📣 Compartir bot") return shareBot(chatId);
+    if (t === "📣 Compartir bot") return compartir(chatId);
+    if (t === "🆘 Ayuda") return ayuda(chatId);
   }
 
   if (u.callback_query) {
     const chatId = u.callback_query.message.chat.id;
-    let i = state[chatId].index;
+    const dir = u.callback_query.data;
+    const total = CATALOG.items.length;
 
-    if (u.callback_query.data === "NEXT") i++;
-    if (u.callback_query.data === "PREV") i--;
-    if (i < 0) i = CAT.items.length - 1;
-    if (i >= CAT.items.length) i = 0;
+    let i = userState[chatId]?.idx || 0;
+    if (dir === "NEXT") i = (i + 1) % total;
+    if (dir === "PREV") i = (i - 1 + total) % total;
 
-    return showProduct(chatId, i);
+    return showCatalog(chatId, i);
   }
+});
+
+/* ===============================
+   HEALTHCHECK (CLAVE)
+================================*/
+app.get("/", (_, res) => {
+  res.status(200).send("EZERBOT OK");
 });
 
 /* ===============================
