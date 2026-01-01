@@ -8,6 +8,7 @@
  * - Catalogo (A:I): CODIGO, NOMBRE, PRECIO, UNIDAD, PRECIOPORKILO, CODIGOBARRAS, DESCRIPCION, IMAGEN, CATEGORIA
  * - Referidos (A:B): CodigoReferido, OwnerUserIdTG
  *
+ 
  * ENV (Render / Node18):
  * - TELEGRAM_BOT_TOKEN (obligatorio)
  * - GOOGLE_SA_JSON     (obligatorio)
