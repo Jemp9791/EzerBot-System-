@@ -1,34 +1,54 @@
 import express from "express";
 import TelegramBot from "node-telegram-bot-api";
 import { google } from "googleapis";
-import fs from "fs";
-import path from "path";
 
-// ================== ENV OBLIGATORIAS ==================
+// =====================
+// 1) ENV OBLIGATORIAS
+// =====================
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID || "";
+const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64 || "";
+
+// Opcional (si querés webhook en vez de polling)
+const WEBHOOK_URL = process.env.WEBHOOK_URL || ""; // ej: https://tuapp.onrender.com
 const PORT = process.env.PORT || 10000;
 
-// ================== VALIDACIONES MINIMAS ==================
 if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
 if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
+if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
-// ================== GOOGLE AUTH (SIN JSON EN ENV) ==================
-// Pone el archivo en el repo: ./credentials/service-account.json
-const KEYFILE = process.env.GOOGLE_KEYFILE || "./credentials/service-account.json";
+// =====================
+// 2) GOOGLE AUTH (B64)
+// =====================
+function loadServiceAccountFromB64() {
+  // Limpia espacios/saltos por si Render mete alguno
+  const b64 = (GOOGLE_SERVICE_ACCOUNT_B64 || "").trim().replace(/\s+/g, "");
+  const jsonText = Buffer.from(b64, "base64").toString("utf8");
 
-if (!fs.existsSync(KEYFILE)) {
-  throw new Error(`No encuentro el archivo de service account en: ${KEYFILE}`);
+  // Si el JSON viniera con caracteres raros, esto te lo marca claro
+  try {
+    return JSON.parse(jsonText);
+  } catch (e) {
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_B64 inválido (no se pudo parsear JSON). " +
+      "Revisá que sea base64 puro en 1 sola línea."
+    );
+  }
 }
 
+const serviceAccount = loadServiceAccountFromB64();
+
 const auth = new google.auth.GoogleAuth({
-  keyFile: KEYFILE,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  credentials: serviceAccount,
+  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
 });
+
 const sheets = google.sheets({ version: "v4", auth });
 
-// ================== HELPERS SHEETS ==================
-async function getSheetValues(rangeA1) {
+// =====================
+// 3) HELPERS SHEETS
+// =====================
+async function getRange(rangeA1) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
     range: rangeA1,
@@ -36,222 +56,194 @@ async function getSheetValues(rangeA1) {
   return res.data.values || [];
 }
 
-function toMapFrom2Cols(rows) {
-  const out = {};
+/**
+ * Lee Config como KV:
+ * Config!A = key
+ * Config!B = value
+ */
+async function readConfigKV() {
+  const rows = await getRange("Config!A:B");
+  const cfg = {};
   for (const r of rows) {
     const k = (r?.[0] || "").toString().trim();
     const v = (r?.[1] || "").toString();
-    if (k) out[k] = v;
+    if (k) cfg[k] = v;
   }
+  return cfg;
+}
+
+/**
+ * Lee Catálogo simple:
+ * Catalogo!A: Código
+ * B: Nombre
+ * C: Precio
+ * D: Categoría
+ */
+async function readCatalog() {
+  const rows = await getRange("Catalogo!A:D");
+  // saltear header si existe
+  const data = rows.filter((r) => (r?.[0] || "").toString().trim());
+  return data.map((r) => ({
+    codigo: (r[0] ?? "").toString(),
+    nombre: (r[1] ?? "").toString(),
+    precio: (r[2] ?? "").toString(),
+    categoria: (r[3] ?? "").toString(),
+  }));
+}
+
+function chunk(arr, size) {
+  const out = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
 }
 
-async function readConfig() {
-  // Config esperada: columna A = key, columna B = value
-  // Hoja: Config
-  const rows = await getSheetValues("Config!A:B");
-  const map = toMapFrom2Cols(rows);
+// =====================
+// 4) TELEGRAM BOT
+// =====================
+const bot = new TelegramBot(
+  TELEGRAM_BOT_TOKEN,
+  WEBHOOK_URL ? { webHook: true } : { polling: true }
+);
+
+async function getTextFromConfig() {
+  const cfg = await readConfigKV();
   return {
-    brand_name: map.brand_name || "Todo Queso",
-    welcome_message:
-      map.welcome_message ||
-      "¡Hola! 👋 Bienvenid@ a Todo Queso 🧀\nElegí una opción 👇",
+    brand_name: cfg.brand_name || "EzerBot",
+    welcome_message: cfg.welcome_message || "Hola 👋 ¿Qué querés hacer hoy?",
     help_message:
-      map.help_message ||
-      "Si no encontraste algo o querés ayuda, escribinos y te respondemos 😊",
-    sellos_message:
-      map.sellos_message ||
-      "📌 Sellos: pronto vas a poder ver tus sellos acá.",
-    card_url: map.card_url || "",
-    share_message:
-      map.share_message ||
-      "🤖 ¿Querés este sistema para tu negocio? Contactanos:\n✉️ Email: ezerbot.assistant@gmail.com\n🔗 Demo: https://t.me/Ezer_IA_Bot",
-    contact_email: map.contact_email || "ezerbot.assistant@gmail.com",
-    demo_bot: map.demo_bot || "https://t.me/Ezer_IA_Bot",
-    contact_whatsapp: map.contact_whatsapp || "",
-    contact_telegram: map.contact_telegram || "",
-    catalog_per_page: parseInt(map.catalog_per_page || "12", 10),
-    currency: map.currency || "$",
-    whatsapp_order: map.whatsapp_order || "",
+      cfg.help_message ||
+      "Comandos:\n/start\n/help\n/catalogo\n\nDecime qué necesitás.",
+    catalog_per_page: parseInt(cfg.catalog_per_page || "8", 10) || 8,
+    currency: cfg.currency || "$",
   };
 }
 
-async function readCatalog() {
-  // Catalogo (tal cual dijiste): Hoja "Catalogo"
-  // Columnas recomendadas: codigo | nombre | precio | unidad | categoria | imagen
-  const rows = await getSheetValues("Catalogo!A:Z");
-  if (!rows.length) return [];
-  const headers = rows[0].map((h) => (h || "").toString().trim().toLowerCase());
-  const data = rows.slice(1);
-
-  const idx = (name) => headers.indexOf(name);
-
-  const iCodigo = idx("codigo");
-  const iNombre = idx("nombre");
-  const iPrecio = idx("precio");
-  const iUnidad = idx("unidad");
-  const iCategoria = idx("categoria");
-
-  return data
-    .map((r) => ({
-      codigo: (r[iCodigo] || "").toString().trim(),
-      nombre: (r[iNombre] || "").toString().trim(),
-      precio: (r[iPrecio] || "").toString().trim(),
-      unidad: (r[iUnidad] || "").toString().trim(),
-      categoria: (r[iCategoria] || "").toString().trim(),
-    }))
-    .filter((p) => p.nombre || p.codigo);
-}
-
-// ================== TELEGRAM BOT ==================
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
-
-function mainKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [
-        [{ text: "🛍️ Catálogo" }],
-        [{ text: "🎟️ Sellos" }, { text: "📣 Compartir bot" }],
-        [{ text: "🆘 Ayuda" }],
-      ],
-      resize_keyboard: true,
-    },
-  };
-}
-
-function catalogKeyboard() {
-  return {
-    reply_markup: {
-      keyboard: [[{ text: "📚 Categorías" }, { text: "🔙 Menú" }]],
-      resize_keyboard: true,
-    },
-  };
-}
-
-async function sendMenu(chatId) {
-  const cfg = await readConfig();
-  await bot.sendMessage(chatId, cfg.welcome_message, mainKeyboard());
-}
-
-bot.onText(/\/start/, async (msg) => {
-  await sendMenu(msg.chat.id);
+bot.onText(/^\/start$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const t = await getTextFromConfig();
+  await bot.sendMessage(chatId, `${t.brand_name}\n\n${t.welcome_message}`);
 });
 
-bot.on("message", async (msg) => {
+bot.onText(/^\/help$/, async (msg) => {
   const chatId = msg.chat.id;
-  const text = (msg.text || "").trim();
+  const t = await getTextFromConfig();
+  await bot.sendMessage(chatId, t.help_message);
+});
 
-  if (!text || text.startsWith("/")) return;
+bot.onText(/^\/catalogo$/, async (msg) => {
+  const chatId = msg.chat.id;
+  const t = await getTextFromConfig();
+  const catalog = await readCatalog();
 
+  if (!catalog.length) {
+    await bot.sendMessage(chatId, "El catálogo está vacío.");
+    return;
+  }
+
+  const perPage = t.catalog_per_page;
+  const pages = chunk(catalog, perPage);
+
+  // mandamos la 1ra página
+  const page = 0;
+  const text = formatCatalogPage(pages[page], page, pages.length, t.currency);
+  await bot.sendMessage(chatId, text, {
+    reply_markup: pages.length > 1 ? navKeyboard(page, pages.length) : undefined,
+  });
+});
+
+bot.on("callback_query", async (q) => {
   try {
-    const cfg = await readConfig();
+    const chatId = q.message.chat.id;
+    const data = (q.data || "").toString();
+    if (!data.startsWith("CAT:")) return;
 
-    if (text === "🔙 Menú") return await sendMenu(chatId);
+    const t = await getTextFromConfig();
+    const catalog = await readCatalog();
+    const pages = chunk(catalog, t.catalog_per_page);
 
-    if (text === "🛍️ Catálogo") {
-      await bot.sendMessage(chatId, "📚 Elegí una opción:", catalogKeyboard());
-      return;
-    }
+    const [, action, pageStr] = data.split(":"); // CAT:next:1
+    let page = parseInt(pageStr || "0", 10) || 0;
 
-    if (text === "📚 Categorías") {
-      const items = await readCatalog();
-      if (!items.length) {
-        await bot.sendMessage(
-          chatId,
-          "⚠️ El catálogo está vacío o no pude leer la hoja 'Catalogo'.",
-          mainKeyboard()
-        );
-        return;
-      }
-      const cats = [...new Set(items.map((x) => x.categoria || "Sin categoría"))];
-      const buttons = cats.map((c) => [{ text: `📦 ${c}` }]);
-      buttons.push([{ text: "📦 Todas" }], [{ text: "🔙 Menú" }]);
+    if (action === "next") page += 1;
+    if (action === "prev") page -= 1;
+    page = Math.max(0, Math.min(page, pages.length - 1));
 
-      await bot.sendMessage(chatId, "📚 Categorías (elegí una):", {
-        reply_markup: { keyboard: buttons, resize_keyboard: true },
-      });
-      return;
-    }
+    const text = formatCatalogPage(pages[page], page, pages.length, t.currency);
 
-    if (text === "📦 Todas" || text.startsWith("📦 ")) {
-      const items = await readCatalog();
-      if (!items.length) {
-        await bot.sendMessage(chatId, "⚠️ Catálogo vacío.", mainKeyboard());
-        return;
-      }
+    await bot.editMessageText(text, {
+      chat_id: chatId,
+      message_id: q.message.message_id,
+      reply_markup: navKeyboard(page, pages.length),
+    });
 
-      let cat = "";
-      if (text.startsWith("📦 ") && text !== "📦 Todas") cat = text.replace("📦 ", "").trim();
-
-      const filtered = cat ? items.filter((x) => (x.categoria || "Sin categoría") === cat) : items;
-
-      const lines = filtered.slice(0, cfg.catalog_per_page).map((p) => {
-        const price = p.precio ? `${cfg.currency}${p.precio}` : "";
-        const unit = p.unidad ? ` (${p.unidad})` : "";
-        const code = p.codigo ? ` [${p.codigo}]` : "";
-        return `• ${p.nombre}${unit}${price ? ` — ${price}` : ""}${code}`;
-      });
-
-      await bot.sendMessage(
-        chatId,
-        `🛍️ ${cat ? `Catálogo: ${cat}` : "Catálogo (primeros items)"}\n\n${lines.join("\n")}`,
-        mainKeyboard()
-      );
-
-      // Punto de compra (si config trae whatsapp_order)
-      if (cfg.whatsapp_order) {
-        await bot.sendMessage(
-          chatId,
-          `🧾 Para comprar escribinos por WhatsApp:\n${cfg.whatsapp_order}`,
-          mainKeyboard()
-        );
-      } else {
-        await bot.sendMessage(
-          chatId,
-          "⚠️ Falta configurar el WhatsApp de pedidos en Config (whatsapp_order).",
-          mainKeyboard()
-        );
-      }
-      return;
-    }
-
-    if (text === "🎟️ Sellos") {
-      await bot.sendMessage(chatId, cfg.sellos_message, mainKeyboard());
-      if (cfg.card_url) {
-        await bot.sendMessage(chatId, `🔗 Abrí tu tarjeta acá:\n${cfg.card_url}`, mainKeyboard());
-      }
-      return;
-    }
-
-    if (text === "📣 Compartir bot") {
-      await bot.sendMessage(chatId, cfg.share_message, mainKeyboard());
-      return;
-    }
-
-    if (text === "🆘 Ayuda") {
-      await bot.sendMessage(chatId, cfg.help_message, mainKeyboard());
-      // si hay contactos definidos
-      const extra = [];
-      if (cfg.contact_email) extra.push(`✉️ Email: ${cfg.contact_email}`);
-      if (cfg.contact_whatsapp) extra.push(`📞 WhatsApp: ${cfg.contact_whatsapp}`);
-      if (cfg.contact_telegram) extra.push(`✈️ Telegram: ${cfg.contact_telegram}`);
-      if (cfg.demo_bot) extra.push(`🤖 Demo: ${cfg.demo_bot}`);
-      if (extra.length) await bot.sendMessage(chatId, extra.join("\n"), mainKeyboard());
-      return;
-    }
-
-    // fallback humano
-    await bot.sendMessage(
-      chatId,
-      `Te leo 😊\nSi querés ver productos: tocá 🛍️ Catálogo\nSi necesitás ayuda: 🆘 Ayuda`,
-      mainKeyboard()
-    );
+    await bot.answerCallbackQuery(q.id);
   } catch (e) {
-    await bot.sendMessage(chatId, `⚠️ Error: ${e.message}`, mainKeyboard());
+    // no explotar por errores de edit
+    try { await bot.answerCallbackQuery(q.id); } catch {}
   }
 });
 
-// ================== EXPRESS (Render health) ==================
+function formatCatalogPage(items, page, totalPages, currency) {
+  const header = `🧾 Catálogo (pág ${page + 1}/${totalPages})\n\n`;
+  const lines = items.map((p) => {
+    const cat = p.categoria ? ` · ${p.categoria}` : "";
+    const price = p.precio ? ` — ${currency}${p.precio}` : "";
+    return `• ${p.nombre}${price}${cat}`;
+  });
+  return header + lines.join("\n");
+}
+
+function navKeyboard(page, totalPages) {
+  const buttons = [];
+  if (page > 0) buttons.push({ text: "⬅️", callback_data: `CAT:prev:${page}` });
+  if (page < totalPages - 1)
+    buttons.push({ text: "➡️", callback_data: `CAT:next:${page}` });
+
+  return { inline_keyboard: [buttons] };
+}
+
+// =====================
+// 5) EXPRESS (Render)
+// =====================
 const app = express();
-app.get("/", (_, res) => res.status(200).send("OK"));
-app.listen(PORT, () => console.log("Server up on", PORT));
+app.use(express.json());
+
+app.get("/", async (_req, res) => {
+  res.status(200).send("OK");
+});
+
+app.get("/health", async (_req, res) => {
+  try {
+    // prueba rápida: lee una celda de Config
+    const rows = await getRange("Config!A1:B2");
+    res.status(200).json({ ok: true, sample: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// Webhook endpoint (solo si usás WEBHOOK_URL)
+app.post("/telegram-webhook", async (req, res) => {
+  try {
+    await bot.processUpdate(req.body);
+    res.sendStatus(200);
+  } catch (e) {
+    res.sendStatus(200);
+  }
+});
+
+app.listen(PORT, async () => {
+  console.log("Server listening on port", PORT);
+
+  if (WEBHOOK_URL) {
+    const url = `${WEBHOOK_URL.replace(/\/$/, "")}/telegram-webhook`;
+    await bot.setWebHook(url);
+    console.log("Webhook set:", url);
+  } else {
+    console.log("Bot en modo polling");
+  }
+
+  // prueba Sheets al arrancar (para que si falla lo veas en logs)
+  const test = await getRange("Config!A1:B2");
+  console.log("Sheets OK. Sample Config A1:B2:", test);
+});
