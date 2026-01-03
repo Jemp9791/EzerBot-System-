@@ -1,145 +1,101 @@
 import fs from "fs";
-import path from "path";
-import { google } from "googleapis";
-import TelegramBot from "node-telegram-bot-api";
 
-/* =========================
-   VALIDACIÓN DE ENTORNO
-========================= */
-
-function getEnv(name) {
-  const v = process.env[name];
-  if (!v || !v.trim()) {
-    throw new Error(`Falta variable de entorno: ${name}`);
-  }
-  return v.trim();
+function isProbablyBase64(s) {
+  if (!s) return false;
+  const t = String(s).trim();
+  if (t.startsWith("{")) return false;
+  // base64 típico: letras/números + + / = (y a veces - _)
+  return /^[A-Za-z0-9+/=_-]+$/.test(t) && t.length > 40;
 }
 
-/* =========================
-   SERVICE ACCOUNT (BASE64)
-========================= */
+function normalizeB64(input) {
+  let clean = String(input)
+    .trim()
+    .replace(/^["']|["']$/g, "")      // quita comillas si Render las agrega
+    .replace(/[\r\n\t\s]+/g, "")      // quita saltos/espacios
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
 
-function loadServiceAccountFromB64() {
-  let raw = getEnv("GOOGLE_SERVICE_ACCOUNT_B64");
-
-  // limpieza defensiva TOTAL
-  raw = raw
-    .replace(/^"+|"+$/g, "")     // comillas externas
-    .replace(/\s+/g, "");        // cualquier espacio o salto
-
-  let jsonText;
-  try {
-    jsonText = Buffer.from(raw, "base64").toString("utf8");
-  } catch (e) {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 no es base64 válido");
-  }
-
-  let creds;
-  try {
-    creds = JSON.parse(jsonText);
-  } catch (e) {
-    console.error("Contenido decodificado:", jsonText.slice(0, 200));
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON");
-  }
-
-  if (!creds.client_email || !creds.private_key) {
-    throw new Error("Service Account inválido (faltan campos)");
-  }
-
-  return creds;
+  while (clean.length % 4 !== 0) clean += "=";
+  return clean;
 }
 
-/* =========================
-   GOOGLE SHEETS
-========================= */
-
-const SERVICE_ACCOUNT = loadServiceAccountFromB64();
-
-const auth = new google.auth.JWT({
-  email: SERVICE_ACCOUNT.client_email,
-  key: SERVICE_ACCOUNT.private_key,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets.readonly"],
-});
-
-const sheets = google.sheets({ version: "v4", auth });
-
-const GOOGLE_SHEET_ID = getEnv("GOOGLE_SHEET_ID");
-
-/* =========================
-   TELEGRAM BOT
-========================= */
-
-const TELEGRAM_BOT_TOKEN = getEnv("TELEGRAM_BOT_TOKEN");
-
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, {
-  polling: true,
-});
-
-/* =========================
-   CONFIG DESDE SHEETS
-========================= */
-
-async function readConfig() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: GOOGLE_SHEET_ID,
-    range: "Config!A:B",
-  });
-
-  const rows = res.data.values || [];
-  const cfg = {};
-
-  for (const [k, v] of rows) {
-    if (k) cfg[k] = v;
-  }
-
-  return cfg;
+function decodeB64ToUtf8(b64) {
+  const clean = normalizeB64(b64);
+  return Buffer.from(clean, "base64").toString("utf8").trim();
 }
 
-/* =========================
-   BOT FLOW BÁSICO
-========================= */
-
-bot.on("message", async (msg) => {
-  const chatId = msg.chat.id;
-
-  try {
-    const config = await readConfig();
-
-    const text = (msg.text || "").toLowerCase();
-
-    if (text === "/start") {
-      await bot.sendMessage(
-        chatId,
-        config.welcome_message || "Hola 👋 Bienvenido al sistema"
+function loadServiceAccount() {
+  // Opción A: archivo (Render Secret File o repo privado)
+  const keyFile = process.env.GOOGLE_KEY_FILE;
+  if (keyFile) {
+    if (!fs.existsSync(keyFile)) {
+      throw new Error(
+        `No encuentro el archivo de service account en: ${keyFile}`
       );
-      return;
     }
-
-    if (text.includes("ayuda")) {
-      await bot.sendMessage(
-        chatId,
-        config.help_message || "Escribí *menu* para ver opciones",
-        { parse_mode: "Markdown" }
-      );
-      return;
+    const raw = fs.readFileSync(keyFile, "utf8").trim();
+    const json = JSON.parse(raw);
+    if (!json.client_email || !json.private_key) {
+      throw new Error("El archivo existe pero NO es un service account válido");
     }
+    return json;
+  }
 
-    await bot.sendMessage(
-      chatId,
-      "Mensaje recibido ✔️"
-    );
+  // Opción B: JSON directo en env (sin base64)
+  const rawJson = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (rawJson && rawJson.trim().startsWith("{")) {
+    const json = JSON.parse(rawJson.trim());
+    if (!json.client_email || !json.private_key) {
+      throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON no es un service account válido");
+    }
+    return json;
+  }
 
-  } catch (err) {
-    console.error("BOT ERROR:", err.message);
-    await bot.sendMessage(
-      chatId,
-      "⚠️ Error interno. El equipo ya fue notificado."
+  // Opción C: base64 en env
+  const b64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
+  if (!b64) {
+    throw new Error(
+      "Faltan credenciales. Usá GOOGLE_KEY_FILE o GOOGLE_SERVICE_ACCOUNT_JSON o GOOGLE_SERVICE_ACCOUNT_B64"
     );
   }
-});
 
-/* =========================
-   STARTUP LOG
-========================= */
+  // 1) decode normal
+  let decoded = decodeB64ToUtf8(b64);
 
-console.log("✅ EzerBot iniciado correctamente");
+  // 2) si decodifica a OTRA base64 (pasa mucho con páginas), lo decodifico de nuevo
+  if (!decoded.startsWith("{") && isProbablyBase64(decoded)) {
+    decoded = decodeB64ToUtf8(decoded);
+  }
+
+  // 3) limpieza final
+  decoded = decoded.replace(/^\uFEFF/, "").trim(); // quita BOM si aparece
+
+  if (!decoded.startsWith("{")) {
+    // muestro preview para depurar sin exponer secretos
+    const preview = decoded.slice(0, 25).replace(/[^\x20-\x7E]/g, "?");
+    throw new Error(
+      `GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON. Preview: ${preview}`
+    );
+  }
+
+  const json = JSON.parse(decoded);
+  if (!json.client_email || !json.private_key) {
+    throw new Error("El JSON decodificado NO es un service account válido");
+  }
+
+  return json;
+}
+
+// ====== START (acá arranca tu app real) ======
+try {
+  const sa = loadServiceAccount();
+  console.log("✅ Service Account OK:", sa.client_email);
+
+  // >>> Acá va tu código real del bot / sheets / etc.
+  // IMPORTANTE: no logs de private_key, nunca.
+
+} catch (e) {
+  console.error("❌ FATAL:", e.message);
+  process.exit(1);
+}
