@@ -99,3 +99,17 @@ try {
   console.error("❌ FATAL:", e.message);
   process.exit(1);
 }
+
+import express from "express";
+
+const app = express();
+
+app.get("/", (req, res) => {
+  res.send("EzerBot activo");
+});
+
+const PORT = process.env.PORT || 3000;
+
+app.listen(PORT, () => {
+  console.log("Servidor escuchando en puerto", PORT);
+});
