@@ -1,35 +1,56 @@
+// index.js  (ESM)
+// ✅ Mantiene tu UI “ojo/carrusel” (edita el mismo mensaje)
+// ✅ NO cambia más nombres de ENV: usa BOT_TOKEN, GOOGLE_SERVICE_ACCOUNT, GOOGLE_SHEET_ID, PUBLIC_URL
+// ✅ Soporta GOOGLE_SERVICE_ACCOUNT en Base64 o JSON directo
+// ✅ Incluye endpoint /config (para que NO exista “Cannot GET /config” si alguien lo pide)
+
 import express from "express";
 import { Telegraf, Markup } from "telegraf";
 import { google } from "googleapis";
 
 /* =========================
-   ENV
+   ENV (FIJAS)
 ========================= */
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_BOT_TOKEN = process.env.BOT_TOKEN;
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
-const PUBLIC_URL = process.env.PUBLIC_URL || "";
-const BOT_LINK_ENV = process.env.BOT_LINK || "";
 
-if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
-if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
+// Acepta ambos nombres por compatibilidad, pero NO te obliga a crear otro:
+const GOOGLE_SERVICE_ACCOUNT_RAW =
+  process.env.GOOGLE_SERVICE_ACCOUNT_B64 || process.env.GOOGLE_SERVICE_ACCOUNT;
+
+const PUBLIC_URL = process.env.PUBLIC_URL || "";
+const BOT_LINK_ENV = process.env.BOT_LINK || ""; // opcional, si lo usás
+
+if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta ENV BOT_TOKEN");
+if (!GOOGLE_SHEET_ID) throw new Error("Falta ENV GOOGLE_SHEET_ID");
+if (!GOOGLE_SERVICE_ACCOUNT_RAW)
+  throw new Error("Falta ENV GOOGLE_SERVICE_ACCOUNT (o GOOGLE_SERVICE_ACCOUNT_B64)");
 
 /* =========================
    GOOGLE AUTH
 ========================= */
-function decodeServiceAccountB64(b64) {
-  const raw = Buffer.from(b64, "base64").toString("utf8").trim();
-  let obj;
-  try {
-    obj = JSON.parse(raw);
-  } catch (e) {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON.");
+function parseServiceAccount(raw) {
+  const s = String(raw || "").trim();
+  // Si parece JSON, úsalo directo
+  if (s.startsWith("{") && s.endsWith("}")) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      throw new Error("GOOGLE_SERVICE_ACCOUNT parece JSON pero no parsea.");
+    }
   }
-  return obj;
+  // Si no, asumimos Base64
+  try {
+    const decoded = Buffer.from(s, "base64").toString("utf8").trim();
+    return JSON.parse(decoded);
+  } catch {
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT no es JSON y tampoco Base64 JSON válido."
+    );
+  }
 }
 
-const sa = decodeServiceAccountB64(GOOGLE_SERVICE_ACCOUNT_B64);
+const sa = parseServiceAccount(GOOGLE_SERVICE_ACCOUNT_RAW);
 
 const auth = new google.auth.JWT({
   email: sa.client_email,
@@ -137,7 +158,8 @@ function normalizeHeaders(headerRow) {
 function pick(row, hmap, keys, def = "") {
   for (const k of keys) {
     const idx = hmap[k];
-    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "") return row[idx];
+    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "")
+      return row[idx];
   }
   return def;
 }
@@ -155,7 +177,7 @@ function getSess(chatId) {
       productIndex: 0,
       productsInView: [],
       cart: [], // {code,name,price,qty}
-      refBy: null, // chatId del referente (si llega por start)
+      refBy: null, // chatId del referente
       lastMessageId: null, // para editar
     });
   }
@@ -198,7 +220,14 @@ async function ensureBaseSheets() {
   await ensureSheet(PEDIDOS_SHEET, PEDIDOS_HEADERS);
 }
 
-async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
+async function upsertCliente({
+  chatId,
+  nombre,
+  usuario,
+  addSellos = 0,
+  addTotal = 0,
+  refBy = "",
+}) {
   const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:Z`);
   const idx = rows.findIndex((r) => String(r[0] || "") === String(chatId));
   if (idx === -1) {
@@ -225,24 +254,28 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
   const newTotal = currentTotal + addTotal;
   const now = new Date().toISOString();
 
-  const rowNumber = idx + 2; // porque arranca en A2
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
-    String(chatId),
-    nombre || row[1] || "",
-    usuario || row[2] || "",
-    newSellos,
-    newTotal,
-    now,
-    row[6] || refBy || "",
-    currentRefGanados,
-  ]]);
+  const rowNumber = idx + 2; // arranca en A2
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [
+    [
+      String(chatId),
+      nombre || row[1] || "",
+      usuario || row[2] || "",
+      newSellos,
+      newTotal,
+      now,
+      row[6] || refBy || "",
+      currentRefGanados,
+    ],
+  ]);
 
   return { sellos: newSellos, referidosGanados: currentRefGanados };
 }
 
 async function addSelloReferido(chatIdReferente) {
   const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
-  const idx = rows.findIndex((r) => String(r[0] || "") === String(chatIdReferente));
+  const idx = rows.findIndex(
+    (r) => String(r[0] || "") === String(chatIdReferente)
+  );
   if (idx === -1) return;
 
   const row = rows[idx];
@@ -250,16 +283,18 @@ async function addSelloReferido(chatIdReferente) {
   const currentRefGanados = parseNumber(row[7], 0);
   const rowNumber = idx + 2;
 
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
-    row[0] || "",
-    row[1] || "",
-    row[2] || "",
-    currentSellos + 1,
-    row[4] || 0,
-    new Date().toISOString(),
-    row[6] || "",
-    currentRefGanados + 1,
-  ]]);
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [
+    [
+      row[0] || "",
+      row[1] || "",
+      row[2] || "",
+      currentSellos + 1,
+      row[4] || 0,
+      new Date().toISOString(),
+      row[6] || "",
+      currentRefGanados + 1,
+    ],
+  ]);
 }
 
 /* =========================
@@ -269,12 +304,10 @@ async function safeEditOrSend(ctx, payload) {
   const chatId = ctx.chat?.id;
   const sess = chatId ? getSess(chatId) : null;
 
-  // payload = { text, extra } o { photo, caption, extra }
-  const canEdit = !!(sess?.lastMessageId);
+  const canEdit = !!sess?.lastMessageId;
 
   try {
     if (canEdit) {
-      // si hay photo -> editMessageMedia
       if (payload.photo) {
         await ctx.telegram.editMessageMedia(
           chatId,
@@ -300,11 +333,10 @@ async function safeEditOrSend(ctx, payload) {
         return;
       }
     }
-  } catch (e) {
-    // si falla editar, mandamos nuevo (sin romper)
+  } catch {
+    // si falla editar, enviamos nuevo
   }
 
-  // send new
   let msg;
   if (payload.photo) {
     msg = await ctx.replyWithPhoto(payload.photo, {
@@ -321,10 +353,16 @@ async function safeEditOrSend(ctx, payload) {
   if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
 }
 
+/* =========================
+   KEYBOARDS
+========================= */
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
-    [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
+    [
+      Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"),
+      Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA"),
+    ],
     [Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")],
   ]);
 }
@@ -334,7 +372,7 @@ function backMenuKeyboard() {
 }
 
 /* =========================
-   BUILD SCREENS
+   DATA LOADERS
 ========================= */
 async function loadConfig() {
   const rows = await getSheetValues(`Config!A:B`);
@@ -344,21 +382,27 @@ async function loadConfig() {
 async function loadCatalog() {
   const rows = await getSheetValues(`Catalogo!A1:Z`);
   if (!rows.length) return { items: [], headers: {} };
+
   const headerRow = rows[0];
   const hmap = normalizeHeaders(headerRow);
-  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
+  const data = rows
+    .slice(1)
+    .filter((r) => r.some((c) => String(c || "").trim() !== ""));
+
   const items = data.map((r) => {
-    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim();
+    const code = String(
+      pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")
+    ).trim();
     const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
     const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
     const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
     const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
     const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
     const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
+
     return { code, name, price, cat, img, desc, isCombo };
   });
 
-  // si no hay code, generamos uno estable por índice
   items.forEach((it, i) => {
     if (!it.code) it.code = `P${i + 1}`;
   });
@@ -372,6 +416,9 @@ function categoriesFromItems(items) {
   return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
 }
 
+/* =========================
+   UI BUILDERS
+========================= */
 function productCaption(cfg, p, index, total) {
   const moneda = cfg.Moneda || "ARS";
   const showPrice = parseYes(cfg.CatalogoMostrarPrecios || "SI");
@@ -394,26 +441,26 @@ function productKeyboard(p) {
       Markup.button.callback("🛒 Agregar", `ADD_${p.code}`),
       Markup.button.callback("✅ Comprar", "GO_CART"),
     ],
-    [
-      Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`),
-    ],
-    [
-      Markup.button.callback("🏠 Menú", "GO_MENU"),
-    ],
+    [Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    [Markup.button.callback("🏠 Menú", "GO_MENU")],
   ]);
 }
 
 function cartText(cfg, cart) {
   const moneda = cfg.Moneda || "ARS";
-  if (!cart.length) return `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\n\nUsá <b>Catálogo</b> para agregar productos.`;
+  if (!cart.length)
+    return `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\n\nUsá <b>Catálogo</b> para agregar productos.`;
+
   const lines = [];
   lines.push(`🛒 <b>Carrito</b>\n`);
   let total = 0;
+
   cart.forEach((it, i) => {
     const sub = it.price * it.qty;
     total += sub;
     lines.push(`${i + 1}) <b>${it.name}</b>\n   x${it.qty} — ${money(sub, moneda)}`);
   });
+
   lines.push(`\n<b>Total:</b> ${money(total, moneda)}`);
   return lines.join("\n");
 }
@@ -421,7 +468,10 @@ function cartText(cfg, cart) {
 function cartKeyboard(cart) {
   const rows = [];
   if (cart.length) {
-    rows.push([Markup.button.callback("➖ Quitar 1", "CART_DEC"), Markup.button.callback("🗑️ Vaciar", "CART_CLEAR")]);
+    rows.push([
+      Markup.button.callback("➖ Quitar 1", "CART_DEC"),
+      Markup.button.callback("🗑️ Vaciar", "CART_CLEAR"),
+    ]);
     rows.push([Markup.button.callback("🚚 Entrega", "CHK_DELIVERY")]);
   }
   rows.push([Markup.button.callback("🧀 Seguir en Catálogo", "MENU_CATALOGO")]);
@@ -431,9 +481,13 @@ function cartKeyboard(cart) {
 
 function deliveryKeyboard(cfg) {
   const rows = [];
-  if (parseYes(cfg.UsaEnvioDomicilio || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
-  if (parseYes(cfg.UsaRetiroLocal || "SI")) rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
-  if (parseYes(cfg.EnvioExpress || "SI")) rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
+  if (parseYes(cfg.UsaEnvioDomicilio || "SI"))
+    rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
+  if (parseYes(cfg.UsaRetiroLocal || "SI"))
+    rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
+  if (parseYes(cfg.EnvioExpress || "SI"))
+    rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
+
   rows.push([Markup.button.callback("⬅️ Volver", "GO_CART")]);
   return Markup.inlineKeyboard(rows);
 }
@@ -485,12 +539,12 @@ function sellosText(cfg, sellos) {
     lines.push(`${beneficios}`);
   }
 
-  lines.push(`\n✨ Tip: Si venís por link de referido y comprás, tu referente gana <b>1 sello</b>.`);
+  lines.push(`\n✨ Tip: Si alguien compra desde tu link, ganás <b>1 sello</b>.`);
   return lines.join("\n");
 }
 
 /* =========================
-   CORE FLOWS
+   SCREENS
 ========================= */
 async function showMenu(ctx) {
   const cfg = await loadConfig();
@@ -498,7 +552,7 @@ async function showMenu(ctx) {
   const nombre = cfg.NegocioNombre || "Tu Negocio";
   const dire = cfg.NegocioDireccion || "";
   const hora = cfg.NegocioHorario || "";
-  const estado = cfg.Estado || ""; // Abierto/Cerrado/Vacaciones etc
+  const estado = cfg.Estado || "";
 
   const header = [];
   header.push(`🏠 <b>${nombre}</b>`);
@@ -509,27 +563,31 @@ async function showMenu(ctx) {
   const desc = cfg.Descripcion || "";
   const txt = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
 
-  await safeEditOrSend(ctx, {
-    text: txt,
-    extra: mainMenuKeyboard(),
-  });
+  await safeEditOrSend(ctx, { text: txt, extra: mainMenuKeyboard() });
 }
 
 async function showCategories(ctx) {
-  const cfg = await loadConfig();
   const { items } = await loadCatalog();
   const cats = categoriesFromItems(items);
 
   if (!cats.length) {
-    await safeEditOrSend(ctx, { text: "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>.", extra: backMenuKeyboard() });
+    await safeEditOrSend(ctx, {
+      text: "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>.",
+      extra: backMenuKeyboard(),
+    });
     return;
   }
 
   const buttons = [];
   for (let i = 0; i < cats.length; i += 2) {
     const row = [];
-    row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
-    if (cats[i + 1]) row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
+    row.push(
+      Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`)
+    );
+    if (cats[i + 1])
+      row.push(
+        Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`)
+      );
     buttons.push(row);
   }
   buttons.push([Markup.button.callback("🏠 Menú", "GO_MENU")]);
@@ -542,14 +600,16 @@ async function showCategories(ctx) {
 
 async function showProductCarousel(ctx, cat) {
   const cfg = await loadConfig();
-  const chatId = ctx.chat.id;
-  const sess = getSess(chatId);
+  const sess = getSess(ctx.chat.id);
 
   const { items } = await loadCatalog();
   const prods = items.filter((p) => (p.cat || "General") === cat);
 
   if (!prods.length) {
-    await safeEditOrSend(ctx, { text: `No hay productos en <b>${cat}</b>.`, extra: backMenuKeyboard() });
+    await safeEditOrSend(ctx, {
+      text: `No hay productos en <b>${cat}</b>.`,
+      extra: backMenuKeyboard(),
+    });
     return;
   }
 
@@ -560,19 +620,21 @@ async function showProductCarousel(ctx, cat) {
 
   const p = prods[0];
   const caption = productCaption(cfg, p, 0, prods.length);
-
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) {
-    await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  } else {
-    await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
-  }
+
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 }
 
 function adjustCart(sess, product, delta = 1) {
   const found = sess.cart.find((x) => x.code === product.code);
   if (!found) {
-    sess.cart.push({ code: product.code, name: product.name, price: product.price, qty: Math.max(1, delta) });
+    sess.cart.push({
+      code: product.code,
+      name: product.name,
+      price: product.price,
+      qty: Math.max(1, delta),
+    });
   } else {
     found.qty += delta;
     if (found.qty <= 0) {
@@ -584,27 +646,24 @@ function adjustCart(sess, product, delta = 1) {
 async function showCart(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
-  await safeEditOrSend(ctx, {
-    text: cartText(cfg, sess.cart),
-    extra: cartKeyboard(sess.cart),
-  });
+  await safeEditOrSend(ctx, { text: cartText(cfg, sess.cart), extra: cartKeyboard(sess.cart) });
 }
 
 async function showDelivery(ctx) {
-  const cfg = await loadConfig();
   await safeEditOrSend(ctx, {
     text: `🚚 <b>Entrega</b>\n\nElegí cómo querés recibir tu pedido 👇`,
-    extra: deliveryKeyboard(cfg),
+    extra: deliveryKeyboard(await loadConfig()),
   });
 }
 
 async function showPayment(ctx, entregaTipo) {
   const cfg = await loadConfig();
-  const extraText = entregaTipo === "ENVIO"
-    ? `\n\n💡 Costo de envío: <b>${money(parseNumber(cfg.CostoEnvio || "0", 0), cfg.Moneda || "ARS")}</b>\n${cfg.TextoEnvioDomicilio || ""}`
-    : entregaTipo === "EXPRESS"
-    ? `\n\n⚡ Envío express activo.\n${cfg.TextoEnvioDomicilio || ""}`
-    : `\n\n🏪 ${cfg.TextoRetiroLocal || ""}`;
+  const extraText =
+    entregaTipo === "ENVIO"
+      ? `\n\n💡 Costo de envío: <b>${money(parseNumber(cfg.CostoEnvio || "0", 0), cfg.Moneda || "ARS")}</b>\n${cfg.TextoEnvioDomicilio || ""}`
+      : entregaTipo === "EXPRESS"
+      ? `\n\n⚡ Envío express activo.\n${cfg.TextoEnvioDomicilio || ""}`
+      : `\n\n🏪 ${cfg.TextoRetiroLocal || ""}`;
 
   await safeEditOrSend(ctx, {
     text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraText}`,
@@ -615,7 +674,9 @@ async function showPayment(ctx, entregaTipo) {
 function buildOrderId() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(
+    d.getHours()
+  )}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
@@ -631,20 +692,20 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
   let total = 0;
-  const itemsText = sess.cart.map((it) => {
-    const sub = it.price * it.qty;
-    total += sub;
-    return `${it.name} x${it.qty} (${money(sub, moneda)})`;
-  }).join(" | ");
+  const itemsText = sess.cart
+    .map((it) => {
+      const sub = it.price * it.qty;
+      total += sub;
+      return `${it.name} x${it.qty} (${money(sub, moneda)})`;
+    })
+    .join(" | ");
 
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total += costoEnvio;
 
-  // sellos por compra
   const usaSellos = parseYes(cfg.UsaSellos || "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
-  const sellosGanados = usaSellos ? Math.floor((total) / montoPorSello) : 0;
+  const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
 
-  // guardar cliente + sumar sellos
   const nombre = `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
   const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
 
@@ -657,7 +718,6 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
 
-  // registrar pedido
   const pedidoId = buildOrderId();
   await appendRow(PEDIDOS_SHEET, [
     pedidoId,
@@ -673,14 +733,11 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
     sess.refBy ? String(sess.refBy) : "",
   ]);
 
-  // referido: 1 sello al referente si existía
-  if (sess.refBy) {
-    await addSelloReferido(sess.refBy);
-  }
+  if (sess.refBy) await addSelloReferido(sess.refBy);
 
-  // armar confirmación + WhatsApp
-  const wa = (cfg.NegocioTelefono || "").replace(/[^\d]/g, "");
-  const waLink = wa ? `https://wa.me/${wa}` : (cfg.WhatsAppLink || "");
+  const waNum = (cfg.NegocioTelefono || "").replace(/[^\d]/g, "");
+  const waLink = waNum ? `https://wa.me/${waNum}` : (cfg.WhatsAppLink || "");
+
   const msgCliente = [
     `✅ <b>Perfecto</b>`,
     `\nAnoté tu pedido:`,
@@ -690,18 +747,10 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
     `\n<b>Pago:</b> ${pagoTipo}`,
   ];
 
-  if (sellosGanados > 0) {
-    msgCliente.push(`\n🎟️ Sumaste <b>${sellosGanados}</b> sello(s).`);
-  }
-  if (sess.refBy) {
-    msgCliente.push(`\n🎁 Compra por referido: el referente gana <b>1 sello</b>.`);
-  }
+  if (sellosGanados > 0) msgCliente.push(`\n🎟️ Sumaste <b>${sellosGanados}</b> sello(s).`);
+  if (sess.refBy) msgCliente.push(`\n🎁 Compra por referido: el referente gana <b>1 sello</b>.`);
+  if (waLink) msgCliente.push(`\n📲 Si querés, confirmalo por WhatsApp:\n${waLink}`);
 
-  if (waLink) {
-    msgCliente.push(`\n📲 Si querés, confirmalo por WhatsApp:\n${waLink}`);
-  }
-
-  // limpiar carrito
   sess.cart = [];
   sess.mode = "MENU";
 
@@ -720,7 +769,7 @@ async function showSellos(ctx) {
   const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
   const sellos = me ? parseNumber(me[3], 0) : 0;
 
-  const cardUrl = (cfg.CARD_URL || cfg.CardURL || "").trim(); // por si lo tenés con otro nombre
+  const cardUrl = (cfg.CARD_URL || cfg.CardURL || "").trim();
   const caption = sellosText(cfg, sellos);
 
   const keyboard = Markup.inlineKeyboard([
@@ -748,20 +797,19 @@ async function showHelp(ctx) {
     `• 📣 <b>Compartir</b>: podés enviar el bot o un producto por WhatsApp/Telegram.`,
   ].join("\n");
 
-  await safeEditOrSend(ctx, {
-    text,
-    extra: mainMenuKeyboard(),
-  });
+  await safeEditOrSend(ctx, { text, extra: mainMenuKeyboard() });
 }
 
 async function showShareBot(ctx) {
   const cfg = await loadConfig();
   const botLink = BOT_LINK_ENV || cfg.BotLink || cfg.Botlink || "";
   const text = `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y elegí tu pedido:`;
+
   if (!botLink) {
     await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: backMenuKeyboard() });
     return;
   }
+
   const links = buildShareLinks({ botLink, text });
   await safeEditOrSend(ctx, {
     text: `📣 <b>Compartir bot</b>\n\nElegí dónde compartir 👇`,
@@ -772,8 +820,10 @@ async function showShareBot(ctx) {
 async function showShareProduct(ctx, productCode) {
   const cfg = await loadConfig();
   const botLink = BOT_LINK_ENV || cfg.BotLink || "";
+
   const { items } = await loadCatalog();
   const p = items.find((x) => x.code === productCode);
+
   if (!p) {
     await safeEditOrSend(ctx, { text: "No encontré ese producto.", extra: backMenuKeyboard() });
     return;
@@ -783,7 +833,6 @@ async function showShareProduct(ctx, productCode) {
     return;
   }
 
-  // Link “start” con tracking del producto + referido
   const ref = ctx.chat.id;
   const deepLink = botLink.includes("?start=")
     ? botLink
@@ -804,28 +853,22 @@ async function showShareProduct(ctx, productCode) {
 ========================= */
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
-/* Start + parse referrals */
 bot.start(async (ctx) => {
   await ensureBaseSheets();
-
   const sess = getSess(ctx.chat.id);
 
-  // parse /start payload (ref + prod)
   const payload = (ctx.startPayload || "").trim();
   if (payload) {
-    // ref_123__prod_P1
     const mRef = payload.match(/ref_(\d+)/);
     if (mRef) sess.refBy = Number(mRef[1]);
+
     const mProd = payload.match(/prod_([^_]+)/);
-    if (mProd) {
-      // guardo para mostrar directo luego del menú
-      sess._jumpProd = decodeURIComponent(mProd[1]);
-    }
+    if (mProd) sess._jumpProd = decodeURIComponent(mProd[1]);
   }
 
   await showMenu(ctx);
 
-  // si llegó con producto, salta a catálogo de ese producto
+  // jump directo a producto compartido
   if (sess._jumpProd) {
     const code = sess._jumpProd;
     delete sess._jumpProd;
@@ -834,14 +877,16 @@ bot.start(async (ctx) => {
     const p = items.find((x) => x.code === code);
     if (p) {
       await showProductCarousel(ctx, p.cat || "General");
-      // mover índice al producto exacto
+
       const prods = getSess(ctx.chat.id).productsInView;
       const idx = prods.findIndex((x) => x.code === code);
       if (idx >= 0) {
         getSess(ctx.chat.id).productIndex = idx;
         const cfg = await loadConfig();
         const caption = productCaption(cfg, prods[idx], idx, prods.length);
-        const photo = prods[idx].img && prods[idx].img.startsWith("http") ? prods[idx].img : undefined;
+        const photo =
+          prods[idx].img && prods[idx].img.startsWith("http") ? prods[idx].img : undefined;
+
         if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(prods[idx]) });
         else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(prods[idx]) });
       }
@@ -849,13 +894,11 @@ bot.start(async (ctx) => {
   }
 });
 
-/* Commands fallback */
 bot.hears(/^(menu|menú)$/i, showMenu);
 bot.hears(/^cat[aá]logo$/i, showCategories);
 bot.hears(/^sellos$/i, showSellos);
 bot.hears(/^ayuda$/i, showHelp);
 
-/* Inline actions */
 bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
 bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx); });
@@ -879,6 +922,7 @@ bot.action("PROD_NEXT", async (ctx) => {
 
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
   if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
   else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 });
@@ -894,6 +938,7 @@ bot.action("PROD_PREV", async (ctx) => {
 
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
   if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
   else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 });
@@ -907,10 +952,7 @@ bot.action(/^ADD_(.+)$/i, async (ctx) => {
   adjustCart(sess, p, 1);
 });
 
-bot.action("GO_CART", async (ctx) => {
-  await ctx.answerCbQuery();
-  await showCart(ctx);
-});
+bot.action("GO_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
 
 bot.action("CART_CLEAR", async (ctx) => {
   await ctx.answerCbQuery();
@@ -923,17 +965,13 @@ bot.action("CART_DEC", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
   if (!sess.cart.length) return;
-  // quita 1 del último item
   const last = sess.cart[sess.cart.length - 1];
   last.qty -= 1;
   if (last.qty <= 0) sess.cart.pop();
   await showCart(ctx);
 });
 
-bot.action("CHK_DELIVERY", async (ctx) => {
-  await ctx.answerCbQuery();
-  await showDelivery(ctx);
-});
+bot.action("CHK_DELIVERY", async (ctx) => { await ctx.answerCbQuery(); await showDelivery(ctx); });
 
 bot.action("DELIVERY_ENVIO", async (ctx) => {
   await ctx.answerCbQuery();
@@ -984,23 +1022,44 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => res.status(200).send("EzerBot OK ✅"));
+app.get("/health", (req, res) => res.status(200).json({ ok: true }));
 
-/* Render port */
+// ✅ /config existe (sin secretos)
+app.get("/config", async (req, res) => {
+  try {
+    const cfg = await loadConfig();
+    const safe = {
+      NegocioNombre: cfg.NegocioNombre || "",
+      Estado: cfg.Estado || "",
+      Descripcion: cfg.Descripcion || "",
+      Moneda: cfg.Moneda || "ARS",
+      BotLink: cfg.BotLink || cfg.Botlink || "",
+    };
+    res.json({ ok: true, config: safe });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 const PORT = process.env.PORT || 10000;
 
 async function start() {
   await ensureBaseSheets();
 
-  // Webhook (si tenés PUBLIC_URL, lo usa; si no, corre long polling)
+  // Webhook si hay PUBLIC_URL
   if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
     const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
     await bot.telegram.setWebhook(hook);
     app.use(bot.webhookCallback("/telegram"));
-    app.listen(PORT, () => console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`));
+    app.listen(PORT, () =>
+      console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`)
+    );
   } else {
-    // fallback
-    bot.launch();
-    app.listen(PORT, () => console.log(`✅ Bot en long-polling | Puerto ${PORT}`));
+    // fallback long polling
+    await bot.launch();
+    app.listen(PORT, () =>
+      console.log(`✅ Bot en long-polling | Puerto ${PORT}`)
+    );
   }
 }
 
@@ -1008,3 +1067,4 @@ start().catch((e) => {
   console.error("FATAL:", e?.message || e);
   process.exit(1);
 });
+```0
