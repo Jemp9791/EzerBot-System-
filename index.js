@@ -3,48 +3,30 @@ import { Telegraf, Markup } from "telegraf";
 import { google } from "googleapis";
 
 /* =========================
-   ENV (NO CAMBIAR NOMBRES: ACEPTA VARIOS)
+   ENV (NO CAMBIO NOMBRES)
 ========================= */
-function pickEnv(...names) {
-  for (const n of names) {
-    const v = process.env[n];
-    if (v && String(v).trim() !== "") return String(v).trim();
-  }
-  return "";
-}
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
+const PUBLIC_URL = process.env.PUBLIC_URL || "";
+const BOT_LINK_ENV = process.env.BOT_LINK || "";
 
-// Tokens (acepta ambos)
-const TELEGRAM_BOT_TOKEN = pickEnv("BOT_TOKEN", "TELEGRAM_BOT_TOKEN");
-
-// Google
-const GOOGLE_SHEET_ID = pickEnv("GOOGLE_SHEET_ID", "SHEET_ID");
-const GOOGLE_SERVICE_ACCOUNT_B64 = pickEnv(
-  "GOOGLE_SERVICE_ACCOUNT_B64",
-  "GOOGLE_SERVICE_ACCOUNT",
-  "SERVICE_ACCOUNT_B64"
-);
-
-// Webhook / URL pública (opcional)
-const PUBLIC_URL = pickEnv("PUBLIC_URL", "RENDER_EXTERNAL_URL", "APP_URL");
-
-// Bot link para compartir (opcional)
-const BOT_LINK_ENV = pickEnv("BOT_LINK", "BOTLINK", "BOT_URL");
-
-// Validaciones mínimas
-if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta ENV: BOT_TOKEN o TELEGRAM_BOT_TOKEN");
-if (!GOOGLE_SHEET_ID) throw new Error("Falta ENV: GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta ENV: GOOGLE_SERVICE_ACCOUNT_B64");
+if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
+if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
+if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
 /* =========================
    GOOGLE AUTH
 ========================= */
 function decodeServiceAccountB64(b64) {
   const raw = Buffer.from(b64, "base64").toString("utf8").trim();
+  let obj;
   try {
-    return JSON.parse(raw);
+    obj = JSON.parse(raw);
   } catch {
     throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON.");
   }
+  return obj;
 }
 
 const sa = decodeServiceAccountB64(GOOGLE_SERVICE_ACCOUNT_B64);
@@ -131,7 +113,7 @@ function parseNumber(v, def = 0) {
 }
 
 function money(n, moneda = "ARS") {
-  const num = Math.round(n);
+  const num = Math.round(Number(n) || 0);
   return `${moneda} ${num.toLocaleString("es-AR")}`;
 }
 
@@ -141,7 +123,16 @@ function money(n, moneda = "ARS") {
 function normalizeHeaders(headerRow) {
   const map = {};
   headerRow.forEach((h, i) => {
-    const key = String(h || "").trim().toLowerCase().replace(/\s+/g, "");
+    const key = String(h || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "")
+      .replace(/[áàäâ]/g, "a")
+      .replace(/[éèëê]/g, "e")
+      .replace(/[íìïî]/g, "i")
+      .replace(/[óòöô]/g, "o")
+      .replace(/[úùüû]/g, "u")
+      .replace(/ñ/g, "n");
     if (key) map[key] = i;
   });
   return map;
@@ -155,10 +146,20 @@ function pick(row, hmap, keys, def = "") {
   return def;
 }
 
+function normUnitType(v) {
+  const s = String(v || "").trim().toLowerCase();
+  if (!s) return ""; // desconocido
+  if (s.includes("peso") || s.includes("gram") || s.includes("kg")) return "PESO";
+  if (s.includes("unidad") || s.includes("unid") || s.includes("u.")) return "UNIDAD";
+  return s.toUpperCase();
+}
+
 /* =========================
-   IN-MEMORY STATE
+   IN-MEMORY STATE (chat limpio)
 ========================= */
-const SESS = new Map();
+const SESS = new Map(); // chatId -> state
+const CART_TTL_MS = 60 * 60 * 1000; // 1 hora
+
 function getSess(chatId) {
   if (!SESS.has(chatId)) {
     SESS.set(chatId, {
@@ -166,18 +167,35 @@ function getSess(chatId) {
       category: null,
       productIndex: 0,
       productsInView: [],
-      cart: [], // {code,name,unit,unitPrice,qty,qtyText}
+      cart: [], // {code,name,unitType,price,pricePerKg, qtyUnits, grams, subtotal}
+      cartExpiresAt: 0,
       refBy: null,
       lastMessageId: null,
-      _entrega: null,
-      _editingCode: null,
+      awaiting: null, // {type:'PESO'|'UNIDAD', productCode}
+      checkout: null, // {entregaTipo, pagoTipo, pending:false}
     });
   }
   return SESS.get(chatId);
 }
 
+function ensureCartValid(sess) {
+  const now = Date.now();
+  if (sess.cartExpiresAt && now > sess.cartExpiresAt) {
+    sess.cart = [];
+    sess.cartExpiresAt = 0;
+    sess.checkout = null;
+    sess.awaiting = null;
+    return false;
+  }
+  return true;
+}
+
+function touchCart(sess) {
+  sess.cartExpiresAt = Date.now() + CART_TTL_MS;
+}
+
 /* =========================
-   SHEETS BASE
+   CLIENTES + PEDIDOS
 ========================= */
 const CLIENTES_SHEET = "Clientes";
 const PEDIDOS_SHEET = "Pedidos";
@@ -277,7 +295,7 @@ async function addSelloReferido(chatIdReferente) {
 }
 
 /* =========================
-   UI (EDIT OR SEND)
+   UI HELPERS (editar mensaje)
 ========================= */
 async function safeEditOrSend(ctx, payload) {
   const chatId = ctx.chat?.id;
@@ -301,19 +319,18 @@ async function safeEditOrSend(ctx, payload) {
         );
         return;
       } else {
-        const text = payload.text && String(payload.text).trim() ? payload.text : " ";
         await ctx.telegram.editMessageText(
           chatId,
           sess.lastMessageId,
           undefined,
-          text,
+          payload.text || " ",
           { parse_mode: "HTML", ...(payload.extra || {}) }
         );
         return;
       }
     }
   } catch {
-    // fallback send new
+    // fallback a nuevo
   }
 
   let msg;
@@ -324,12 +341,17 @@ async function safeEditOrSend(ctx, payload) {
       ...(payload.extra || {}),
     });
   } else {
-    const text = payload.text && String(payload.text).trim() ? payload.text : " ";
-    msg = await ctx.reply(text, { parse_mode: "HTML", ...(payload.extra || {}) });
+    msg = await ctx.reply(payload.text || " ", {
+      parse_mode: "HTML",
+      ...(payload.extra || {}),
+    });
   }
   if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
 }
 
+/* =========================
+   MENUS / KEYBOARDS
+========================= */
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
@@ -342,8 +364,22 @@ function backMenuKeyboard() {
   return Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]);
 }
 
+/* ========= PRODUCT KEYBOARD (ORDEN EXACTO QUE PEDISTE) =========
+   - Fila 1: prev / next
+   - Fila 2: Quiero éste / Compartir
+   - Fila 3: Menú
+   (Agregar se hace desde "Quiero éste" (compra rápida) o desde carrito/categoría)
+*/
+function productKeyboardOrdered(p) {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
+    [Markup.button.callback("⚡ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    [Markup.button.callback("🏠 Menú", "GO_MENU")],
+  ]);
+}
+
 /* =========================
-   LOAD CONFIG / CATALOGO
+   LOAD CONFIG + CATALOG
 ========================= */
 async function loadConfig() {
   const rows = await getSheetValues(`Config!A:B`);
@@ -359,46 +395,42 @@ async function loadCatalog() {
   const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
 
   const items = data.map((r, i) => {
-    const code = String(pick(r, hmap, ["codigo","codigoproducto","id","sku"], "")).trim() || `P${i + 1}`;
-    const name = String(pick(r, hmap, ["nombre","producto","name"], "Producto")).trim();
-    const price = parseNumber(pick(r, hmap, ["precio","price"], 0), 0);
-    const priceKg = parseNumber(pick(r, hmap, ["precioporkg","precioxkg","precio/kg","precio_kg","porkg"], ""), NaN);
-    const cat = String(pick(r, hmap, ["categoria","categoría","rubro"], "General")).trim() || "General";
-    const img = String(pick(r, hmap, ["imagenurl","imagen","foto","urlimagen"], "")).trim();
-    const desc = String(pick(r, hmap, ["descripcion","descripción","detalle"], "")).trim();
-
-    const unidadRaw = String(pick(r, hmap, ["unidad","unit","tipo"], "unidad")).trim().toLowerCase();
-    const unit = (unidadRaw.includes("kg") || unidadRaw.includes("kilo") || unidadRaw.includes("gram")) ? "kg" : "unidad";
-
-    // ✅ CLAVE: precio unitario real
-    // - si es kg y existe PrecioPorKg => usarlo
-    // - si no existe, usar Precio como "por kg"
-    const unitPrice = unit === "kg" ? (Number.isFinite(priceKg) && priceKg > 0 ? priceKg : price) : price;
-
-    return { code, name, price, priceKg: Number.isFinite(priceKg) ? priceKg : null, unitPrice, cat, img, desc, unit };
+    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
+    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
+    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
+    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "precioxkg", "precio_kg"], ""), 0);
+    const cat = String(pick(r, hmap, ["categoria", "categoria", "rubro"], "General")).trim() || "General";
+    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
+    const desc = String(pick(r, hmap, ["descripcion", "descripcion", "detalle"], "")).trim();
+    const unitType = normUnitType(pick(r, hmap, ["unidad", "unidadtipo", "tipo", "venta"], "")); // PESO / UNIDAD
+    return { code, name, price, pricePerKg, cat, img, desc, unitType };
   });
 
   return { items, headers: hmap };
 }
 
 function categoriesFromItems(items) {
-  return Array.from(new Set(items.map((it) => it.cat || "General"))).sort((a,b)=>a.localeCompare(b,"es"));
+  const set = new Set();
+  for (const it of items) set.add(it.cat || "General");
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
 }
 
 function productCaption(cfg, p, index, total) {
   const moneda = cfg.Moneda || "ARS";
   const showPrice = parseYes(cfg.CatalogoMostrarPrecios || "SI");
   const lines = [];
-
   lines.push(`<b>${p.name}</b>`);
 
   if (showPrice) {
-    if (p.unit === "kg") {
-      lines.push(`💰 <b>${money(p.unitPrice, moneda)}</b> <i>(precio x kg)</i>`);
-      lines.push(`📦 Unidad: <b>por peso (gramos/kg)</b>`);
-    } else {
-      lines.push(`💰 <b>${money(p.unitPrice, moneda)}</b>`);
+    if (p.unitType === "PESO") {
+      const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price; // default: precio = por kg
+      lines.push(`💰 <b>${money(perKg, moneda)}</b> <i>(por kg)</i>`);
+      lines.push(`📦 Unidad: <b>por peso</b> (gramos/kg)`);
+    } else if (p.unitType === "UNIDAD") {
+      lines.push(`💰 <b>${money(p.price, moneda)}</b> <i>(por unidad)</i>`);
       lines.push(`📦 Unidad: <b>por unidad</b>`);
+    } else {
+      lines.push(`💰 <b>${money(p.price, moneda)}</b>`);
     }
   }
 
@@ -408,36 +440,38 @@ function productCaption(cfg, p, index, total) {
   return lines.join("\n");
 }
 
-function productKeyboard(p) {
-  // ✅ Mantengo: anterior/siguiente, comprar, compartir, menú
-  return Markup.inlineKeyboard([
-    [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
-    [Markup.button.callback("🛒 Agregar", `ADD_${p.code}`), Markup.button.callback("✅ Comprar", "GO_CART")],
-    [Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
-    [Markup.button.callback("🏠 Menú", "GO_MENU")],
-  ]);
+/* =========================
+   CART + CHECKOUT
+========================= */
+function calcWeightSubtotal(cfg, perKg, gramsOrKg) {
+  // Si el usuario manda 0.25 => kg | si manda 250 => gramos
+  const val = Number(gramsOrKg);
+  if (!Number.isFinite(val) || val <= 0) return { grams: 0, subtotal: 0 };
+
+  let grams = 0;
+  if (val <= 10) grams = Math.round(val * 1000); // kg
+  else grams = Math.round(val); // gramos
+
+  const kg = grams / 1000;
+  const subtotal = perKg * kg;
+  return { grams, subtotal };
 }
 
-/* =========================
-   CARRITO + CHECKOUT
-========================= */
 function cartText(cfg, cart) {
   const moneda = cfg.Moneda || "ARS";
-  if (!cart.length) return `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\n\nUsá <b>Catálogo</b> para agregar productos.`;
+  if (!cart.length) return `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\n\nUsá <b>Catálogo</b> para elegir un producto.`;
 
   let total = 0;
   const lines = [];
   lines.push(`🛒 <b>Carrito</b>\n`);
 
   cart.forEach((it, i) => {
-    const sub = it.unitPrice * it.qty;
-    total += sub;
-
-    const qtyLabel = it.unit === "kg"
-      ? `${it.qtyText || (it.qty + " kg")}`
-      : `x${it.qty}`;
-
-    lines.push(`${i + 1}) <b>${it.name}</b>\n   ${qtyLabel} — ${money(sub, moneda)}`);
+    total += it.subtotal;
+    const qtyLine =
+      it.unitType === "PESO"
+        ? `${it.grams} g`
+        : `${it.qtyUnits} u`;
+    lines.push(`${i + 1}) <b>${it.name}</b>\n   ${qtyLine} — ${money(it.subtotal, moneda)}`);
   });
 
   lines.push(`\n<b>Total:</b> ${money(total, moneda)}`);
@@ -449,9 +483,9 @@ function cartKeyboard(cart) {
   const rows = [];
   if (cart.length) {
     rows.push([Markup.button.callback("✍️ Editar item", "CART_EDIT")]);
-    // ✅ CLAVE: ahora NO dice “Entrega”, dice “Finalizar compra”
-    rows.push([Markup.button.callback("✅ Finalizar compra", "GO_CHECKOUT")]);
     rows.push([Markup.button.callback("🗑️ Vaciar", "CART_CLEAR")]);
+    // ✅ ACÁ EL CAMBIO CLAVE: antes decía Entrega, ahora Finalizar compra
+    rows.push([Markup.button.callback("✅ Finalizar compra", "CHK_FINAL")]);
   }
   rows.push([Markup.button.callback("🧀 Seguir en Catálogo", "MENU_CATALOGO")]);
   rows.push([Markup.button.callback("🏠 Menú", "GO_MENU")]);
@@ -463,7 +497,7 @@ function deliveryKeyboard(cfg) {
   if (parseYes(cfg.UsaEnvioDomicilio || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
   if (parseYes(cfg.UsaRetiroLocal || "SI")) rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
   if (parseYes(cfg.EnvioExpress || "SI")) rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
-  rows.push([Markup.button.callback("⬅️ Volver al carrito", "GO_CART")]);
+  rows.push([Markup.button.callback("⬅️ Volver", "GO_CART")]);
   return Markup.inlineKeyboard(rows);
 }
 
@@ -474,33 +508,16 @@ function payKeyboard(cfg) {
     rows.push([Markup.button.callback(`💳 ${tipo}`, `PAY_${tipo}`)]);
   }
   rows.push([Markup.button.callback("💵 Efectivo", "PAY_EFECTIVO")]);
-  rows.push([Markup.button.callback("⬅️ Volver", "ASK_DELIVERY")] );
+  rows.push([Markup.button.callback("⬅️ Volver", "CHK_FINAL")]);
   return Markup.inlineKeyboard(rows);
 }
 
-/* =========================
-   SHARE
-========================= */
-function buildShareLinks({ botLink, text }) {
-  const url = encodeURIComponent(botLink);
-  const t = encodeURIComponent(text);
-  return {
-    wa: `https://wa.me/?text=${t}%0A${url}`,
-    tg: `https://t.me/share/url?url=${url}&text=${t}`,
-  };
+function buildOrderId() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
-function shareKeyboard(links) {
-  return Markup.inlineKeyboard([
-    [Markup.button.url("📲 WhatsApp", links.wa)],
-    [Markup.button.url("✈️ Telegram", links.tg)],
-    [Markup.button.callback("🏠 Menú", "GO_MENU")],
-  ]);
-}
-
-/* =========================
-   SCREENS
-========================= */
 async function showMenu(ctx) {
   const cfg = await loadConfig();
   const nombre = cfg.NegocioNombre || "Todo Queso";
@@ -527,14 +544,15 @@ async function showCategories(ctx) {
   if (!cats.length) {
     await safeEditOrSend(ctx, {
       text: "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>.",
-      extra: backMenuKeyboard()
+      extra: backMenuKeyboard(),
     });
     return;
   }
 
   const buttons = [];
   for (let i = 0; i < cats.length; i += 2) {
-    const row = [Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`)];
+    const row = [];
+    row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
     if (cats[i + 1]) row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
     buttons.push(row);
   }
@@ -548,7 +566,10 @@ async function showCategories(ctx) {
 
 async function showProductCarousel(ctx, cat) {
   const cfg = await loadConfig();
-  const sess = getSess(ctx.chat.id);
+  const chatId = ctx.chat.id;
+  const sess = getSess(chatId);
+
+  ensureCartValid(sess);
 
   const { items } = await loadCatalog();
   const prods = items.filter((p) => (p.cat || "General") === cat);
@@ -565,39 +586,31 @@ async function showProductCarousel(ctx, cat) {
 
   const p = prods[0];
   const caption = productCaption(cfg, p, 0, prods.length);
+
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
-}
-
-function adjustCart(sess, product) {
-  const found = sess.cart.find((x) => x.code === product.code);
-  if (!found) {
-    sess.cart.push({
-      code: product.code,
-      name: product.name,
-      unit: product.unit,
-      unitPrice: product.unitPrice, // ✅ precio correcto
-      qty: product.unit === "kg" ? 0 : 1,
-      qtyText: "",
-    });
-  } else {
-    if (found.unit === "kg") {
-      // no sumamos kg sin pedir peso
-    } else {
-      found.qty += 1;
-    }
-  }
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(p) });
 }
 
 async function showCart(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
-  await safeEditOrSend(ctx, { text: cartText(cfg, sess.cart), extra: cartKeyboard(sess.cart) });
+  const ok = ensureCartValid(sess);
+  if (!ok) {
+    await safeEditOrSend(ctx, {
+      text: "🕒 Tu carrito venció (1 hora). Lo vacié para que arranques de nuevo ✅",
+      extra: mainMenuKeyboard(),
+    });
+    return;
+  }
+
+  await safeEditOrSend(ctx, {
+    text: cartText(cfg, sess.cart),
+    extra: cartKeyboard(sess.cart),
+  });
 }
 
-async function askDelivery(ctx) {
+async function showDelivery(ctx) {
   const cfg = await loadConfig();
   await safeEditOrSend(ctx, {
     text: `🚚 <b>Entrega</b>\n\nElegí cómo querés recibir tu pedido 👇`,
@@ -610,10 +623,10 @@ async function showPayment(ctx, entregaTipo) {
   const moneda = cfg.Moneda || "ARS";
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
-  const extraText =
-    entregaTipo === "ENVIO" || entregaTipo === "EXPRESS"
-      ? `\n\n💡 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${cfg.TextoEnvioDomicilio || ""}`
-      : `\n\n🏪 ${cfg.TextoRetiroLocal || ""}`;
+  let extraText = "";
+  if (entregaTipo === "ENVIO") extraText = `\n\n💡 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${cfg.TextoEnvioDomicilio || ""}`;
+  if (entregaTipo === "EXPRESS") extraText = `\n\n⚡ Envío express.\n${cfg.TextoEnvioDomicilio || ""}`;
+  if (entregaTipo === "RETIRO") extraText = `\n\n🏪 ${cfg.TextoRetiroLocal || ""}`;
 
   await safeEditOrSend(ctx, {
     text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraText}`,
@@ -621,51 +634,43 @@ async function showPayment(ctx, entregaTipo) {
   });
 }
 
-function buildOrderId() {
-  const d = new Date();
-  const pad = (n) => String(n).padStart(2, "0");
-  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-}
-
-async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
-  const cfg = await loadConfig();
-  const sess = getSess(ctx.chat.id);
-
-  if (!sess.cart.length) {
-    await safeEditOrSend(ctx, { text: "Tu carrito está vacío.", extra: backMenuKeyboard() });
-    return;
-  }
-
-  // Si hay kg sin peso, lo pedimos
-  const pendingKg = sess.cart.find((it) => it.unit === "kg" && (!it.qty || it.qty <= 0));
-  if (pendingKg) {
-    sess._editingCode = pendingKg.code;
-    await safeEditOrSend(ctx, {
-      text: `⚖️ <b>${pendingKg.name}</b>\n\nIngresá el peso en gramos (ej: 250) o en kg (ej: 0.25).\n\n✍️ Escribilo ahora en el chat.`,
-      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "GO_CART")]]),
-    });
-    return;
-  }
-
+function buildCheckoutTicket(cfg, sess, entregaTipo, pagoTipo) {
   const moneda = cfg.Moneda || "ARS";
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
   let total = 0;
-  const itemsText = sess.cart
-    .map((it) => {
-      const sub = it.unitPrice * it.qty;
-      total += sub;
-      const qtyLabel = it.unit === "kg" ? `${it.qtyText || (it.qty + " kg")}` : `x${it.qty}`;
-      return `${it.name} ${qtyLabel} (${money(sub, moneda)})`;
-    })
-    .join(" | ");
+  const lines = [];
+  lines.push(`🧾 <b>Resumen final</b>\n`);
+  sess.cart.forEach((it) => {
+    total += it.subtotal;
+    const qtyLine = it.unitType === "PESO" ? `${it.grams} g` : `${it.qtyUnits} u`;
+    lines.push(`• <b>${it.name}</b> — ${qtyLine} — ${money(it.subtotal, moneda)}`);
+  });
 
-  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total += costoEnvio;
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
+    total += costoEnvio;
+    if (costoEnvio > 0) lines.push(`\n🚚 Envío: ${money(costoEnvio, moneda)}`);
+  }
 
-  // Sellos
+  lines.push(`\n<b>Total:</b> ${money(total, moneda)}`);
+  lines.push(`\n<b>Entrega:</b> ${entregaTipo}`);
+  lines.push(`\n<b>Pago:</b> ${pagoTipo}`);
+
+  // texto sugerente configurable (opcional)
+  const ahorroTxt = (cfg.TextoAhorroComparativa || "").trim();
+  if (ahorroTxt) lines.push(`\n✨ ${ahorroTxt}`);
+
+  lines.push(`\n\n¿Confirmás la compra?`);
+  return { text: lines.join("\n"), total };
+}
+
+async function finalizeOrderPersist(ctx, { entregaTipo, pagoTipo, totalFinal }) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
   const usaSellos = parseYes(cfg.UsaSellos || "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
-  const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
+  const sellosGanados = usaSellos ? Math.floor(totalFinal / montoPorSello) : 0;
 
   const nombre = `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
   const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
@@ -675,9 +680,16 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
     nombre,
     usuario,
     addSellos: sellosGanados,
-    addTotal: total,
+    addTotal: totalFinal,
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
+
+  const itemsText = sess.cart
+    .map((it) => {
+      const qtyLine = it.unitType === "PESO" ? `${it.grams}g` : `${it.qtyUnits}u`;
+      return `${it.name} ${qtyLine} (${money(it.subtotal, cfg.Moneda || "ARS")})`;
+    })
+    .join(" | ");
 
   const pedidoId = buildOrderId();
   await appendRow(PEDIDOS_SHEET, [
@@ -687,7 +699,7 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
     nombre,
     usuario,
     itemsText,
-    total,
+    totalFinal,
     entregaTipo,
     pagoTipo,
     "PENDIENTE",
@@ -696,36 +708,65 @@ async function finalizeOrder(ctx, { entregaTipo, pagoTipo }) {
 
   if (sess.refBy) await addSelloReferido(sess.refBy);
 
-  const waNum = (cfg.NegocioTelefono || "").replace(/[^\d]/g, "");
-  const waLink = waNum ? `https://wa.me/${waNum}` : (cfg.WhatsAppLink || "");
+  // mensaje final al cliente
+  const moneda = cfg.Moneda || "ARS";
+  const wa = (cfg.NegocioTelefono || "").replace(/[^\d]/g, "");
+  const waLink = wa ? `https://wa.me/${wa}` : (cfg.WhatsAppLink || "");
 
-  const msgCliente = [
-    `✅ <b>Perfecto</b>`,
-    `\nAnoté tu pedido:`,
-    ...sess.cart.map((it) => {
-      const qtyLabel = it.unit === "kg" ? `${it.qtyText || (it.qty + " kg")}` : `x${it.qty}`;
-      return `• ${it.name} ${qtyLabel}`;
-    }),
-    `\n<b>Total:</b> ${money(total, moneda)}`,
-    `\n<b>Entrega:</b> ${entregaTipo}`,
-    `\n<b>Pago:</b> ${pagoTipo}`,
-  ];
+  const msg = [];
+  msg.push(`✅ <b>Perfecto</b>`);
+  msg.push(`\nAnoté tu pedido:`);
+  sess.cart.forEach((it) => {
+    const qtyLine = it.unitType === "PESO" ? `${it.grams} g` : `${it.qtyUnits} u`;
+    msg.push(`• ${it.name} — ${qtyLine}`);
+  });
+  msg.push(`\n<b>Total:</b> ${money(totalFinal, moneda)}`);
+  msg.push(`\n<b>Entrega:</b> ${entregaTipo}`);
+  msg.push(`\n<b>Pago:</b> ${pagoTipo}`);
 
-  if (sellosGanados > 0) msgCliente.push(`\n🎟️ Sumaste <b>${sellosGanados}</b> sello(s).`);
-  if (sess.refBy) msgCliente.push(`\n🎁 Compra por referido: el referente gana <b>1 sello</b>.`);
-  if (waLink) msgCliente.push(`\n📲 Si querés, confirmalo por WhatsApp:\n${waLink}`);
+  if (sellosGanados > 0) msg.push(`\n🎟️ Sumaste <b>${sellosGanados}</b> sello(s).`);
+  if (sess.refBy) msg.push(`\n🎁 Compra por referido: el referente gana <b>1 sello</b>.`);
 
+  if (waLink) {
+    msg.push(`\n📲 Ahora falta la confirmación del vendedor. Si querés, avisá por WhatsApp:\n${waLink}`);
+  }
+
+  // limpiar carrito
   sess.cart = [];
-  sess.mode = "MENU";
-  sess._entrega = null;
+  sess.cartExpiresAt = 0;
+  sess.checkout = null;
+  sess.awaiting = null;
 
   await safeEditOrSend(ctx, {
-    text: msgCliente.join("\n"),
+    text: msg.join("\n"),
     extra: Markup.inlineKeyboard([
-      [Markup.button.callback("🧀 Seguir en Catálogo", "MENU_CATALOGO")],
-      [Markup.button.callback("🏠 Menú", "GO_MENU")],
+      [Markup.button.callback("🧀 Ir al Menú", "GO_MENU")],
     ]),
   });
+}
+
+/* =========================
+   SELL0S / AYUDA / SHARE
+========================= */
+function sellosText(cfg, sellos) {
+  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
+  const beneficios = (cfg.BeneficiosPorNivel || "").trim();
+  const sellosPorNivel = (cfg.SellosPorNivel || "").trim();
+
+  const lines = [];
+  lines.push(`🎟️ <b>Sellos</b>\n`);
+  lines.push(`Tenés <b>${sellos}</b> sellos acumulados.`);
+  lines.push(`\n📌 Cada <b>${money(montoPorSello, cfg.Moneda || "ARS")}</b> = <b>1 sello</b>.`);
+
+  if (sellosPorNivel) {
+    lines.push(`\n🏅 <b>Niveles</b>\n${sellosPorNivel}`);
+  }
+  if (beneficios) {
+    lines.push(`\n🎁 <b>Beneficios</b>\n${beneficios}`);
+  }
+
+  lines.push(`\n✨ Tip: si alguien compra desde tu link, ganás <b>1 sello</b>.`);
+  return lines.join("\n");
 }
 
 async function showSellos(ctx) {
@@ -734,49 +775,71 @@ async function showSellos(ctx) {
   const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
   const sellos = me ? parseNumber(me[3], 0) : 0;
 
-  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
-  const caption = [
-    `🎟️ <b>Sellos</b>\n`,
-    `Tenés <b>${sellos}</b> sellos acumulados.`,
-    `\n📌 Cada <b>${money(montoPorSello, cfg.Moneda || "ARS")}</b> = <b>1 sello</b>.`,
-    `\n✨ Si venís por link de referido y comprás, tu referente gana <b>1 sello</b>.`,
-  ].join("\n");
-
-  await safeEditOrSend(ctx, { text: caption, extra: mainMenuKeyboard() });
+  const caption = sellosText(cfg, sellos);
+  await safeEditOrSend(ctx, {
+    text: caption,
+    extra: Markup.inlineKeyboard([
+      [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+      [Markup.button.callback("🏠 Menú", "GO_MENU")],
+    ]),
+  });
 }
 
 async function showHelp(ctx) {
   const cfg = await loadConfig();
   const nombre = cfg.NegocioNombre || "Todo Queso";
-  const waNum = (cfg.NegocioTelefono || "").replace(/[^\d]/g, "");
-  const waLink = waNum ? `https://wa.me/${waNum}` : "";
+
+  const vendedor = (cfg.NegocioTelefono || "").trim();
+  const sugerencia = (cfg.TextoAyudaSugerente || "¿No encontraste algo? Puedo pasarte con un vendedor, tomar tu sugerencia o ayudarte a elegir.").trim();
 
   const text = [
     `ℹ️ <b>Ayuda - ${nombre}</b>\n`,
-    `• Tocá 🧀 <b>Catálogo</b> para ver productos.`,
-    `• Usá ⬅️➡️ para ver el siguiente/anterior.`,
-    `• 🛒 <b>Agregar</b> suma al carrito (en fiambres te pide gramos).`,
-    `• ✅ <b>Comprar</b> te lleva al carrito.`,
+    `• Tocá 🧀 <b>Catálogo</b> y elegí una categoría.`,
+    `• Ojeás productos con ⬅️➡️ sin llenar el chat.`,
+    `• Tocá ⚡ <b>Quiero éste</b> para comprar rápido (te pide peso/unidades).`,
+    `• En 🛒 <b>Carrito</b> tocás ✅ <b>Finalizar compra</b> para elegir entrega y pago.`,
+    `\n💬 ${sugerencia}`,
   ].join("\n");
 
-  const kb = Markup.inlineKeyboard([
-    ...(waLink ? [[Markup.button.url("📲 Contactar vendedor (WhatsApp)", waLink)]] : []),
+  const rows = [
+    [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+  ];
+
+  if (vendedor) rows.push([Markup.button.url("👨‍🍳 Hablar con vendedor (WhatsApp)", `https://wa.me/${vendedor.replace(/[^\d]/g, "")}`)]);
+  rows.push([Markup.button.callback("🏠 Menú", "GO_MENU")]);
+
+  await safeEditOrSend(ctx, { text, extra: Markup.inlineKeyboard(rows) });
+}
+
+function buildShareLinks({ botLink, text }) {
+  const url = encodeURIComponent(botLink);
+  const t = encodeURIComponent(text);
+  return {
+    wa: `https://wa.me/?text=${t}%0A${url}`,
+    tg: `https://t.me/share/url?url=${url}&text=${t}`,
+  };
+}
+
+function shareKeyboard(links) {
+  return Markup.inlineKeyboard([
+    [Markup.button.url("📲 WhatsApp", links.wa), Markup.button.url("✈️ Telegram", links.tg)],
     [Markup.button.callback("🏠 Menú", "GO_MENU")],
   ]);
-
-  await safeEditOrSend(ctx, { text, extra: kb });
 }
 
 async function showShareBot(ctx) {
   const cfg = await loadConfig();
   const botLink = BOT_LINK_ENV || cfg.BotLink || cfg.Botlink || "";
-  const text = `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y elegí tu pedido:`;
   if (!botLink) {
     await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: backMenuKeyboard() });
     return;
   }
+  const text = `🧀 Estoy comprando en ${cfg.NegocioNombre || "Todo Queso"}.\nEntrá acá para ver el catálogo y comprar 👇`;
   const links = buildShareLinks({ botLink, text });
-  await safeEditOrSend(ctx, { text: `📣 <b>Compartir bot</b>\n\nElegí dónde compartir 👇`, extra: shareKeyboard(links) });
+  await safeEditOrSend(ctx, {
+    text: `📣 <b>Compartir bot</b>\n\nElegí dónde compartir 👇`,
+    extra: shareKeyboard(links),
+  });
 }
 
 async function showShareProduct(ctx, productCode) {
@@ -784,6 +847,7 @@ async function showShareProduct(ctx, productCode) {
   const botLink = BOT_LINK_ENV || cfg.BotLink || "";
   const { items } = await loadCatalog();
   const p = items.find((x) => x.code === productCode);
+
   if (!p) {
     await safeEditOrSend(ctx, { text: "No encontré ese producto.", extra: backMenuKeyboard() });
     return;
@@ -799,13 +863,18 @@ async function showShareProduct(ctx, productCode) {
     : `${botLink}${botLink.includes("?") ? "&" : "?"}start=ref_${ref}__prod_${encodeURIComponent(p.code)}`;
 
   const moneda = cfg.Moneda || "ARS";
-  const priceLabel = p.unit === "kg" ? `${money(p.unitPrice, moneda)} (x kg)` : `${money(p.unitPrice, moneda)}`;
-  const text = `🧀 ${cfg.NegocioNombre || "Todo Queso"} — ${p.name} (${priceLabel})\nEntrá acá para verlo y comprar 👇`;
+  const priceTxt =
+    p.unitType === "PESO"
+      ? `${money((p.pricePerKg > 0 ? p.pricePerKg : p.price), moneda)} por kg`
+      : `${money(p.price, moneda)} por unidad`;
 
+  const text = `🧀 Promo en ${cfg.NegocioNombre || "Todo Queso"}: ${p.name}\n💰 ${priceTxt}\nTocá el link para ver y comprar 👇`;
   const links = buildShareLinks({ botLink: deepLink, text });
 
+  // si querés que mande imagen, Telegram no permite “adjuntar imagen” en link-sharing,
+  // pero acá al menos queda el mensaje listo con el link.
   await safeEditOrSend(ctx, {
-    text: `🔗 <b>Compartir producto</b>\n\nElegí dónde compartir 👇`,
+    text: `🔗 <b>Compartir producto</b>\n\n${p.name}\n\nElegí dónde compartir 👇`,
     extra: shareKeyboard(links),
   });
 }
@@ -815,12 +884,12 @@ async function showShareProduct(ctx, productCode) {
 ========================= */
 const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
 
+/* Start + referrals + deep product */
 bot.start(async (ctx) => {
   await ensureBaseSheets();
-
   const sess = getSess(ctx.chat.id);
-  const payload = (ctx.startPayload || "").trim();
 
+  const payload = (ctx.startPayload || "").trim();
   if (payload) {
     const mRef = payload.match(/ref_(\d+)/);
     if (mRef) sess.refBy = Number(mRef[1]);
@@ -833,67 +902,34 @@ bot.start(async (ctx) => {
   if (sess._jumpProd) {
     const code = sess._jumpProd;
     delete sess._jumpProd;
+
     const { items } = await loadCatalog();
     const p = items.find((x) => x.code === code);
     if (p) {
       await showProductCarousel(ctx, p.cat || "General");
-      const s2 = getSess(ctx.chat.id);
-      const idx = s2.productsInView.findIndex((x) => x.code === code);
+      const prods = getSess(ctx.chat.id).productsInView;
+      const idx = prods.findIndex((x) => x.code === code);
       if (idx >= 0) {
-        s2.productIndex = idx;
+        getSess(ctx.chat.id).productIndex = idx;
         const cfg = await loadConfig();
-        const prod = s2.productsInView[idx];
-        const caption = productCaption(cfg, prod, idx, s2.productsInView.length);
-        const photo = prod.img && prod.img.startsWith("http") ? prod.img : undefined;
-        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(prod) });
-        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(prod) });
+        const caption = productCaption(cfg, prods[idx], idx, prods.length);
+        const photo = prods[idx].img && prods[idx].img.startsWith("http") ? prods[idx].img : undefined;
+        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(prods[idx]) });
+        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(prods[idx]) });
       }
     }
   }
 });
 
-bot.hears(/^(menu|menú)$/i, showMenu);
-bot.hears(/^cat[aá]logo$/i, showCategories);
-bot.hears(/^sellos$/i, showSellos);
-bot.hears(/^ayuda$/i, showHelp);
+/* Quick text */
+bot.hears(/^(menu|menú)$/i, (ctx) => showMenu(ctx));
+bot.hears(/^cat[aá]logo$/i, (ctx) => showCategories(ctx));
+bot.hears(/^sellos$/i, (ctx) => showSellos(ctx));
+bot.hears(/^ayuda$/i, (ctx) => showHelp(ctx));
 
-// Captura texto cuando está editando peso/cantidad
-bot.on("text", async (ctx) => {
-  const sess = getSess(ctx.chat.id);
-  if (!sess._editingCode) return;
-
-  const item = sess.cart.find((x) => x.code === sess._editingCode);
-  if (!item) { sess._editingCode = null; return; }
-
-  const raw = String(ctx.message.text || "").trim().replace(",", ".");
-  const num = parseFloat(raw);
-
-  if (!Number.isFinite(num) || num <= 0) {
-    await ctx.reply("Ingresá un número válido (ej: 300 o 0.30).");
-    return;
-  }
-
-  if (item.unit === "kg") {
-    // > 10 => gramos, <= 10 => kg
-    const kg = num > 10 ? (num / 1000) : num;
-    item.qty = kg;
-    item.qtyText = num > 10 ? `${Math.round(num)} g` : `${kg} kg`;
-  } else {
-    // unidad
-    const q = Math.round(num);
-    if (!Number.isFinite(q) || q <= 0) {
-      await ctx.reply("Ingresá una cantidad válida (ej: 2).");
-      return;
-    }
-    item.qty = q;
-    item.qtyText = "";
-  }
-
-  sess._editingCode = null;
-  await showCart(ctx);
-});
-
-/* Inline actions */
+/* =========================
+   ACTIONS (MENÚ)
+========================= */
 bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
 bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx); });
@@ -906,6 +942,9 @@ bot.action(/^CAT_(.+)$/i, async (ctx) => {
   await showProductCarousel(ctx, cat);
 });
 
+/* =========================
+   CAROUSEL NAV
+========================= */
 bot.action("PROD_NEXT", async (ctx) => {
   await ctx.answerCbQuery();
   const cfg = await loadConfig();
@@ -915,9 +954,10 @@ bot.action("PROD_NEXT", async (ctx) => {
   sess.productIndex = (sess.productIndex + 1) % sess.productsInView.length;
   const p = sess.productsInView[sess.productIndex];
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(p) });
 });
 
 bot.action("PROD_PREV", async (ctx) => {
@@ -929,111 +969,263 @@ bot.action("PROD_PREV", async (ctx) => {
   sess.productIndex = (sess.productIndex - 1 + sess.productsInView.length) % sess.productsInView.length;
   const p = sess.productsInView[sess.productIndex];
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(p) });
 });
 
-bot.action(/^ADD_(.+)$/i, async (ctx) => {
-  await ctx.answerCbQuery("Agregado ✅");
+/* =========================
+   WANT THIS (pide peso/unidades)
+========================= */
+bot.action(/^WANT_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
+  ensureCartValid(sess);
+
   const code = ctx.match[1];
   const p = sess.productsInView.find((x) => x.code === code);
   if (!p) return;
 
-  adjustCart(sess, p);
+  // set awaiting input
+  const unitType = p.unitType === "PESO" ? "PESO" : "UNIDAD";
+  sess.awaiting = { type: unitType, productCode: p.code };
+  sess._awaitProductName = p.name;
 
-  // Si es kg, pedimos gramos ya
-  if (p.unit === "kg") {
-    sess._editingCode = p.code;
+  if (unitType === "PESO") {
     await safeEditOrSend(ctx, {
-      text: `⚖️ <b>${p.name}</b>\n\nIngresá el peso en gramos (ej: 250) o en kg (ej: 0.25).`,
-      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "GO_CART")]]),
+      text: `⚖️ <b>${p.name}</b>\n\nIngresá el peso en gramos (ej: <b>250</b>) o en kg (ej: <b>0.25</b>).`,
+      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "CANCEL_AWAIT")]]),
     });
-    return;
+  } else {
+    await safeEditOrSend(ctx, {
+      text: `🧾 <b>${p.name}</b>\n\nIngresá la cantidad de unidades (ej: <b>2</b>).`,
+      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "CANCEL_AWAIT")]]),
+    });
   }
 });
 
+bot.action("CANCEL_AWAIT", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.awaiting = null;
+  await showCart(ctx);
+});
+
+/* =========================
+   CART ACTIONS
+========================= */
 bot.action("GO_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
 
 bot.action("CART_CLEAR", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
   sess.cart = [];
-  sess._editingCode = null;
+  sess.cartExpiresAt = 0;
+  sess.checkout = null;
   await showCart(ctx);
 });
 
 bot.action("CART_EDIT", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
-  if (!sess.cart.length) return;
+  if (!sess.cart.length) return showCart(ctx);
 
-  // Edita el último item (simple y rápido)
+  // edita el último item (simple y rápido)
   const last = sess.cart[sess.cart.length - 1];
-  sess._editingCode = last.code;
+  sess.awaiting = { type: last.unitType, productCode: last.code, editMode: true };
 
-  if (last.unit === "kg") {
-    await safeEditOrSend(ctx, {
-      text: `⚖️ <b>${last.name}</b>\n\nIngresá el peso en gramos (ej: 250) o en kg (ej: 0.25).`,
-      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "GO_CART")]]),
-    });
-  } else {
-    await safeEditOrSend(ctx, {
-      text: `🔢 <b>${last.name}</b>\n\nIngresá cantidad (ej: 2).`,
-      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "GO_CART")]]),
-    });
-  }
+  const prompt =
+    last.unitType === "PESO"
+      ? `⚖️ <b>${last.name}</b>\n\nIngresá el nuevo peso en gramos (ej: <b>250</b>) o en kg (ej: <b>0.25</b>).`
+      : `🧾 <b>${last.name}</b>\n\nIngresá la nueva cantidad de unidades (ej: <b>2</b>).`;
+
+  await safeEditOrSend(ctx, {
+    text: prompt,
+    extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "CANCEL_AWAIT")]]),
+  });
 });
 
-// ✅ CLAVE: Botón "Finalizar compra" => recién acá pregunta entrega
-bot.action("GO_CHECKOUT", async (ctx) => {
+/* =========================
+   CHECKOUT (Finalizar compra -> Entrega -> Pago -> Confirmar/Cancelar)
+========================= */
+bot.action("CHK_FINAL", async (ctx) => {
   await ctx.answerCbQuery();
-  await askDelivery(ctx);
-});
-
-bot.action("ASK_DELIVERY", async (ctx) => {
-  await ctx.answerCbQuery();
-  await askDelivery(ctx);
+  const sess = getSess(ctx.chat.id);
+  const ok = ensureCartValid(sess);
+  if (!ok || !sess.cart.length) return showCart(ctx);
+  await showDelivery(ctx);
 });
 
 bot.action("DELIVERY_ENVIO", async (ctx) => {
   await ctx.answerCbQuery();
-  getSess(ctx.chat.id)._entrega = "ENVIO";
+  const sess = getSess(ctx.chat.id);
+  sess.checkout = { entregaTipo: "ENVIO", pagoTipo: null, preview: null };
   await showPayment(ctx, "ENVIO");
 });
 
 bot.action("DELIVERY_RETIRO", async (ctx) => {
   await ctx.answerCbQuery();
-  getSess(ctx.chat.id)._entrega = "RETIRO";
+  const sess = getSess(ctx.chat.id);
+  sess.checkout = { entregaTipo: "RETIRO", pagoTipo: null, preview: null };
   await showPayment(ctx, "RETIRO");
 });
 
 bot.action("DELIVERY_EXPRESS", async (ctx) => {
   await ctx.answerCbQuery();
-  getSess(ctx.chat.id)._entrega = "EXPRESS";
+  const sess = getSess(ctx.chat.id);
+  sess.checkout = { entregaTipo: "EXPRESS", pagoTipo: null, preview: null };
   await showPayment(ctx, "EXPRESS");
 });
 
 bot.action(/^PAY_(.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
-  const pagoTipo = ctx.match[1] || "TRANSFERENCIA";
-  const entregaTipo = sess._entrega || "RETIRO";
-  await finalizeOrder(ctx, { entregaTipo, pagoTipo });
+  if (!sess.checkout?.entregaTipo) return showCart(ctx);
+
+  const pagoTipo = (ctx.match[1] || "TRANSFERENCIA").toUpperCase();
+  sess.checkout.pagoTipo = pagoTipo;
+
+  const cfg = await loadConfig();
+  const { text, total } = buildCheckoutTicket(cfg, sess, sess.checkout.entregaTipo, pagoTipo);
+  sess.checkout.preview = { total };
+
+  // ÚLTIMO PASO PROFESIONAL
+  await safeEditOrSend(ctx, {
+    text,
+    extra: Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Confirmar compra", "CONFIRM_BUY")],
+      [Markup.button.callback("❌ Cancelar compra", "CANCEL_BUY")],
+      [Markup.button.callback("🏠 Menú", "GO_MENU")],
+    ]),
+  });
 });
 
 bot.action("PAY_EFECTIVO", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
-  const entregaTipo = sess._entrega || "RETIRO";
-  await finalizeOrder(ctx, { entregaTipo, pagoTipo: "EFECTIVO" });
+  if (!sess.checkout?.entregaTipo) return showCart(ctx);
+
+  sess.checkout.pagoTipo = "EFECTIVO";
+
+  const cfg = await loadConfig();
+  const { text, total } = buildCheckoutTicket(cfg, sess, sess.checkout.entregaTipo, "EFECTIVO");
+  sess.checkout.preview = { total };
+
+  await safeEditOrSend(ctx, {
+    text,
+    extra: Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Confirmar compra", "CONFIRM_BUY")],
+      [Markup.button.callback("❌ Cancelar compra", "CANCEL_BUY")],
+      [Markup.button.callback("🏠 Menú", "GO_MENU")],
+    ]),
+  });
 });
 
+bot.action("CANCEL_BUY", async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  // mensaje “pena desaprovechar” configurable
+  const pena = (cfg.TextoCancelacionSugerente || "😅 ¡Qué pena! Estabas por aprovechar una oferta. Si querés, mirá otras promos o consultá con un vendedor.").trim();
+
+  sess.checkout = null;
+  await safeEditOrSend(ctx, {
+    text: `${pena}\n\nVolvemos al carrito 👇`,
+    extra: cartKeyboard(sess.cart),
+  });
+});
+
+bot.action("CONFIRM_BUY", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  const ok = ensureCartValid(sess);
+  if (!ok) return showCart(ctx);
+  if (!sess.checkout?.entregaTipo || !sess.checkout?.pagoTipo) return showCart(ctx);
+
+  const totalFinal = Number(sess.checkout.preview?.total || 0);
+  await finalizeOrderPersist(ctx, {
+    entregaTipo: sess.checkout.entregaTipo,
+    pagoTipo: sess.checkout.pagoTipo,
+    totalFinal,
+  });
+});
+
+/* =========================
+   SHARE PRODUCT
+========================= */
 bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
   const code = ctx.match[1];
   await showShareProduct(ctx, code);
+});
+
+/* =========================
+   TEXT INPUT HANDLER (peso/unidades)
+========================= */
+bot.on("text", async (ctx) => {
+  const sess = getSess(ctx.chat.id);
+  if (!sess.awaiting) return;
+
+  const cfg = await loadConfig();
+  const { items } = await loadCatalog();
+  const p = items.find((x) => x.code === sess.awaiting.productCode);
+  if (!p) {
+    sess.awaiting = null;
+    return showCart(ctx);
+  }
+
+  const input = String(ctx.message.text || "").trim().replace(",", ".");
+  const n = Number(input);
+
+  if (!Number.isFinite(n) || n <= 0) {
+    const msg = sess.awaiting.type === "PESO"
+      ? "❗ Ingresá un número válido. Ej: 250 o 0.25"
+      : "❗ Ingresá un número válido. Ej: 2";
+    await ctx.reply(msg);
+    return;
+  }
+
+  // si edita, reemplaza último item del mismo producto
+  const isEdit = !!sess.awaiting.editMode;
+
+  if (sess.awaiting.type === "PESO") {
+    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price;
+    const { grams, subtotal } = calcWeightSubtotal(cfg, perKg, n);
+    if (!grams || !subtotal) {
+      await ctx.reply("❗ Ingresá un peso válido. Ej: 250 o 0.25");
+      return;
+    }
+
+    if (isEdit) {
+      const idx = sess.cart.findIndex((x) => x.code === p.code);
+      if (idx >= 0) {
+        sess.cart[idx] = { code: p.code, name: p.name, unitType: "PESO", price: p.price, pricePerKg: perKg, qtyUnits: 0, grams, subtotal };
+      }
+    } else {
+      sess.cart.push({ code: p.code, name: p.name, unitType: "PESO", price: p.price, pricePerKg: perKg, qtyUnits: 0, grams, subtotal });
+    }
+  } else {
+    const qtyUnits = Math.round(n);
+    const subtotal = (p.price || 0) * qtyUnits;
+
+    if (isEdit) {
+      const idx = sess.cart.findIndex((x) => x.code === p.code);
+      if (idx >= 0) {
+        sess.cart[idx] = { code: p.code, name: p.name, unitType: "UNIDAD", price: p.price, pricePerKg: 0, qtyUnits, grams: 0, subtotal };
+      }
+    } else {
+      sess.cart.push({ code: p.code, name: p.name, unitType: "UNIDAD", price: p.price, pricePerKg: 0, qtyUnits, grams: 0, subtotal });
+    }
+  }
+
+  touchCart(sess);
+  sess.awaiting = null;
+
+  // borramos el mensaje que el usuario envió (opcional: Telegram no deja borrar siempre)
+  // y mostramos carrito
+  await showCart(ctx);
 });
 
 /* =========================
@@ -1043,22 +1235,20 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => res.status(200).send("EzerBot OK ✅"));
-app.get("/health", (req, res) => res.status(200).json({ ok: true }));
 
 const PORT = process.env.PORT || 10000;
 
 async function start() {
   await ensureBaseSheets();
 
-  // Webhook si hay PUBLIC_URL, si no long polling
   if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
     const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
     await bot.telegram.setWebhook(hook);
     app.use(bot.webhookCallback("/telegram"));
-    app.listen(PORT, () => console.log(`✅ Webhook: ${hook} | Puerto ${PORT}`));
+    app.listen(PORT, () => console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`));
   } else {
     bot.launch();
-    app.listen(PORT, () => console.log(`✅ Long-polling | Puerto ${PORT}`));
+    app.listen(PORT, () => console.log(`✅ Bot en long-polling | Puerto ${PORT}`));
   }
 }
 
