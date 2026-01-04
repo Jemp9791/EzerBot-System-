@@ -3,32 +3,29 @@ import { Telegraf, Markup } from "telegraf";
 import { google } from "googleapis";
 
 /* =========================
-   ENV (NO CAMBIO NOMBRES)
+   ENV (NO CAMBIAR NOMBRES)
 ========================= */
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const BOT_TOKEN = process.env.BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN; // fallback sin romperte
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
-const PUBLIC_URL = process.env.PUBLIC_URL || "";
-const BOT_LINK_ENV = process.env.BOT_LINK || "";
+const PUBLIC_URL = process.env.PUBLIC_URL || ""; // opcional
+const PORT = process.env.PORT || 10000;
 
-if (!TELEGRAM_BOT_TOKEN) throw new Error("Falta TELEGRAM_BOT_TOKEN");
-if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
+if (!BOT_TOKEN) throw new Error("Falta ENV BOT_TOKEN");
+if (!GOOGLE_SHEET_ID) throw new Error("Falta ENV GOOGLE_SHEET_ID");
+if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta ENV GOOGLE_SERVICE_ACCOUNT_B64");
 
 /* =========================
    GOOGLE AUTH
 ========================= */
 function decodeServiceAccountB64(b64) {
   const raw = Buffer.from(b64, "base64").toString("utf8").trim();
-  let obj;
   try {
-    obj = JSON.parse(raw);
+    return JSON.parse(raw);
   } catch {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON.");
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON válido.");
   }
-  return obj;
 }
-
 const sa = decodeServiceAccountB64(GOOGLE_SERVICE_ACCOUNT_B64);
 
 const auth = new google.auth.JWT({
@@ -36,7 +33,6 @@ const auth = new google.auth.JWT({
   key: sa.private_key,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
-
 const sheets = google.sheets({ version: "v4", auth });
 
 /* =========================
@@ -91,7 +87,7 @@ async function ensureSheet(sheetName, headers) {
 }
 
 /* =========================
-   CONFIG
+   UTIL
 ========================= */
 function kvFromRows(rows) {
   const out = {};
@@ -117,8 +113,41 @@ function money(n, moneda = "ARS") {
   return `${moneda} ${num.toLocaleString("es-AR")}`;
 }
 
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function splitVariants(str) {
+  const parts = String(str || "")
+    .split("||")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return parts;
+}
+
+/** template simple {VAR} */
+function applyTpl(text, vars = {}) {
+  let out = String(text || "");
+  for (const [k, v] of Object.entries(vars)) {
+    out = out.replaceAll(`{${k}}`, String(v ?? ""));
+  }
+  return out;
+}
+
+/* =========================
+   CONFIG (TUS KEYS)
+========================= */
+async function loadConfig() {
+  const rows = await getSheetValues(`Config!A:B`);
+  return kvFromRows(rows);
+}
+
 /* =========================
    CATALOGO
+   Recomendación: en hoja Catalogo tener:
+   - codigo, nombre, precio, categoria, imagenURL, descripcion
+   - unidad (ej: "UNIDAD" o "PESO_KG" o "PESO_100G" o "por peso")
+   - precioporkg (opcional si querés exacto)
 ========================= */
 function normalizeHeaders(headerRow) {
   const map = {};
@@ -127,11 +156,12 @@ function normalizeHeaders(headerRow) {
       .trim()
       .toLowerCase()
       .replace(/\s+/g, "")
-      .replace(/[áàäâ]/g, "a")
-      .replace(/[éèëê]/g, "e")
-      .replace(/[íìïî]/g, "i")
-      .replace(/[óòöô]/g, "o")
-      .replace(/[úùüû]/g, "u")
+      .replace(/á/g, "a")
+      .replace(/é/g, "e")
+      .replace(/í/g, "i")
+      .replace(/ó/g, "o")
+      .replace(/ú/g, "u")
+      .replace(/ü/g, "u")
       .replace(/ñ/g, "n");
     if (key) map[key] = i;
   });
@@ -146,56 +176,61 @@ function pick(row, hmap, keys, def = "") {
   return def;
 }
 
-function normUnitType(v) {
-  const s = String(v || "").trim().toLowerCase();
-  if (!s) return ""; // desconocido
-  if (s.includes("peso") || s.includes("gram") || s.includes("kg")) return "PESO";
-  if (s.includes("unidad") || s.includes("unid") || s.includes("u.")) return "UNIDAD";
-  return s.toUpperCase();
+function detectUnitType(uRaw) {
+  const u = String(uRaw || "").trim().toUpperCase();
+  if (!u) return "UNIDAD";
+  if (u.includes("PESO_100G")) return "PESO_100G";
+  if (u.includes("PESO_KG")) return "PESO_KG";
+  if (u.includes("PESO")) return "PESO_KG"; // default seguro
+  if (u.includes("GRAM")) return "PESO_KG";
+  if (u.includes("KG")) return "PESO_KG";
+  return "UNIDAD";
+}
+
+async function loadCatalog() {
+  const rows = await getSheetValues(`Catalogo!A1:Z`);
+  if (!rows.length) return { items: [], headers: {} };
+  const hmap = normalizeHeaders(rows[0]);
+  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
+
+  const items = data.map((r, i) => {
+    let code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim();
+    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
+    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
+    const cat = String(pick(r, hmap, ["categoria", "categoria", "rubro"], "General")).trim() || "General";
+    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
+    const desc = String(pick(r, hmap, ["descripcion", "descripcion", "detalle"], "")).trim();
+    const unidadRaw = pick(r, hmap, ["unidad", "tipounidad", "tipo", "unidadventa"], "");
+    const unitType = detectUnitType(unidadRaw);
+
+    // precio por kg:
+    // - si hay columna "precioporkg" -> úsala
+    // - si no, si PESO_100G -> precio*10
+    // - si no, PESO_KG -> precio (asumimos precio por kg)
+    const pricePerKgCol = parseNumber(pick(r, hmap, ["precioporkg", "precioxkg", "precio_kg"], 0), 0);
+    let pricePerKg = 0;
+    if (pricePerKgCol > 0) pricePerKg = pricePerKgCol;
+    else {
+      if (unitType === "PESO_100G") pricePerKg = price * 10;
+      else if (unitType === "PESO_KG") pricePerKg = price;
+      else pricePerKg = 0;
+    }
+
+    if (!code) code = `P${i + 1}`;
+    return { code, name, price, pricePerKg, cat, img, desc, unitType, unidadRaw: String(unidadRaw || "") };
+  });
+
+  return { items, headers: hmap };
+}
+
+function categoriesFromItems(items) {
+  const set = new Set();
+  for (const it of items) set.add(it.cat || "General");
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
 }
 
 /* =========================
-   IN-MEMORY STATE (chat limpio)
-========================= */
-const SESS = new Map(); // chatId -> state
-const CART_TTL_MS = 60 * 60 * 1000; // 1 hora
-
-function getSess(chatId) {
-  if (!SESS.has(chatId)) {
-    SESS.set(chatId, {
-      mode: "MENU",
-      category: null,
-      productIndex: 0,
-      productsInView: [],
-      cart: [], // {code,name,unitType,price,pricePerKg, qtyUnits, grams, subtotal}
-      cartExpiresAt: 0,
-      refBy: null,
-      lastMessageId: null,
-      awaiting: null, // {type:'PESO'|'UNIDAD', productCode}
-      checkout: null, // {entregaTipo, pagoTipo, pending:false}
-    });
-  }
-  return SESS.get(chatId);
-}
-
-function ensureCartValid(sess) {
-  const now = Date.now();
-  if (sess.cartExpiresAt && now > sess.cartExpiresAt) {
-    sess.cart = [];
-    sess.cartExpiresAt = 0;
-    sess.checkout = null;
-    sess.awaiting = null;
-    return false;
-  }
-  return true;
-}
-
-function touchCart(sess) {
-  sess.cartExpiresAt = Date.now() + CART_TTL_MS;
-}
-
-/* =========================
-   CLIENTES + PEDIDOS
+   SHEETS BASE
 ========================= */
 const CLIENTES_SHEET = "Clientes";
 const PEDIDOS_SHEET = "Pedidos";
@@ -223,6 +258,7 @@ const PEDIDOS_HEADERS = [
   "PagoTipo",
   "Estado",
   "RefBy",
+  "CanalComprobante",
 ];
 
 async function ensureBaseSheets() {
@@ -231,17 +267,17 @@ async function ensureBaseSheets() {
 }
 
 async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
-  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:Z`);
+  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
   const idx = rows.findIndex((r) => String(r[0] || "") === String(chatId));
+
   if (idx === -1) {
-    const now = new Date().toISOString();
     await appendRow(CLIENTES_SHEET, [
       String(chatId),
       nombre || "",
       usuario || "",
       addSellos,
       addTotal,
-      now,
+      nowISO(),
       refBy || "",
       0,
     ]);
@@ -255,7 +291,6 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
 
   const newSellos = currentSellos + addSellos;
   const newTotal = currentTotal + addTotal;
-  const now = new Date().toISOString();
 
   const rowNumber = idx + 2;
   await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
@@ -264,7 +299,7 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
     usuario || row[2] || "",
     newSellos,
     newTotal,
-    now,
+    nowISO(),
     row[6] || refBy || "",
     currentRefGanados,
   ]]);
@@ -288,20 +323,70 @@ async function addSelloReferido(chatIdReferente) {
     row[2] || "",
     currentSellos + 1,
     row[4] || 0,
-    new Date().toISOString(),
+    nowISO(),
     row[6] || "",
     currentRefGanados + 1,
   ]]);
 }
 
 /* =========================
-   UI HELPERS (editar mensaje)
+   STATE (chat limpio)
+========================= */
+const SESS = new Map(); // chatId -> state
+
+function getSess(chatId) {
+  if (!SESS.has(chatId)) {
+    SESS.set(chatId, {
+      mode: "MENU",
+      category: null,
+      productIndex: 0,
+      productsInView: [],
+      cart: [], // items
+      refBy: null,
+      lastMessageId: null,
+
+      waitingQty: false,
+      waitingForCode: null,
+      waitingAction: null, // "ADD" | "BUY"
+      entregaTipo: null,
+      pagoTipo: null,
+
+      pendingConfirm: null, // { entregaTipo, pagoTipo, total, itemsText, sellosGanados }
+      _jumpProd: null,
+    });
+  }
+  return SESS.get(chatId);
+}
+
+function cartTTLms() {
+  return 60 * 60 * 1000; // 1 hora
+}
+function touchCart(sess) {
+  sess.cartUpdatedAt = Date.now();
+}
+function isCartExpired(sess) {
+  if (!sess.cartUpdatedAt) return false;
+  return Date.now() - sess.cartUpdatedAt > cartTTLms();
+}
+function clearCart(sess) {
+  sess.cart = [];
+  sess.entregaTipo = null;
+  sess.pagoTipo = null;
+  sess.pendingConfirm = null;
+  sess.waitingQty = false;
+  sess.waitingForCode = null;
+  sess.waitingAction = null;
+  touchCart(sess);
+}
+
+/* =========================
+   UI: editar o enviar 1 solo mensaje
 ========================= */
 async function safeEditOrSend(ctx, payload) {
   const chatId = ctx.chat?.id;
   const sess = chatId ? getSess(chatId) : null;
-  const canEdit = !!(sess?.lastMessageId);
 
+  const canEdit = !!(sess?.lastMessageId);
   try {
     if (canEdit) {
       if (payload.photo) {
@@ -330,7 +415,7 @@ async function safeEditOrSend(ctx, payload) {
       }
     }
   } catch {
-    // fallback a nuevo
+    // si falla, manda nuevo
   }
 
   let msg;
@@ -350,142 +435,95 @@ async function safeEditOrSend(ctx, payload) {
 }
 
 /* =========================
-   MENUS / KEYBOARDS
+   MENUS
 ========================= */
-function mainMenuKeyboard() {
-  return Markup.inlineKeyboard([
+function mainMenuKeyboard(cfg) {
+  const rows = [
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
     [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
-    [Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")],
-  ]);
+  ];
+  if (parseYes(cfg.CompartirBotActivo || "SI")) rows.push([Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")]);
+  return Markup.inlineKeyboard(rows);
 }
 
 function backMenuKeyboard() {
   return Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]);
 }
 
-/* ========= PRODUCT KEYBOARD (ORDEN EXACTO QUE PEDISTE) =========
-   - Fila 1: prev / next
-   - Fila 2: Quiero éste / Compartir
-   - Fila 3: Menú
-   (Agregar se hace desde "Quiero éste" (compra rápida) o desde carrito/categoría)
-*/
-function productKeyboardOrdered(p) {
+/* =========================
+   PRODUCT UI
+========================= */
+function productCaption(cfg, p, index, total) {
+  const moneda = cfg.Moneda || "ARS";
+  const showPrice = parseYes(cfg.CatalogoMostrarPrecios || "SI");
+
+  const unitLine =
+    p.unitType === "UNIDAD"
+      ? "Unidad: por unidad"
+      : "Unidad: por peso (gramos/kg)";
+
+  const lines = [];
+  lines.push(`<b>${p.name}</b>`);
+  if (showPrice) {
+    if (p.unitType === "UNIDAD") lines.push(`💰 <b>${money(p.price, moneda)}</b>`);
+    else {
+      const kgPrice = p.pricePerKg > 0 ? p.pricePerKg : p.price;
+      lines.push(`💰 <b>${money(kgPrice, moneda)}</b> <i>(por kg)</i>`);
+    }
+  }
+  lines.push(`📦 ${unitLine}`);
+  if (p.desc) lines.push(`\n${p.desc}`);
+  lines.push(`\n📌 ${p.cat}`);
+  lines.push(`\n<code>${index + 1} / ${total}</code>`);
+  return lines.join("\n");
+}
+
+/** Orden de botones como pediste */
+function productKeyboard(p) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
-    [Markup.button.callback("⚡ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    [Markup.button.callback("🛒 Agregar", `ASK_ADD_${p.code}`), Markup.button.callback("✅ Quiero éste", `ASK_BUY_${p.code}`)],
+    [Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
     [Markup.button.callback("🏠 Menú", "GO_MENU")],
   ]);
 }
 
 /* =========================
-   LOAD CONFIG + CATALOG
-========================= */
-async function loadConfig() {
-  const rows = await getSheetValues(`Config!A:B`);
-  return kvFromRows(rows);
-}
-
-async function loadCatalog() {
-  const rows = await getSheetValues(`Catalogo!A1:Z`);
-  if (!rows.length) return { items: [], headers: {} };
-
-  const headerRow = rows[0];
-  const hmap = normalizeHeaders(headerRow);
-  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
-
-  const items = data.map((r, i) => {
-    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
-    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
-    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
-    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "precioxkg", "precio_kg"], ""), 0);
-    const cat = String(pick(r, hmap, ["categoria", "categoria", "rubro"], "General")).trim() || "General";
-    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
-    const desc = String(pick(r, hmap, ["descripcion", "descripcion", "detalle"], "")).trim();
-    const unitType = normUnitType(pick(r, hmap, ["unidad", "unidadtipo", "tipo", "venta"], "")); // PESO / UNIDAD
-    return { code, name, price, pricePerKg, cat, img, desc, unitType };
-  });
-
-  return { items, headers: hmap };
-}
-
-function categoriesFromItems(items) {
-  const set = new Set();
-  for (const it of items) set.add(it.cat || "General");
-  return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
-}
-
-function productCaption(cfg, p, index, total) {
-  const moneda = cfg.Moneda || "ARS";
-  const showPrice = parseYes(cfg.CatalogoMostrarPrecios || "SI");
-  const lines = [];
-  lines.push(`<b>${p.name}</b>`);
-
-  if (showPrice) {
-    if (p.unitType === "PESO") {
-      const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price; // default: precio = por kg
-      lines.push(`💰 <b>${money(perKg, moneda)}</b> <i>(por kg)</i>`);
-      lines.push(`📦 Unidad: <b>por peso</b> (gramos/kg)`);
-    } else if (p.unitType === "UNIDAD") {
-      lines.push(`💰 <b>${money(p.price, moneda)}</b> <i>(por unidad)</i>`);
-      lines.push(`📦 Unidad: <b>por unidad</b>`);
-    } else {
-      lines.push(`💰 <b>${money(p.price, moneda)}</b>`);
-    }
-  }
-
-  if (p.desc) lines.push(`\n${p.desc}`);
-  lines.push(`\n📌 ${p.cat}`);
-  lines.push(`\n<code>${index + 1}/${total}</code>`);
-  return lines.join("\n");
-}
-
-/* =========================
    CART + CHECKOUT
 ========================= */
-function calcWeightSubtotal(cfg, perKg, gramsOrKg) {
-  // Si el usuario manda 0.25 => kg | si manda 250 => gramos
-  const val = Number(gramsOrKg);
-  if (!Number.isFinite(val) || val <= 0) return { grams: 0, subtotal: 0 };
-
-  let grams = 0;
-  if (val <= 10) grams = Math.round(val * 1000); // kg
-  else grams = Math.round(val); // gramos
-
-  const kg = grams / 1000;
-  const subtotal = perKg * kg;
-  return { grams, subtotal };
-}
-
-function cartText(cfg, cart) {
+function cartText(cfg, sess) {
   const moneda = cfg.Moneda || "ARS";
-  if (!cart.length) return `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\n\nUsá <b>Catálogo</b> para elegir un producto.`;
+  if (isCartExpired(sess)) {
+    clearCart(sess);
+  }
+
+  if (!sess.cart.length) {
+    return `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\n\nVolvé al <b>Catálogo</b> para elegir productos.`;
+  }
 
   let total = 0;
   const lines = [];
   lines.push(`🛒 <b>Carrito</b>\n`);
 
-  cart.forEach((it, i) => {
+  sess.cart.forEach((it, i) => {
     total += it.subtotal;
     const qtyLine =
-      it.unitType === "PESO"
-        ? `${it.grams} g`
-        : `${it.qtyUnits} u`;
+      it.unitType === "UNIDAD"
+        ? `${it.qty} u`
+        : `${it.grams} g`;
     lines.push(`${i + 1}) <b>${it.name}</b>\n   ${qtyLine} — ${money(it.subtotal, moneda)}`);
   });
 
   lines.push(`\n<b>Total:</b> ${money(total, moneda)}`);
-  lines.push(`\n✍️ Si querés cambiar cantidad/peso, tocá “Editar item”.`);
+  lines.push(`\n✍️ Si querés cambiar cantidad/peso, tocá <b>Editar item</b>.`);
   return lines.join("\n");
 }
 
-function cartKeyboard(cart) {
+function cartKeyboard(sess) {
   const rows = [];
-  if (cart.length) {
-    rows.push([Markup.button.callback("✍️ Editar item", "CART_EDIT")]);
-    rows.push([Markup.button.callback("🗑️ Vaciar", "CART_CLEAR")]);
-    // ✅ ACÁ EL CAMBIO CLAVE: antes decía Entrega, ahora Finalizar compra
-    rows.push([Markup.button.callback("✅ Finalizar compra", "CHK_FINAL")]);
+  if (sess.cart.length) {
+    rows.push([Markup.button.callback("✍️ Editar item", "CART_EDIT_LAST"), Markup.button.callback("🗑️ Vaciar", "CART_CLEAR")]);
+    rows.push([Markup.button.callback("✅ Finalizar compra", "CHK_START")]);
   }
   rows.push([Markup.button.callback("🧀 Seguir en Catálogo", "MENU_CATALOGO")]);
   rows.push([Markup.button.callback("🏠 Menú", "GO_MENU")]);
@@ -494,36 +532,141 @@ function cartKeyboard(cart) {
 
 function deliveryKeyboard(cfg) {
   const rows = [];
-  if (parseYes(cfg.UsaEnvioDomicilio || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
+  if (parseYes(cfg["UsaEnvíoDomicilio"] || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
   if (parseYes(cfg.UsaRetiroLocal || "SI")) rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
-  if (parseYes(cfg.EnvioExpress || "SI")) rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
+
+  // Express lo mostramos siempre (sin key nueva) porque a vos te gusta
+  rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
+
   rows.push([Markup.button.callback("⬅️ Volver", "GO_CART")]);
   return Markup.inlineKeyboard(rows);
 }
 
 function payKeyboard(cfg) {
   const rows = [];
-  if (parseYes(cfg.PermitePagoOnline || "SI")) {
-    const tipo = (cfg.TipoPagoOnline || "TRANSFERENCIA").toUpperCase();
+  if (parseYes(cfg.PermitirPagoOnline || "SI")) {
+    const tipo = String(cfg.TipoPagoOnline || "TRANSFERENCIA").toUpperCase();
     rows.push([Markup.button.callback(`💳 ${tipo}`, `PAY_${tipo}`)]);
   }
   rows.push([Markup.button.callback("💵 Efectivo", "PAY_EFECTIVO")]);
-  rows.push([Markup.button.callback("⬅️ Volver", "CHK_FINAL")]);
+  rows.push([Markup.button.callback("⬅️ Volver", "CHK_START")]);
   return Markup.inlineKeyboard(rows);
 }
 
-function buildOrderId() {
+function buildOrderId(prefix = "TQ") {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return `${prefix}-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
+function computeTotal(cfg, sess, entregaTipo) {
+  const moneda = cfg.Moneda || "ARS";
+  let total = sess.cart.reduce((a, it) => a + (Number(it.subtotal) || 0), 0);
+
+  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total += costoEnvio;
+
+  return { total, moneda, costoEnvio };
+}
+
+function buildItemsText(cfg, sess) {
+  const moneda = cfg.Moneda || "ARS";
+  return sess.cart
+    .map((it) => {
+      const qty = it.unitType === "UNIDAD" ? `${it.qty}u` : `${it.grams}g`;
+      return `${it.name} (${qty}) ${money(it.subtotal, moneda)}`;
+    })
+    .join(" | ");
+}
+
+function buildTicketText(cfg, ctx, sess, entregaTipo, pagoTipo) {
+  const nombre = `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
+  const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
+  const { total, moneda, costoEnvio } = computeTotal(cfg, sess, entregaTipo);
+
+  const lines = [];
+  lines.push(`🧾 <b>Resumen final</b>`);
+  lines.push(`\n👤 <b>Cliente:</b> ${nombre}${usuario ? ` (${usuario})` : ""}`);
+  lines.push(`\n🛍️ <b>Pedido:</b>`);
+  sess.cart.forEach((it) => {
+    const qty = it.unitType === "UNIDAD" ? `${it.qty} u` : `${it.grams} g`;
+    lines.push(`• ${it.name} — ${qty} — ${money(it.subtotal, moneda)}`);
+  });
+
+  if (entregaTipo === "ENVIO") lines.push(`\n🚚 <b>Entrega:</b> Envío a domicilio`);
+  if (entregaTipo === "EXPRESS") lines.push(`\n⚡ <b>Entrega:</b> Envío express`);
+  if (entregaTipo === "RETIRO") lines.push(`\n🏪 <b>Entrega:</b> Retiro en el local`);
+
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
+    if (costoEnvio > 0) lines.push(`\n📦 <b>Costo envío:</b> ${money(costoEnvio, moneda)}`);
+  }
+
+  lines.push(`\n💳 <b>Pago:</b> ${pagoTipo}`);
+  lines.push(`\n<b>Total:</b> ${money(total, moneda)}`);
+
+  return { text: lines.join("\n"), total };
+}
+
+function confirmKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Confirmar pedido", "CONFIRM_ORDER")],
+    [Markup.button.callback("❌ Cancelar compra", "CANCEL_ORDER")],
+    [Markup.button.callback("🏠 Menú", "GO_MENU")],
+  ]);
+}
+
+/* =========================
+   SHARE
+========================= */
+function buildShareLinks({ botLink, text }) {
+  const url = encodeURIComponent(botLink);
+  const t = encodeURIComponent(text);
+  return {
+    wa: `https://wa.me/?text=${t}%0A${url}`,
+    tg: `https://t.me/share/url?url=${url}&text=${t}`,
+  };
+}
+
+function shareKeyboard(links) {
+  return Markup.inlineKeyboard([
+    [Markup.button.url("📲 WhatsApp", links.wa)],
+    [Markup.button.url("✈️ Telegram", links.tg)],
+    [Markup.button.callback("🏠 Menú", "GO_MENU")],
+  ]);
+}
+
+/* =========================
+   SELL0S
+========================= */
+function sellosText(cfg, sellos) {
+  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
+  const moneda = cfg.Moneda || "ARS";
+
+  const lines = [];
+  lines.push(`🎟️ <b>Sellos</b>\n`);
+  lines.push(`Tenés <b>${sellos}</b> sellos acumulados.`);
+  lines.push(`\n📌 Cada <b>${money(montoPorSello, moneda)}</b> = <b>1 sello</b>.`);
+
+  if (parseYes(cfg.UsaNiveles || "SI")) {
+    const niveles = String(cfg.SellosPorNivel || "").trim();
+    const beneficios = String(cfg.BeneficiosPorNivel || "").trim();
+    if (niveles) lines.push(`\n🏅 <b>Niveles</b>\n${niveles}`);
+    if (beneficios) lines.push(`\n🎁 <b>Beneficios</b>\n${beneficios}`);
+  }
+
+  return lines.join("\n");
+}
+
+/* =========================
+   FLOWS
+========================= */
 async function showMenu(ctx) {
   const cfg = await loadConfig();
   const nombre = cfg.NegocioNombre || "Todo Queso";
   const dire = cfg.NegocioDireccion || "";
   const hora = cfg.NegocioHorario || "";
   const estado = cfg.Estado || "";
+  const desc = cfg.Descripcion || "";
 
   const header = [];
   header.push(`🏠 <b>${nombre}</b>`);
@@ -531,13 +674,14 @@ async function showMenu(ctx) {
   if (dire) header.push(`📍 ${dire}`);
   if (hora) header.push(`🕒 ${hora}`);
 
-  const desc = cfg.Descripcion || "";
-  const txt = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
-
-  await safeEditOrSend(ctx, { text: txt, extra: mainMenuKeyboard() });
+  await safeEditOrSend(ctx, {
+    text: `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`,
+    extra: mainMenuKeyboard(cfg),
+  });
 }
 
 async function showCategories(ctx) {
+  const cfg = await loadConfig();
   const { items } = await loadCatalog();
   const cats = categoriesFromItems(items);
 
@@ -566,14 +710,10 @@ async function showCategories(ctx) {
 
 async function showProductCarousel(ctx, cat) {
   const cfg = await loadConfig();
-  const chatId = ctx.chat.id;
-  const sess = getSess(chatId);
-
-  ensureCartValid(sess);
-
+  const sess = getSess(ctx.chat.id);
   const { items } = await loadCatalog();
-  const prods = items.filter((p) => (p.cat || "General") === cat);
 
+  const prods = items.filter((p) => (p.cat || "General") === cat);
   if (!prods.length) {
     await safeEditOrSend(ctx, { text: `No hay productos en <b>${cat}</b>.`, extra: backMenuKeyboard() });
     return;
@@ -586,27 +726,185 @@ async function showProductCarousel(ctx, cat) {
 
   const p = prods[0];
   const caption = productCaption(cfg, p, 0, prods.length);
-
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(p) });
+
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+}
+
+async function renderCurrentProduct(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  if (!sess.productsInView.length) return;
+
+  const p = sess.productsInView[sess.productIndex];
+  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+}
+
+function calcSubtotalForInput(product, inputRaw) {
+  // inputRaw: string user typed
+  const raw = String(inputRaw || "").trim().replace(",", ".");
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return { ok: false, error: "Ingresá un número válido (ej: 250 o 0.25)." };
+
+  if (product.unitType === "UNIDAD") {
+    const qty = Math.round(n);
+    if (qty <= 0) return { ok: false, error: "Ingresá una cantidad válida (ej: 1, 2, 3)." };
+    const subtotal = qty * (Number(product.price) || 0);
+    return { ok: true, unitType: "UNIDAD", qty, grams: 0, subtotal };
+  }
+
+  // peso: si n < 10 lo tomo como kg (0.25), si n >= 10 lo tomo como gramos (250)
+  let grams = 0;
+  if (n < 10) grams = Math.round(n * 1000);
+  else grams = Math.round(n);
+
+  const kg = grams / 1000;
+  const pricePerKg = Number(product.pricePerKg) > 0 ? Number(product.pricePerKg) : Number(product.price) || 0;
+  const subtotal = kg * pricePerKg;
+
+  return { ok: true, unitType: product.unitType, qty: 0, grams, subtotal };
+}
+
+function upsertCartItem(sess, product, calc) {
+  const found = sess.cart.find((x) => x.code === product.code);
+  const base = {
+    code: product.code,
+    name: product.name,
+    unitType: product.unitType === "UNIDAD" ? "UNIDAD" : "PESO",
+  };
+
+  if (!found) {
+    sess.cart.push({
+      ...base,
+      qty: calc.qty || 0,
+      grams: calc.grams || 0,
+      subtotal: Number(calc.subtotal) || 0,
+    });
+  } else {
+    // reemplazo (más claro para fiambres)
+    found.qty = calc.qty || 0;
+    found.grams = calc.grams || 0;
+    found.subtotal = Number(calc.subtotal) || 0;
+    found.unitType = base.unitType;
+  }
+
+  touchCart(sess);
 }
 
 async function showCart(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
-  const ok = ensureCartValid(sess);
-  if (!ok) {
-    await safeEditOrSend(ctx, {
-      text: "🕒 Tu carrito venció (1 hora). Lo vacié para que arranques de nuevo ✅",
-      extra: mainMenuKeyboard(),
-    });
+  await safeEditOrSend(ctx, {
+    text: cartText(cfg, sess),
+    extra: cartKeyboard(sess),
+  });
+}
+
+async function showSellos(ctx) {
+  const cfg = await loadConfig();
+  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
+  const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
+  const sellos = me ? parseNumber(me[3], 0) : 0;
+
+  const cardUrl = (cfg.CARD_URL || cfg.CARD_URL || "").trim(); // tu key ya existe
+  const caption = sellosText(cfg, sellos);
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+    [Markup.button.callback("🏠 Menú", "GO_MENU")],
+  ]);
+
+  // Si querés imagen de sellos, usá CARD_URL o SelloURL (ya la tenés)
+  const selloImg = (cfg.SelloURL || "").trim();
+  const img = (selloImg && selloImg.startsWith("http")) ? selloImg : ((cardUrl && cardUrl.startsWith("http")) ? cardUrl : "");
+  if (img) await safeEditOrSend(ctx, { photo: img, caption, extra: keyboard });
+  else await safeEditOrSend(ctx, { text: caption, extra: keyboard });
+}
+
+async function showHelp(ctx) {
+  const cfg = await loadConfig();
+  const nombre = cfg.NegocioNombre || "Todo Queso";
+  const wa = (cfg.WhatsAppLink || "").trim();
+
+  const text = [
+    `ℹ️ <b>Ayuda - ${nombre}</b>\n`,
+    `• Si no encontraste algo en el catálogo, puedo avisar a un vendedor.`,
+    `• Si te falta algún producto, decime cuál y lo agregamos.`,
+    `• Si querés sugerir una promo o consulta, también.`,
+    ``,
+    `👉 Botones:`,
+    `• 🛒 <b>Agregar</b>: te pide cantidad/peso y lo suma al carrito.`,
+    `• ✅ <b>Quiero éste</b>: te pide cantidad/peso y te lleva directo al carrito.`,
+    `• ✅ <b>Finalizar compra</b>: elegís entrega → pago → confirmás.`,
+  ].join("\n");
+
+  const rows = [
+    [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+  ];
+  if (wa) rows.push([Markup.button.url("💬 Contactar vendedor", wa)]);
+  rows.push([Markup.button.callback("🏠 Menú", "GO_MENU")]);
+
+  await safeEditOrSend(ctx, { text, extra: Markup.inlineKeyboard(rows) });
+}
+
+async function showShareBot(ctx) {
+  const cfg = await loadConfig();
+  const botLink = (cfg.BotLink || "").trim();
+  if (!botLink) {
+    await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: backMenuKeyboard() });
     return;
   }
 
+  const text = (cfg.TextoCompartirBot || `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y elegí tu pedido:`).trim();
+  const links = buildShareLinks({ botLink, text });
+
   await safeEditOrSend(ctx, {
-    text: cartText(cfg, sess.cart),
-    extra: cartKeyboard(sess.cart),
+    text: `📣 <b>Compartir bot</b>\n\nElegí dónde compartir 👇`,
+    extra: shareKeyboard(links),
+  });
+}
+
+async function showShareProduct(ctx, productCode) {
+  const cfg = await loadConfig();
+  const botLink = (cfg.BotLink || "").trim();
+  if (!botLink) {
+    await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: backMenuKeyboard() });
+    return;
+  }
+
+  const { items } = await loadCatalog();
+  const p = items.find((x) => x.code === productCode);
+  if (!p) {
+    await safeEditOrSend(ctx, { text: "No encontré ese producto.", extra: backMenuKeyboard() });
+    return;
+  }
+
+  // deep link con referido + producto
+  const ref = ctx.chat.id;
+  const deepLink = botLink.includes("?start=")
+    ? botLink
+    : `${botLink}${botLink.includes("?") ? "&" : "?"}start=ref_${ref}__prod_${encodeURIComponent(p.code)}`;
+
+  const moneda = cfg.Moneda || "ARS";
+  const priceText =
+    p.unitType === "UNIDAD"
+      ? money(p.price, moneda)
+      : `${money((p.pricePerKg || p.price), moneda)} (por kg)`;
+
+  // mensaje sugerente al referido
+  const text = `🧀 ${cfg.NegocioNombre || "Todo Queso"} — Promo: ${p.name} — ${priceText}\nEntrá acá y te queda listo para comprar 👇`;
+  const links = buildShareLinks({ botLink: deepLink, text });
+
+  // Si querés mandar imagen al compartir: Telegram/WhatsApp comparten link+texto,
+  // pero la preview se genera si la URL del bot tiene OpenGraph (eso depende del front).
+  await safeEditOrSend(ctx, {
+    text: `🔗 <b>Compartir producto</b>\n\n<b>${p.name}</b>\nElegí dónde compartir 👇`,
+    extra: shareKeyboard(links),
   });
 }
 
@@ -620,271 +918,194 @@ async function showDelivery(ctx) {
 
 async function showPayment(ctx, entregaTipo) {
   const cfg = await loadConfig();
-  const moneda = cfg.Moneda || "ARS";
-  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
+  const variants = splitVariants(cfg["TextoEnvíoDomicilio"] || "");
+  const normalTxt = variants[0] || String(cfg["TextoEnvíoDomicilio"] || "").trim();
+  const expressTxt = variants[1] || "⚡ Express: lo entregamos lo antes posible.";
 
-  let extraText = "";
-  if (entregaTipo === "ENVIO") extraText = `\n\n💡 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${cfg.TextoEnvioDomicilio || ""}`;
-  if (entregaTipo === "EXPRESS") extraText = `\n\n⚡ Envío express.\n${cfg.TextoEnvioDomicilio || ""}`;
-  if (entregaTipo === "RETIRO") extraText = `\n\n🏪 ${cfg.TextoRetiroLocal || ""}`;
+  const retiroTxt = String(cfg.TextoRetiroLocal || "").trim();
+
+  let extraTxt = "";
+  if (entregaTipo === "ENVIO") extraTxt = normalTxt ? `\n\n${normalTxt}` : "";
+  if (entregaTipo === "EXPRESS") extraTxt = expressTxt ? `\n\n${expressTxt}` : "";
+  if (entregaTipo === "RETIRO") extraTxt = retiroTxt ? `\n\n${retiroTxt}` : "";
 
   await safeEditOrSend(ctx, {
-    text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraText}`,
+    text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraTxt}`,
     extra: payKeyboard(cfg),
   });
 }
 
-function buildCheckoutTicket(cfg, sess, entregaTipo, pagoTipo) {
-  const moneda = cfg.Moneda || "ARS";
-  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
-
-  let total = 0;
-  const lines = [];
-  lines.push(`🧾 <b>Resumen final</b>\n`);
-  sess.cart.forEach((it) => {
-    total += it.subtotal;
-    const qtyLine = it.unitType === "PESO" ? `${it.grams} g` : `${it.qtyUnits} u`;
-    lines.push(`• <b>${it.name}</b> — ${qtyLine} — ${money(it.subtotal, moneda)}`);
-  });
-
-  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
-    total += costoEnvio;
-    if (costoEnvio > 0) lines.push(`\n🚚 Envío: ${money(costoEnvio, moneda)}`);
-  }
-
-  lines.push(`\n<b>Total:</b> ${money(total, moneda)}`);
-  lines.push(`\n<b>Entrega:</b> ${entregaTipo}`);
-  lines.push(`\n<b>Pago:</b> ${pagoTipo}`);
-
-  // texto sugerente configurable (opcional)
-  const ahorroTxt = (cfg.TextoAhorroComparativa || "").trim();
-  if (ahorroTxt) lines.push(`\n✨ ${ahorroTxt}`);
-
-  lines.push(`\n\n¿Confirmás la compra?`);
-  return { text: lines.join("\n"), total };
-}
-
-async function finalizeOrderPersist(ctx, { entregaTipo, pagoTipo, totalFinal }) {
+async function showFinalConfirm(ctx, entregaTipo, pagoTipo) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
 
+  const ticket = buildTicketText(cfg, ctx, sess, entregaTipo, pagoTipo);
+  sess.pendingConfirm = {
+    entregaTipo,
+    pagoTipo,
+    total: ticket.total,
+    itemsText: buildItemsText(cfg, sess),
+  };
+
+  await safeEditOrSend(ctx, {
+    text: `${ticket.text}\n\n¿Confirmás la compra?`,
+    extra: confirmKeyboard(),
+  });
+}
+
+async function confirmOrder(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  if (!sess.pendingConfirm || !sess.cart.length) {
+    await safeEditOrSend(ctx, { text: "No hay una compra pendiente para confirmar.", extra: backMenuKeyboard() });
+    return;
+  }
+
+  const entregaTipo = sess.pendingConfirm.entregaTipo;
+  const pagoTipo = sess.pendingConfirm.pagoTipo;
+  const { total, moneda } = computeTotal(cfg, sess, entregaTipo);
+
+  // sellos
   const usaSellos = parseYes(cfg.UsaSellos || "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
-  const sellosGanados = usaSellos ? Math.floor(totalFinal / montoPorSello) : 0;
+  const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
 
+  // cliente
   const nombre = `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
   const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
 
+  // guardar cliente
   await upsertCliente({
     chatId: ctx.chat.id,
     nombre,
     usuario,
     addSellos: sellosGanados,
-    addTotal: totalFinal,
+    addTotal: total,
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
 
-  const itemsText = sess.cart
-    .map((it) => {
-      const qtyLine = it.unitType === "PESO" ? `${it.grams}g` : `${it.qtyUnits}u`;
-      return `${it.name} ${qtyLine} (${money(it.subtotal, cfg.Moneda || "ARS")})`;
-    })
-    .join(" | ");
+  // pedido sheet
+  const pedidoId = buildOrderId("TQ");
+  const itemsText = buildItemsText(cfg, sess);
 
-  const pedidoId = buildOrderId();
   await appendRow(PEDIDOS_SHEET, [
     pedidoId,
-    new Date().toISOString(),
+    nowISO(),
     String(ctx.chat.id),
     nombre,
     usuario,
     itemsText,
-    totalFinal,
+    total,
     entregaTipo,
     pagoTipo,
     "PENDIENTE",
     sess.refBy ? String(sess.refBy) : "",
+    "WHATSAPP",
   ]);
 
+  // referido sello
   if (sess.refBy) await addSelloReferido(sess.refBy);
 
-  // mensaje final al cliente
-  const moneda = cfg.Moneda || "ARS";
-  const wa = (cfg.NegocioTelefono || "").replace(/[^\d]/g, "");
-  const waLink = wa ? `https://wa.me/${wa}` : (cfg.WhatsAppLink || "");
+  // Mensaje transferencia (Punto 1 con ||)
+  const msgTransVariants = splitVariants(cfg.MensajeTransferencia || "");
+  const msgTransfer = msgTransVariants[0] || String(cfg.MensajeTransferencia || "").trim();
+  const msgCash = msgTransVariants[1] || "Pagás en efectivo al recibir/retirar.";
 
-  const msg = [];
-  msg.push(`✅ <b>Perfecto</b>`);
-  msg.push(`\nAnoté tu pedido:`);
-  sess.cart.forEach((it) => {
-    const qtyLine = it.unitType === "PESO" ? `${it.grams} g` : `${it.qtyUnits} u`;
-    msg.push(`• ${it.name} — ${qtyLine}`);
-  });
-  msg.push(`\n<b>Total:</b> ${money(totalFinal, moneda)}`);
-  msg.push(`\n<b>Entrega:</b> ${entregaTipo}`);
-  msg.push(`\n<b>Pago:</b> ${pagoTipo}`);
+  const alias = String(cfg.AliasTransferencia || "").trim();
+  const cbu = String(cfg.CBUPago || "").trim();
+  const waLink = String(cfg.WhatsAppLink || "").trim() || (String(cfg.NegocioTelefono || "").trim() ? `https://wa.me/${String(cfg.NegocioTelefono).replace(/[^\d]/g, "")}` : "");
 
-  if (sellosGanados > 0) msg.push(`\n🎟️ Sumaste <b>${sellosGanados}</b> sello(s).`);
-  if (sess.refBy) msg.push(`\n🎁 Compra por referido: el referente gana <b>1 sello</b>.`);
+  const payInfo = (String(pagoTipo).toUpperCase().includes("TRANSFER") || String(pagoTipo).toUpperCase().includes("CBU"))
+    ? applyTpl(msgTransfer, { ALIAS: alias, CBU: cbu, WHATSAPP: waLink })
+    : applyTpl(msgCash, { WHATSAPP: waLink });
 
-  if (waLink) {
-    msg.push(`\n📲 Ahora falta la confirmación del vendedor. Si querés, avisá por WhatsApp:\n${waLink}`);
+  // Confirmación cliente (Punto 3 con ||)
+  const confirmVariants = splitVariants(cfg.TextoConfirmacionPedido || "");
+  const confirmENVIO = confirmVariants[0] || "✅ Pedido confirmado. Estamos preparando tu pedido.";
+  const confirmEXPRESS = confirmVariants[1] || "✅ Pedido confirmado. Lo preparamos y sale express.";
+  const confirmRETIRO = confirmVariants[2] || "✅ Pedido confirmado. Lo preparamos para retiro dentro del horario.";
+
+  const baseConfirm =
+    entregaTipo === "ENVIO" ? confirmENVIO :
+    entregaTipo === "EXPRESS" ? confirmEXPRESS :
+    confirmRETIRO;
+
+  const clientMsg = [
+    applyTpl(baseConfirm, { PEDIDO_ID: pedidoId, TOTAL: money(total, moneda) }),
+    "",
+    `🧾 <b>Tu ticket</b>`,
+    ...sess.cart.map((it) => {
+      const qty = it.unitType === "UNIDAD" ? `${it.qty} u` : `${it.grams} g`;
+      return `• ${it.name} — ${qty}`;
+    }),
+    ``,
+    `<b>Total:</b> ${money(total, moneda)}`,
+    `<b>Entrega:</b> ${entregaTipo}`,
+    `<b>Pago:</b> ${pagoTipo}`,
+    sellosGanados > 0 ? `🎟️ Sumaste <b>${sellosGanados}</b> sello(s).` : "",
+    payInfo ? `\n<b>Pago / Comprobante</b>\n${payInfo}` : "",
+  ].filter(Boolean).join("\n");
+
+  // Aviso vendedor (Punto 3 con ||)
+  const vendorVariants = splitVariants(cfg.TextoAvisoVendedor || "");
+  const vendorENVIO = vendorVariants[0] || "🧾 Nuevo pedido (ENVÍO)";
+  const vendorEXPRESS = vendorVariants[1] || "🧾 Nuevo pedido (EXPRESS)";
+  const vendorRETIRO = vendorVariants[2] || "🧾 Nuevo pedido (RETIRO)";
+
+  const vendorTitle =
+    entregaTipo === "ENVIO" ? vendorENVIO :
+    entregaTipo === "EXPRESS" ? vendorEXPRESS :
+    vendorRETIRO;
+
+  const vendorMsg = [
+    applyTpl(vendorTitle, { PEDIDO_ID: pedidoId }),
+    ``,
+    `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
+    `🆔 ChatId: ${ctx.chat.id}`,
+    ``,
+    `🛍️ Items:`,
+    ...sess.cart.map((it) => {
+      const qty = it.unitType === "UNIDAD" ? `${it.qty} u` : `${it.grams} g`;
+      return `• ${it.name} — ${qty}`;
+    }),
+    ``,
+    `💳 Pago: ${pagoTipo}`,
+    `🚚 Entrega: ${entregaTipo}`,
+    `💰 Total: ${money(total, moneda)}`,
+    ``,
+    (String(pagoTipo).toUpperCase().includes("TRANSFER") ? `Alias: ${alias}\nCBU: ${cbu}` : ""),
+    (waLink ? `📲 WhatsApp: ${waLink}` : ""),
+  ].filter(Boolean).join("\n");
+
+  const vendorChatId = String(cfg.VendedorChatId || cfg.ChatIdVendedor || "").trim();
+  if (vendorChatId) {
+    try {
+      await ctx.telegram.sendMessage(Number(vendorChatId), vendorMsg);
+    } catch (e) {
+      // no rompemos
+    }
   }
 
-  // limpiar carrito
-  sess.cart = [];
-  sess.cartExpiresAt = 0;
-  sess.checkout = null;
-  sess.awaiting = null;
+  // limpiar carrito y pending
+  clearCart(sess);
+  sess.mode = "MENU";
 
   await safeEditOrSend(ctx, {
-    text: msg.join("\n"),
+    text: clientMsg,
     extra: Markup.inlineKeyboard([
-      [Markup.button.callback("🧀 Ir al Menú", "GO_MENU")],
-    ]),
-  });
-}
-
-/* =========================
-   SELL0S / AYUDA / SHARE
-========================= */
-function sellosText(cfg, sellos) {
-  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
-  const beneficios = (cfg.BeneficiosPorNivel || "").trim();
-  const sellosPorNivel = (cfg.SellosPorNivel || "").trim();
-
-  const lines = [];
-  lines.push(`🎟️ <b>Sellos</b>\n`);
-  lines.push(`Tenés <b>${sellos}</b> sellos acumulados.`);
-  lines.push(`\n📌 Cada <b>${money(montoPorSello, cfg.Moneda || "ARS")}</b> = <b>1 sello</b>.`);
-
-  if (sellosPorNivel) {
-    lines.push(`\n🏅 <b>Niveles</b>\n${sellosPorNivel}`);
-  }
-  if (beneficios) {
-    lines.push(`\n🎁 <b>Beneficios</b>\n${beneficios}`);
-  }
-
-  lines.push(`\n✨ Tip: si alguien compra desde tu link, ganás <b>1 sello</b>.`);
-  return lines.join("\n");
-}
-
-async function showSellos(ctx) {
-  const cfg = await loadConfig();
-  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
-  const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
-  const sellos = me ? parseNumber(me[3], 0) : 0;
-
-  const caption = sellosText(cfg, sellos);
-  await safeEditOrSend(ctx, {
-    text: caption,
-    extra: Markup.inlineKeyboard([
-      [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+      [Markup.button.callback("🧀 Ver catálogo", "MENU_CATALOGO")],
       [Markup.button.callback("🏠 Menú", "GO_MENU")],
     ]),
-  });
-}
-
-async function showHelp(ctx) {
-  const cfg = await loadConfig();
-  const nombre = cfg.NegocioNombre || "Todo Queso";
-
-  const vendedor = (cfg.NegocioTelefono || "").trim();
-  const sugerencia = (cfg.TextoAyudaSugerente || "¿No encontraste algo? Puedo pasarte con un vendedor, tomar tu sugerencia o ayudarte a elegir.").trim();
-
-  const text = [
-    `ℹ️ <b>Ayuda - ${nombre}</b>\n`,
-    `• Tocá 🧀 <b>Catálogo</b> y elegí una categoría.`,
-    `• Ojeás productos con ⬅️➡️ sin llenar el chat.`,
-    `• Tocá ⚡ <b>Quiero éste</b> para comprar rápido (te pide peso/unidades).`,
-    `• En 🛒 <b>Carrito</b> tocás ✅ <b>Finalizar compra</b> para elegir entrega y pago.`,
-    `\n💬 ${sugerencia}`,
-  ].join("\n");
-
-  const rows = [
-    [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
-  ];
-
-  if (vendedor) rows.push([Markup.button.url("👨‍🍳 Hablar con vendedor (WhatsApp)", `https://wa.me/${vendedor.replace(/[^\d]/g, "")}`)]);
-  rows.push([Markup.button.callback("🏠 Menú", "GO_MENU")]);
-
-  await safeEditOrSend(ctx, { text, extra: Markup.inlineKeyboard(rows) });
-}
-
-function buildShareLinks({ botLink, text }) {
-  const url = encodeURIComponent(botLink);
-  const t = encodeURIComponent(text);
-  return {
-    wa: `https://wa.me/?text=${t}%0A${url}`,
-    tg: `https://t.me/share/url?url=${url}&text=${t}`,
-  };
-}
-
-function shareKeyboard(links) {
-  return Markup.inlineKeyboard([
-    [Markup.button.url("📲 WhatsApp", links.wa), Markup.button.url("✈️ Telegram", links.tg)],
-    [Markup.button.callback("🏠 Menú", "GO_MENU")],
-  ]);
-}
-
-async function showShareBot(ctx) {
-  const cfg = await loadConfig();
-  const botLink = BOT_LINK_ENV || cfg.BotLink || cfg.Botlink || "";
-  if (!botLink) {
-    await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: backMenuKeyboard() });
-    return;
-  }
-  const text = `🧀 Estoy comprando en ${cfg.NegocioNombre || "Todo Queso"}.\nEntrá acá para ver el catálogo y comprar 👇`;
-  const links = buildShareLinks({ botLink, text });
-  await safeEditOrSend(ctx, {
-    text: `📣 <b>Compartir bot</b>\n\nElegí dónde compartir 👇`,
-    extra: shareKeyboard(links),
-  });
-}
-
-async function showShareProduct(ctx, productCode) {
-  const cfg = await loadConfig();
-  const botLink = BOT_LINK_ENV || cfg.BotLink || "";
-  const { items } = await loadCatalog();
-  const p = items.find((x) => x.code === productCode);
-
-  if (!p) {
-    await safeEditOrSend(ctx, { text: "No encontré ese producto.", extra: backMenuKeyboard() });
-    return;
-  }
-  if (!botLink) {
-    await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: backMenuKeyboard() });
-    return;
-  }
-
-  const ref = ctx.chat.id;
-  const deepLink = botLink.includes("?start=")
-    ? botLink
-    : `${botLink}${botLink.includes("?") ? "&" : "?"}start=ref_${ref}__prod_${encodeURIComponent(p.code)}`;
-
-  const moneda = cfg.Moneda || "ARS";
-  const priceTxt =
-    p.unitType === "PESO"
-      ? `${money((p.pricePerKg > 0 ? p.pricePerKg : p.price), moneda)} por kg`
-      : `${money(p.price, moneda)} por unidad`;
-
-  const text = `🧀 Promo en ${cfg.NegocioNombre || "Todo Queso"}: ${p.name}\n💰 ${priceTxt}\nTocá el link para ver y comprar 👇`;
-  const links = buildShareLinks({ botLink: deepLink, text });
-
-  // si querés que mande imagen, Telegram no permite “adjuntar imagen” en link-sharing,
-  // pero acá al menos queda el mensaje listo con el link.
-  await safeEditOrSend(ctx, {
-    text: `🔗 <b>Compartir producto</b>\n\n${p.name}\n\nElegí dónde compartir 👇`,
-    extra: shareKeyboard(links),
   });
 }
 
 /* =========================
    TELEGRAM BOT
 ========================= */
-const bot = new Telegraf(TELEGRAM_BOT_TOKEN);
+const bot = new Telegraf(BOT_TOKEN);
 
-/* Start + referrals + deep product */
+/* /start con referido + producto */
 bot.start(async (ctx) => {
   await ensureBaseSheets();
   const sess = getSess(ctx.chat.id);
@@ -901,35 +1122,57 @@ bot.start(async (ctx) => {
 
   if (sess._jumpProd) {
     const code = sess._jumpProd;
-    delete sess._jumpProd;
+    sess._jumpProd = null;
 
     const { items } = await loadCatalog();
     const p = items.find((x) => x.code === code);
     if (p) {
       await showProductCarousel(ctx, p.cat || "General");
-      const prods = getSess(ctx.chat.id).productsInView;
-      const idx = prods.findIndex((x) => x.code === code);
+      const s2 = getSess(ctx.chat.id);
+      const idx = s2.productsInView.findIndex((x) => x.code === code);
       if (idx >= 0) {
-        getSess(ctx.chat.id).productIndex = idx;
-        const cfg = await loadConfig();
-        const caption = productCaption(cfg, prods[idx], idx, prods.length);
-        const photo = prods[idx].img && prods[idx].img.startsWith("http") ? prods[idx].img : undefined;
-        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(prods[idx]) });
-        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(prods[idx]) });
+        s2.productIndex = idx;
+        await renderCurrentProduct(ctx);
       }
     }
   }
 });
 
-/* Quick text */
-bot.hears(/^(menu|menú)$/i, (ctx) => showMenu(ctx));
-bot.hears(/^cat[aá]logo$/i, (ctx) => showCategories(ctx));
-bot.hears(/^sellos$/i, (ctx) => showSellos(ctx));
-bot.hears(/^ayuda$/i, (ctx) => showHelp(ctx));
+/* captura textos cuando estamos esperando cantidad/peso */
+bot.on("text", async (ctx) => {
+  const sess = getSess(ctx.chat.id);
+  if (!sess.waitingQty || !sess.waitingForCode) return;
 
-/* =========================
-   ACTIONS (MENÚ)
-========================= */
+  const { items } = await loadCatalog();
+  const product = items.find((x) => x.code === sess.waitingForCode);
+  if (!product) {
+    sess.waitingQty = false;
+    sess.waitingForCode = null;
+    sess.waitingAction = null;
+    await safeEditOrSend(ctx, { text: "No encontré el producto.", extra: backMenuKeyboard() });
+    return;
+  }
+
+  const calc = calcSubtotalForInput(product, ctx.message.text);
+  if (!calc.ok) {
+    await ctx.reply(`⚠️ ${calc.error}`);
+    return;
+  }
+
+  upsertCartItem(sess, product, calc);
+  sess.waitingQty = false;
+  sess.waitingForCode = null;
+
+  if (sess.waitingAction === "BUY") {
+    sess.waitingAction = null;
+    await showCart(ctx);
+  } else {
+    sess.waitingAction = null;
+    await renderCurrentProduct(ctx);
+  }
+});
+
+/* Actions */
 bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
 bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx); });
@@ -942,290 +1185,153 @@ bot.action(/^CAT_(.+)$/i, async (ctx) => {
   await showProductCarousel(ctx, cat);
 });
 
-/* =========================
-   CAROUSEL NAV
-========================= */
 bot.action("PROD_NEXT", async (ctx) => {
   await ctx.answerCbQuery();
-  const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
   if (!sess.productsInView.length) return;
-
   sess.productIndex = (sess.productIndex + 1) % sess.productsInView.length;
-  const p = sess.productsInView[sess.productIndex];
-  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
-
-  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(p) });
+  await renderCurrentProduct(ctx);
 });
 
 bot.action("PROD_PREV", async (ctx) => {
   await ctx.answerCbQuery();
-  const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
   if (!sess.productsInView.length) return;
-
   sess.productIndex = (sess.productIndex - 1 + sess.productsInView.length) % sess.productsInView.length;
-  const p = sess.productsInView[sess.productIndex];
-  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
-
-  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboardOrdered(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboardOrdered(p) });
+  await renderCurrentProduct(ctx);
 });
 
-/* =========================
-   WANT THIS (pide peso/unidades)
-========================= */
-bot.action(/^WANT_(.+)$/i, async (ctx) => {
+/* Preguntar cantidad/peso antes de agregar o comprar */
+async function askQty(ctx, code, action) {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
-  ensureCartValid(sess);
-
-  const code = ctx.match[1];
-  const p = sess.productsInView.find((x) => x.code === code);
+  const { items } = await loadCatalog();
+  const p = items.find((x) => x.code === code);
   if (!p) return;
 
-  // set awaiting input
-  const unitType = p.unitType === "PESO" ? "PESO" : "UNIDAD";
-  sess.awaiting = { type: unitType, productCode: p.code };
-  sess._awaitProductName = p.name;
-
-  if (unitType === "PESO") {
-    await safeEditOrSend(ctx, {
-      text: `⚖️ <b>${p.name}</b>\n\nIngresá el peso en gramos (ej: <b>250</b>) o en kg (ej: <b>0.25</b>).`,
-      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "CANCEL_AWAIT")]]),
-    });
-  } else {
-    await safeEditOrSend(ctx, {
-      text: `🧾 <b>${p.name}</b>\n\nIngresá la cantidad de unidades (ej: <b>2</b>).`,
-      extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "CANCEL_AWAIT")]]),
-    });
-  }
-});
-
-bot.action("CANCEL_AWAIT", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  sess.awaiting = null;
-  await showCart(ctx);
-});
-
-/* =========================
-   CART ACTIONS
-========================= */
-bot.action("GO_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
-
-bot.action("CART_CLEAR", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  sess.cart = [];
-  sess.cartExpiresAt = 0;
-  sess.checkout = null;
-  await showCart(ctx);
-});
-
-bot.action("CART_EDIT", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  if (!sess.cart.length) return showCart(ctx);
-
-  // edita el último item (simple y rápido)
-  const last = sess.cart[sess.cart.length - 1];
-  sess.awaiting = { type: last.unitType, productCode: last.code, editMode: true };
+  sess.waitingQty = true;
+  sess.waitingForCode = code;
+  sess.waitingAction = action;
 
   const prompt =
-    last.unitType === "PESO"
-      ? `⚖️ <b>${last.name}</b>\n\nIngresá el nuevo peso en gramos (ej: <b>250</b>) o en kg (ej: <b>0.25</b>).`
-      : `🧾 <b>${last.name}</b>\n\nIngresá la nueva cantidad de unidades (ej: <b>2</b>).`;
+    p.unitType === "UNIDAD"
+      ? `⚖️ <b>${p.name}</b>\n\nIngresá cantidad (ej: 1, 2, 3).`
+      : `⚖️ <b>${p.name}</b>\n\nIngresá el peso en gramos (ej: 250) o en kg (ej: 0.25).`;
 
   await safeEditOrSend(ctx, {
     text: prompt,
-    extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "CANCEL_AWAIT")]]),
+    extra: Markup.inlineKeyboard([[Markup.button.callback("❌ Cancelar", "QTY_CANCEL")]]),
   });
+}
+
+bot.action(/^ASK_ADD_(.+)$/i, async (ctx) => {
+  const code = ctx.match[1];
+  await askQty(ctx, code, "ADD");
 });
 
-/* =========================
-   CHECKOUT (Finalizar compra -> Entrega -> Pago -> Confirmar/Cancelar)
-========================= */
-bot.action("CHK_FINAL", async (ctx) => {
+bot.action(/^ASK_BUY_(.+)$/i, async (ctx) => {
+  const code = ctx.match[1];
+  await askQty(ctx, code, "BUY");
+});
+
+bot.action("QTY_CANCEL", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
-  const ok = ensureCartValid(sess);
-  if (!ok || !sess.cart.length) return showCart(ctx);
-  await showDelivery(ctx);
+  sess.waitingQty = false;
+  sess.waitingForCode = null;
+  sess.waitingAction = null;
+  await renderCurrentProduct(ctx);
 });
 
-bot.action("DELIVERY_ENVIO", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  sess.checkout = { entregaTipo: "ENVIO", pagoTipo: null, preview: null };
-  await showPayment(ctx, "ENVIO");
-});
-
-bot.action("DELIVERY_RETIRO", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  sess.checkout = { entregaTipo: "RETIRO", pagoTipo: null, preview: null };
-  await showPayment(ctx, "RETIRO");
-});
-
-bot.action("DELIVERY_EXPRESS", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  sess.checkout = { entregaTipo: "EXPRESS", pagoTipo: null, preview: null };
-  await showPayment(ctx, "EXPRESS");
-});
-
-bot.action(/^PAY_(.+)$/i, async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  if (!sess.checkout?.entregaTipo) return showCart(ctx);
-
-  const pagoTipo = (ctx.match[1] || "TRANSFERENCIA").toUpperCase();
-  sess.checkout.pagoTipo = pagoTipo;
-
-  const cfg = await loadConfig();
-  const { text, total } = buildCheckoutTicket(cfg, sess, sess.checkout.entregaTipo, pagoTipo);
-  sess.checkout.preview = { total };
-
-  // ÚLTIMO PASO PROFESIONAL
-  await safeEditOrSend(ctx, {
-    text,
-    extra: Markup.inlineKeyboard([
-      [Markup.button.callback("✅ Confirmar compra", "CONFIRM_BUY")],
-      [Markup.button.callback("❌ Cancelar compra", "CANCEL_BUY")],
-      [Markup.button.callback("🏠 Menú", "GO_MENU")],
-    ]),
-  });
-});
-
-bot.action("PAY_EFECTIVO", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  if (!sess.checkout?.entregaTipo) return showCart(ctx);
-
-  sess.checkout.pagoTipo = "EFECTIVO";
-
-  const cfg = await loadConfig();
-  const { text, total } = buildCheckoutTicket(cfg, sess, sess.checkout.entregaTipo, "EFECTIVO");
-  sess.checkout.preview = { total };
-
-  await safeEditOrSend(ctx, {
-    text,
-    extra: Markup.inlineKeyboard([
-      [Markup.button.callback("✅ Confirmar compra", "CONFIRM_BUY")],
-      [Markup.button.callback("❌ Cancelar compra", "CANCEL_BUY")],
-      [Markup.button.callback("🏠 Menú", "GO_MENU")],
-    ]),
-  });
-});
-
-bot.action("CANCEL_BUY", async (ctx) => {
-  await ctx.answerCbQuery();
-  const cfg = await loadConfig();
-  const sess = getSess(ctx.chat.id);
-
-  // mensaje “pena desaprovechar” configurable
-  const pena = (cfg.TextoCancelacionSugerente || "😅 ¡Qué pena! Estabas por aprovechar una oferta. Si querés, mirá otras promos o consultá con un vendedor.").trim();
-
-  sess.checkout = null;
-  await safeEditOrSend(ctx, {
-    text: `${pena}\n\nVolvemos al carrito 👇`,
-    extra: cartKeyboard(sess.cart),
-  });
-});
-
-bot.action("CONFIRM_BUY", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  const ok = ensureCartValid(sess);
-  if (!ok) return showCart(ctx);
-  if (!sess.checkout?.entregaTipo || !sess.checkout?.pagoTipo) return showCart(ctx);
-
-  const totalFinal = Number(sess.checkout.preview?.total || 0);
-  await finalizeOrderPersist(ctx, {
-    entregaTipo: sess.checkout.entregaTipo,
-    pagoTipo: sess.checkout.pagoTipo,
-    totalFinal,
-  });
-});
-
-/* =========================
-   SHARE PRODUCT
-========================= */
+/* Compartir producto */
 bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
   const code = ctx.match[1];
   await showShareProduct(ctx, code);
 });
 
-/* =========================
-   TEXT INPUT HANDLER (peso/unidades)
-========================= */
-bot.on("text", async (ctx) => {
+/* Carrito */
+bot.action("GO_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
+
+bot.action("CART_CLEAR", async (ctx) => {
+  await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
-  if (!sess.awaiting) return;
-
-  const cfg = await loadConfig();
-  const { items } = await loadCatalog();
-  const p = items.find((x) => x.code === sess.awaiting.productCode);
-  if (!p) {
-    sess.awaiting = null;
-    return showCart(ctx);
-  }
-
-  const input = String(ctx.message.text || "").trim().replace(",", ".");
-  const n = Number(input);
-
-  if (!Number.isFinite(n) || n <= 0) {
-    const msg = sess.awaiting.type === "PESO"
-      ? "❗ Ingresá un número válido. Ej: 250 o 0.25"
-      : "❗ Ingresá un número válido. Ej: 2";
-    await ctx.reply(msg);
-    return;
-  }
-
-  // si edita, reemplaza último item del mismo producto
-  const isEdit = !!sess.awaiting.editMode;
-
-  if (sess.awaiting.type === "PESO") {
-    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price;
-    const { grams, subtotal } = calcWeightSubtotal(cfg, perKg, n);
-    if (!grams || !subtotal) {
-      await ctx.reply("❗ Ingresá un peso válido. Ej: 250 o 0.25");
-      return;
-    }
-
-    if (isEdit) {
-      const idx = sess.cart.findIndex((x) => x.code === p.code);
-      if (idx >= 0) {
-        sess.cart[idx] = { code: p.code, name: p.name, unitType: "PESO", price: p.price, pricePerKg: perKg, qtyUnits: 0, grams, subtotal };
-      }
-    } else {
-      sess.cart.push({ code: p.code, name: p.name, unitType: "PESO", price: p.price, pricePerKg: perKg, qtyUnits: 0, grams, subtotal });
-    }
-  } else {
-    const qtyUnits = Math.round(n);
-    const subtotal = (p.price || 0) * qtyUnits;
-
-    if (isEdit) {
-      const idx = sess.cart.findIndex((x) => x.code === p.code);
-      if (idx >= 0) {
-        sess.cart[idx] = { code: p.code, name: p.name, unitType: "UNIDAD", price: p.price, pricePerKg: 0, qtyUnits, grams: 0, subtotal };
-      }
-    } else {
-      sess.cart.push({ code: p.code, name: p.name, unitType: "UNIDAD", price: p.price, pricePerKg: 0, qtyUnits, grams: 0, subtotal });
-    }
-  }
-
-  touchCart(sess);
-  sess.awaiting = null;
-
-  // borramos el mensaje que el usuario envió (opcional: Telegram no deja borrar siempre)
-  // y mostramos carrito
+  clearCart(sess);
   await showCart(ctx);
+});
+
+bot.action("CART_EDIT_LAST", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  if (!sess.cart.length) return;
+
+  const last = sess.cart[sess.cart.length - 1];
+  // Reusar askQty: pedimos de nuevo para el mismo producto
+  await askQty(ctx, last.code, "BUY"); // después de editar, lo mando al carrito
+});
+
+/* Checkout */
+bot.action("CHK_START", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  if (!sess.cart.length) return;
+  await showDelivery(ctx);
+});
+
+bot.action("DELIVERY_ENVIO", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.entregaTipo = "ENVIO";
+  await showPayment(ctx, "ENVIO");
+});
+
+bot.action("DELIVERY_EXPRESS", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.entregaTipo = "EXPRESS";
+  await showPayment(ctx, "EXPRESS");
+});
+
+bot.action("DELIVERY_RETIRO", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.entregaTipo = "RETIRO";
+  await showPayment(ctx, "RETIRO");
+});
+
+bot.action(/^PAY_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  const pagoTipo = (ctx.match[1] || "TRANSFERENCIA").toUpperCase();
+  const entregaTipo = sess.entregaTipo || "RETIRO";
+  sess.pagoTipo = pagoTipo;
+  await showFinalConfirm(ctx, entregaTipo, pagoTipo);
+});
+
+bot.action("PAY_EFECTIVO", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  const entregaTipo = sess.entregaTipo || "RETIRO";
+  sess.pagoTipo = "EFECTIVO";
+  await showFinalConfirm(ctx, entregaTipo, "EFECTIVO");
+});
+
+bot.action("CONFIRM_ORDER", async (ctx) => {
+  await ctx.answerCbQuery();
+  await confirmOrder(ctx);
+});
+
+bot.action("CANCEL_ORDER", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  clearCart(sess);
+  await safeEditOrSend(ctx, {
+    text: "❌ Compra cancelada. Si querés, podés volver al catálogo y seguir eligiendo.",
+    extra: Markup.inlineKeyboard([
+      [Markup.button.callback("🧀 Ver catálogo", "MENU_CATALOGO")],
+      [Markup.button.callback("🏠 Menú", "GO_MENU")],
+    ]),
+  });
 });
 
 /* =========================
@@ -1235,8 +1341,6 @@ const app = express();
 app.use(express.json());
 
 app.get("/", (req, res) => res.status(200).send("EzerBot OK ✅"));
-
-const PORT = process.env.PORT || 10000;
 
 async function start() {
   await ensureBaseSheets();
@@ -1248,7 +1352,7 @@ async function start() {
     app.listen(PORT, () => console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`));
   } else {
     bot.launch();
-    app.listen(PORT, () => console.log(`✅ Bot en long-polling | Puerto ${PORT}`));
+    app.listen(PORT, () => console.log(`✅ Bot long-polling | Puerto ${PORT}`));
   }
 }
 
