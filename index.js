@@ -19,7 +19,8 @@ const PORT = process.env.PORT || 10000;
 
 if (!TelegramBotToken) throw new Error("Falta TelegramBotToken");
 if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
+if (!GOOGLE_SERVICE_ACCOUNT_B64)
+  throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
 /* =========================================================
    GOOGLE AUTH
@@ -84,9 +85,7 @@ async function ensureSheet(sheetName, headers) {
   if (!existing.includes(sheetName)) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: GOOGLE_SHEET_ID,
-      requestBody: {
-        requests: [{ addSheet: { properties: { title: sheetName } } }],
-      },
+      requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
     });
     await setSheetValues(`${sheetName}!A1`, [headers]);
   } else {
@@ -115,29 +114,7 @@ function parseYes(v) {
 }
 
 function parseNumber(v, def = 0) {
-  // Soporta miles con "." y decimales con "," (estilo AR) + también estilo US
-  let s = String(v ?? "").trim();
-  if (!s) return def;
-
-  // Si tiene coma y punto, asumimos coma decimal (AR) y punto miles.
-  const hasComma = s.includes(",");
-  const hasDot = s.includes(".");
-
-  s = s.replace(/[^\d,.-]/g, "");
-
-  if (hasComma && hasDot) {
-    s = s.replace(/\./g, "").replace(",", ".");
-  } else if (hasComma && !hasDot) {
-    s = s.replace(",", ".");
-  } else {
-    // solo puntos -> pueden ser miles (ej 4.500) o decimales (4.5)
-    // si hay más de un punto o si hay 3 dígitos después del punto => miles
-    const parts = s.split(".");
-    if (parts.length > 2) s = parts.join("");
-    else if (parts.length === 2 && parts[1].length === 3) s = parts[0] + parts[1];
-  }
-
-  const n = Number(s);
+  const n = Number(String(v || "").replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : def;
 }
 
@@ -160,16 +137,18 @@ function pickRandom(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+function roundARS(n) {
+  // Evita decimales locos y mantiene consistencia en el POS
+  return Math.round(Number(n) || 0);
+}
+
 /* =========================================================
    CATALOGO HELPERS
 ========================================================= */
 function normalizeHeaders(headerRow) {
   const map = {};
   headerRow.forEach((h, i) => {
-    const key = String(h || "")
-      .trim()
-      .toLowerCase()
-      .replace(/\s+/g, "");
+    const key = String(h || "").trim().toLowerCase().replace(/\s+/g, "");
     if (key) map[key] = i;
   });
   return map;
@@ -178,8 +157,7 @@ function normalizeHeaders(headerRow) {
 function pick(row, hmap, keys, def = "") {
   for (const k of keys) {
     const idx = hmap[k];
-    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "")
-      return row[idx];
+    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "") return row[idx];
   }
   return def;
 }
@@ -207,10 +185,11 @@ function getSess(chatId) {
       category: null,
       productIndex: 0,
       productsInView: [],
-      cart: [],
+      cart: [], // {code,name,cat,img,desc,unit,price,pricePerKg,qtyType,qty,grams,subtotal}
       refBy: null,
-      lastMessageId: null, // SOLO para flujo "hojeando" (catálogo+compra)
+      lastMessageId: null,
 
+      // flujo compra
       checkout: {
         entregaTipo: null, // ENVIO/RETIRO/EXPRESS
         pagoTipo: null, // TRANSFERENCIA/EFECTIVO/...
@@ -220,77 +199,11 @@ function getSess(chatId) {
         notas: "",
       },
 
-      waiting: null,
+      waiting: null, // {type, payload}
       jumpProdCode: null,
     });
   }
   return SESS.get(chatId);
-}
-
-/* =========================================================
-   CACHES (para evitar "no responde" por Sheets en cada click)
-========================================================= */
-const CFG_CACHE = { data: null, ts: 0 };
-const CAT_CACHE = { data: null, ts: 0 };
-const CACHE_TTL_MS = 15000; // 15s (suficiente + rápido)
-
-async function loadConfigCached() {
-  const now = Date.now();
-  if (CFG_CACHE.data && now - CFG_CACHE.ts < CACHE_TTL_MS) return CFG_CACHE.data;
-  const rows = await getSheetValues(`Config!A:B`);
-  const cfg = kvFromRows(rows);
-  CFG_CACHE.data = cfg;
-  CFG_CACHE.ts = now;
-  return cfg;
-}
-
-async function loadCatalogCached() {
-  const now = Date.now();
-  if (CAT_CACHE.data && now - CAT_CACHE.ts < CACHE_TTL_MS) return CAT_CACHE.data;
-
-  const rows = await getSheetValues(`Catalogo!A1:Z`);
-  if (!rows.length) {
-    const empty = { items: [], headers: {} };
-    CAT_CACHE.data = empty;
-    CAT_CACHE.ts = now;
-    return empty;
-  }
-  const headerRow = rows[0];
-  const hmap = normalizeHeaders(headerRow);
-  const data = rows
-    .slice(1)
-    .filter((r) => r.some((c) => String(c || "").trim() !== ""));
-
-  const items = data.map((r, i) => {
-    const code =
-      String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() ||
-      `P${i + 1}`;
-    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
-    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
-    const pricePerKg = parseNumber(
-      pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0),
-      0
-    );
-    const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
-    const unit = inferUnit(unitRaw);
-    const cat =
-      String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() ||
-      "General";
-    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
-    const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
-    const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
-    return { code, name, price, pricePerKg, unit, cat, img, desc, isCombo };
-  });
-
-  const out = { items, headers: hmap };
-  CAT_CACHE.data = out;
-  CAT_CACHE.ts = now;
-  return out;
-}
-
-function invalidateCaches() {
-  CFG_CACHE.data = null;
-  CAT_CACHE.data = null;
 }
 
 /* =========================================================
@@ -362,18 +275,16 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
   const newTotal = currentTotal + addTotal;
 
   const rowNumber = idx + 2;
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [
-    [
-      String(chatId),
-      nombre || row[1] || "",
-      usuario || row[2] || "",
-      newSellos,
-      newTotal,
-      now,
-      row[6] || refBy || "",
-      currentRefGanados,
-    ],
-  ]);
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
+    String(chatId),
+    nombre || row[1] || "",
+    usuario || row[2] || "",
+    newSellos,
+    newTotal,
+    now,
+    row[6] || refBy || "",
+    currentRefGanados,
+  ]]);
 
   return { sellos: newSellos, total: newTotal };
 }
@@ -388,18 +299,16 @@ async function addSelloReferido(chatIdReferente) {
   const currentRefGanados = parseNumber(row[7], 0);
   const rowNumber = idx + 2;
 
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [
-    [
-      row[0] || "",
-      row[1] || "",
-      row[2] || "",
-      currentSellos + 1,
-      row[4] || 0,
-      new Date().toISOString(),
-      row[6] || "",
-      currentRefGanados + 1,
-    ],
-  ]);
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
+    row[0] || "",
+    row[1] || "",
+    row[2] || "",
+    currentSellos + 1,
+    row[4] || 0,
+    new Date().toISOString(),
+    row[6] || "",
+    currentRefGanados + 1,
+  ]]);
 }
 
 async function findPedidoRow(orderId) {
@@ -436,18 +345,19 @@ async function expireOldPending() {
 }
 
 /* =========================================================
-   UI HELPERS
-   - Catálogo y compra: "hojeando" (edit)
-   - Menú / Ayuda / Compartir: "dejar en chat" (send)
+   UI HELPERS (editar mensaje) -> SOLO para catálogo/compra
 ========================================================= */
 async function safeEditOrSend(ctx, payload) {
   const chatId = ctx.chat?.id;
   const sess = chatId ? getSess(chatId) : null;
-  const canEdit = !!sess?.lastMessageId;
+  const canEdit = !!(sess?.lastMessageId);
 
   try {
     if (canEdit) {
-      if (payload.animation) throw new Error("forceSend"); // no edit a animation
+      if (payload.animation) {
+        // NO editamos animations: se envían fijos (para evitar fallos)
+        throw new Error("forceSend");
+      }
       if (payload.photo) {
         await ctx.telegram.editMessageMedia(
           chatId,
@@ -474,17 +384,11 @@ async function safeEditOrSend(ctx, payload) {
       }
     }
   } catch {
-    // send new
+    // fallback send new
   }
 
   let msg;
-  if (payload.animation) {
-    msg = await ctx.replyWithAnimation(payload.animation, {
-      caption: payload.caption || "",
-      parse_mode: "HTML",
-      ...(payload.extra || {}),
-    });
-  } else if (payload.photo) {
+  if (payload.photo) {
     msg = await ctx.replyWithPhoto(payload.photo, {
       caption: payload.caption || "",
       parse_mode: "HTML",
@@ -497,32 +401,11 @@ async function safeEditOrSend(ctx, payload) {
     });
   }
 
-  // SOLO actualiza el message_id del flujo "hojeando"
   if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
 }
 
-// Enviar SIEMPRE nuevo (para que quede en el chat) y NO tocar lastMessageId
-async function sendKeepInChat(ctx, payload) {
-  if (payload.animation) {
-    await ctx.replyWithAnimation(payload.animation, {
-      caption: payload.caption || "",
-      parse_mode: "HTML",
-      ...(payload.extra || {}),
-    });
-    return;
-  }
-  if (payload.photo) {
-    await ctx.replyWithPhoto(payload.photo, {
-      caption: payload.caption || "",
-      parse_mode: "HTML",
-      ...(payload.extra || {}),
-    });
-    return;
-  }
-  await ctx.reply(payload.text || " ", { parse_mode: "HTML", ...(payload.extra || {}) });
-}
-
 function mainMenuKeyboard() {
+  // 4 botones (los que querés)
   return Markup.inlineKeyboard([
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
     [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
@@ -535,14 +418,35 @@ function goMenuRow() {
 }
 
 /* =========================================================
-   LOADERS (cacheados)
+   LOADERS
 ========================================================= */
 async function loadConfig() {
-  return loadConfigCached();
+  const rows = await getSheetValues(`Config!A:B`);
+  return kvFromRows(rows);
 }
 
 async function loadCatalog() {
-  return loadCatalogCached();
+  const rows = await getSheetValues(`Catalogo!A1:Z`);
+  if (!rows.length) return { items: [], headers: {} };
+  const headerRow = rows[0];
+  const hmap = normalizeHeaders(headerRow);
+  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
+
+  const items = data.map((r, i) => {
+    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
+    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
+    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
+    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0), 0);
+    const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
+    const unit = inferUnit(unitRaw);
+    const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
+    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
+    const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
+    const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
+    return { code, name, price, pricePerKg, unit, cat, img, desc, isCombo };
+  });
+
+  return { items, headers: hmap };
 }
 
 function categoriesFromItems(items) {
@@ -583,7 +487,7 @@ function productKeyboard(p) {
    CART + TICKETS
 ========================================================= */
 function cartTotal(cart) {
-  return cart.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0);
+  return roundARS(cart.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0));
 }
 
 function fmtQty(it) {
@@ -591,30 +495,25 @@ function fmtQty(it) {
   return `${it.qty} u`;
 }
 
-/**
- * CORRECCIÓN PUNTUAL:
- * - Shipping se muestra como línea separada
- * - Total final incluye shipping SOLO si se pasó shippingCost
- */
-function ticketPOS(cfg, { orderId, items, total, entregaTipo, pagoTipo, nombre, telefono, direccion, notas, estado, shippingCost = 0 }) {
+function ticketPOS(cfg, { orderId, items, total, entregaTipo, pagoTipo, nombre, telefono, direccion, notas, estado, costoEnvio = 0 }) {
   const moneda = cfg.Moneda || "ARS";
   const lines = [];
   lines.push(`🧾 <b>TICKET</b>`);
   lines.push(`<code>${orderId}</code>`);
   lines.push(`──────────────────`);
   for (const it of items) {
-    const sub = Number(it.subtotal) || 0;
+    const sub = roundARS(it.subtotal || 0);
     lines.push(`• <b>${it.name}</b>`);
     lines.push(`  ${fmtQty(it)}  ·  ${money(sub, moneda)}`);
   }
 
-  if ((entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") && shippingCost > 0) {
+  if ((entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") && roundARS(costoEnvio) > 0) {
     lines.push(`• <b>Envío</b>`);
-    lines.push(`  1 u  ·  ${money(shippingCost, moneda)}`);
+    lines.push(`  ${money(roundARS(costoEnvio), moneda)}`);
   }
 
   lines.push(`──────────────────`);
-  lines.push(`🧮 <b>Total:</b> ${money(total, moneda)}`);
+  lines.push(`🧮 <b>Total:</b> ${money(roundARS(total), moneda)}`);
   lines.push(`🚚 <b>Entrega:</b> ${entregaTipo}`);
   lines.push(`💳 <b>Pago:</b> ${pagoTipo}`);
   if (nombre) lines.push(`👤 <b>Nombre:</b> ${nombre}`);
@@ -675,13 +574,17 @@ function sellosTextLevels(cfg) {
 
 /* =========================================================
    FLOW SCREENS
+   - GIFs (start/ayuda/compartir): QUEDAN FIJOS en el chat (no editar)
+   - Catálogo + compra: se edita con safeEditOrSend (chat limpio)
 ========================================================= */
 async function showMenu(ctx) {
   const cfg = await loadConfig();
+
   const nombre = cfg.NegocioNombre || "Tu Negocio";
   const dire = cfg.NegocioDireccion || "";
   const hora = cfg.NegocioHorario || "";
   const estado = cfg.Estado || "";
+  const desc = String(cfg.Descripcion || "").trim();
 
   const gif = pickRandom(splitPipes(cfg.GifBienvenidaURL || ""));
   const logo = String(cfg.LogoURL || "").trim();
@@ -692,25 +595,36 @@ async function showMenu(ctx) {
   if (dire) header.push(`📍 ${dire}`);
   if (hora) header.push(`🕒 ${hora}`);
 
-  const desc = String(cfg.Descripcion || "").trim();
-  const txt = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
+  const caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
 
-  // MENÚ: dejar en chat (no hojear)
+  // ENVIAR FIJO (no editar) para que nunca falle el GIF
   if (gif && gif.startsWith("http")) {
-    await sendKeepInChat(ctx, { animation: gif, caption: txt, extra: mainMenuKeyboard() });
-  } else if (logo && logo.startsWith("http")) {
-    await sendKeepInChat(ctx, { photo: logo, caption: txt, extra: mainMenuKeyboard() });
-  } else {
-    await sendKeepInChat(ctx, { text: txt, extra: mainMenuKeyboard() });
+    await ctx.replyWithAnimation(gif, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: mainMenuKeyboard().reply_markup,
+    });
+    return;
   }
+
+  // si no hay gif, intentamos logo fijo
+  if (logo && logo.startsWith("http")) {
+    await ctx.replyWithPhoto(logo, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: mainMenuKeyboard().reply_markup,
+    });
+    return;
+  }
+
+  // fallback texto fijo
+  await ctx.reply(caption, {
+    parse_mode: "HTML",
+    reply_markup: mainMenuKeyboard().reply_markup,
+  });
 }
 
 async function showCategories(ctx) {
-  const chatId = ctx.chat.id;
-  const sess = getSess(chatId);
-  // Entrando a flujo "hojeando": si venías de menú/ayuda (mensajes fijos), arrancamos hoja limpia
-  if (!sess.lastMessageId) sess.lastMessageId = null;
-
   const { items } = await loadCatalog();
   const cats = categoriesFromItems(items);
 
@@ -726,8 +640,7 @@ async function showCategories(ctx) {
   for (let i = 0; i < cats.length; i += 2) {
     const row = [];
     row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
-    if (cats[i + 1])
-      row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
+    if (cats[i + 1]) row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
     buttons.push(row);
   }
   buttons.push(goMenuRow());
@@ -747,7 +660,10 @@ async function showProductCarousel(ctx, cat) {
   const prods = items.filter((p) => (p.cat || "General") === cat);
 
   if (!prods.length) {
-    await safeEditOrSend(ctx, { text: `No hay productos en <b>${cat}</b>.`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+    await safeEditOrSend(ctx, {
+      text: `No hay productos en <b>${cat}</b>.`,
+      extra: Markup.inlineKeyboard([goMenuRow()]),
+    });
     return;
   }
 
@@ -758,20 +674,23 @@ async function showProductCarousel(ctx, cat) {
 
   const p = prods[0];
   const caption = productCaption(cfg, p, 0, prods.length);
-
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
   if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
   else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 }
 
 async function showSellos(ctx, showLevels = false) {
   const cfg = await loadConfig();
+
   const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
   const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
   const sellos = me ? parseNumber(me[3], 0) : 0;
 
   const cardUrl = String(cfg.CARD_URL || cfg.CardURL || cfg.SelloURL || "").trim();
-  const caption = showLevels ? `${sellosTextShort(cfg, sellos)}\n\n${sellosTextLevels(cfg)}` : sellosTextShort(cfg, sellos);
+  const caption = showLevels
+    ? `${sellosTextShort(cfg, sellos)}\n\n${sellosTextLevels(cfg)}`
+    : sellosTextShort(cfg, sellos);
 
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback(showLevels ? "⬅️ Volver" : "🏅 Ver niveles", showLevels ? "SELLOS_BACK" : "SELLOS_LEVELS")],
@@ -779,7 +698,6 @@ async function showSellos(ctx, showLevels = false) {
     goMenuRow(),
   ]);
 
-  // Sellos puede ser "hojeando" (ok)
   if (cardUrl && cardUrl.startsWith("http")) {
     await safeEditOrSend(ctx, { photo: cardUrl, caption, extra: kb });
   } else {
@@ -790,23 +708,30 @@ async function showSellos(ctx, showLevels = false) {
 async function showHelp(ctx) {
   const cfg = await loadConfig();
   const gif = pickRandom(splitPipes(cfg.GifAyudaURL || ""));
-  const nombre = cfg.NegocioNombre || "Todo Queso";
 
+  const nombre = cfg.NegocioNombre || "Todo Queso";
   const text = [
     `ℹ️ <b>Ayuda - ${nombre}</b>\n`,
-    `¿Qué necesitás?\n`,
-    `• ¿No encontraste un producto? Decime <b>qué buscás</b> y te ayudo.`,
-    `• ¿Querés sugerir algo o hacer un comentario? Escribilo y lo paso al vendedor.`,
-    `• ¿Querés hablar con un vendedor? Tocá el botón 👇`,
+    `• Tocá 🧀 <b>Catálogo</b> y elegí productos.`,
+    `• Tocá ✅ <b>Quiero éste</b> y escribí gramos o unidades.`,
+    `• Vas a poder cancelar en cualquier momento.`,
+    `• Si pagás por transferencia: enviás comprobante por WhatsApp y el vendedor confirma.`,
   ].join("\n");
 
-  const kb = Markup.inlineKeyboard([[Markup.button.callback("👩‍🍳 Contactar vendedor", "HELP_CONTACT")], goMenuRow()]);
+  const kb = Markup.inlineKeyboard([goMenuRow()]);
 
-  // AYUDA: dejar en chat (no hojear)
+  // FIJO: no editar
   if (gif && gif.startsWith("http")) {
-    await sendKeepInChat(ctx, { animation: gif, caption: text, extra: kb });
+    await ctx.replyWithAnimation(gif, {
+      caption: text,
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
   } else {
-    await sendKeepInChat(ctx, { text, extra: kb });
+    await ctx.reply(text, {
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
   }
 }
 
@@ -819,24 +744,33 @@ async function showShareBot(ctx) {
     `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y pedí en 1 minuto.`;
 
   if (!botLink) {
-    await sendKeepInChat(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: Markup.inlineKeyboard([goMenuRow()]) });
+    await ctx.reply("Falta <b>BotLink</b> en Config para compartir.", { parse_mode: "HTML" });
     return;
   }
 
   const links = buildShareLinks({ botLink, text: textShare });
-
   const caption = [
     `📣 <b>Compartir</b>\n`,
     `Elegí dónde compartir 👇`,
   ].join("\n");
 
-  const kb = shareKeyboard(links);
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.url("📲 WhatsApp", links.wa), Markup.button.url("✈️ Telegram", links.tg)],
+    goMenuRow(),
+  ]);
 
-  // COMPARTIR: dejar en chat (no hojear)
+  // FIJO: no editar
   if (gif && gif.startsWith("http")) {
-    await sendKeepInChat(ctx, { animation: gif, caption, extra: kb });
+    await ctx.replyWithAnimation(gif, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
   } else {
-    await sendKeepInChat(ctx, { text: caption, extra: kb });
+    await ctx.reply(caption, {
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
   }
 }
 
@@ -854,24 +788,23 @@ function computeSubtotal(p, qtyType, value) {
   if (qtyType === "g") {
     const grams = Math.max(1, parseNumber(value, 0));
     const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price; // si no hay precio/kg, asumimos price es por kg
-    const subtotal = (grams / 1000) * perKg;
+    const subtotal = roundARS((grams / 1000) * perKg);
     return { grams, qty: 0, subtotal };
   }
   const qty = Math.max(1, parseNumber(value, 0));
-  const subtotal = qty * p.price;
+  const subtotal = roundARS(qty * p.price);
   return { grams: 0, qty, subtotal };
 }
 
+// ✅ CORREGIDO: NO inflar totales
 function addToCart(sess, p, qtyType, value) {
   const calc = computeSubtotal(p, qtyType, value);
-
-  // MISMO PRODUCTO + MISMO TIPO (g/u): acumulamos cantidad y subtotal (correcto)
   const existing = sess.cart.find((x) => x.code === p.code && x.qtyType === qtyType);
 
   if (existing) {
-    if (qtyType === "g") existing.grams += calc.grams;
-    else existing.qty += calc.qty;
-    existing.subtotal += calc.subtotal;
+    existing.subtotal = roundARS((existing.subtotal || 0) + calc.subtotal);
+    if (qtyType === "g") existing.grams = (existing.grams || 0) + calc.grams;
+    else existing.qty = (existing.qty || 0) + calc.qty;
   } else {
     sess.cart.push({
       code: p.code,
@@ -898,9 +831,8 @@ async function showCheckoutTicketPreview(ctx) {
   const pago = sess.checkout.pagoTipo || "-";
 
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
-  const shippingCost = (entrega === "ENVIO" || entrega === "EXPRESS") ? costoEnvio : 0;
-
-  const total = cartTotal(sess.cart) + shippingCost;
+  let total = cartTotal(sess.cart);
+  if (entrega === "ENVIO" || entrega === "EXPRESS") total = roundARS(total + costoEnvio);
 
   const t = ticketPOS(cfg, {
     orderId: "—",
@@ -913,7 +845,7 @@ async function showCheckoutTicketPreview(ctx) {
     direccion: sess.checkout.direccion,
     notas: sess.checkout.notas,
     estado: "Pendiente de confirmación",
-    shippingCost,
+    costoEnvio,
   });
 
   const kb = Markup.inlineKeyboard([
@@ -930,9 +862,12 @@ async function showCheckoutTicketPreview(ctx) {
 ========================================================= */
 function deliveryKeyboard(cfg) {
   const rows = [];
-  if (parseYes(cfg.UsaEnvíoDomicilio || cfg.UsaEnvioDomicilio || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
-  if (parseYes(cfg.EnvioExpress || "SI")) rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
-  if (parseYes(cfg.UsaRetiroLocal || "SI")) rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
+  if (parseYes(cfg.UsaEnvíoDomicilio || cfg.UsaEnvioDomicilio || "SI"))
+    rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
+  if (parseYes(cfg.EnvioExpress || "SI"))
+    rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
+  if (parseYes(cfg.UsaRetiroLocal || "SI"))
+    rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
   rows.push([Markup.button.callback("⬅️ Volver", "BACK_TO_CART")]);
   rows.push(goMenuRow());
   return Markup.inlineKeyboard(rows);
@@ -968,19 +903,10 @@ async function showCart(ctx) {
   lines.push(`──────────────────`);
   sess.cart.forEach((it, i) => {
     lines.push(`${i + 1}) <b>${it.name}</b>`);
-    lines.push(`   ${fmtQty(it)} · ${money(it.subtotal || 0, moneda)}`);
+    lines.push(`   ${fmtQty(it)} · ${money(roundARS(it.subtotal || 0), moneda)}`);
   });
-
-  const entrega = sess.checkout.entregaTipo || "";
-  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
-  if ((entrega === "ENVIO" || entrega === "EXPRESS") && costoEnvio > 0) {
-    lines.push(`──────────────────`);
-    lines.push(`🚚 Envío: ${money(costoEnvio, moneda)}`);
-  }
-
   lines.push(`──────────────────`);
-  const total = cartTotal(sess.cart) + ((entrega === "ENVIO" || entrega === "EXPRESS") ? costoEnvio : 0);
-  lines.push(`🧮 <b>Total:</b> ${money(total, moneda)}`);
+  lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback("🚚 Elegir entrega", "CHK_DELIVERY")],
@@ -997,6 +923,27 @@ async function showDelivery(ctx) {
   await safeEditOrSend(ctx, {
     text: `🚚 <b>Entrega</b>\n\nElegí cómo querés recibir tu pedido 👇`,
     extra: deliveryKeyboard(cfg),
+  });
+}
+
+async function showPayment(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  const entregaTipo = sess.checkout.entregaTipo || "";
+  const moneda = cfg.Moneda || "ARS";
+  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
+
+  let extraText = "";
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
+    extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
+  } else {
+    extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
+  }
+
+  await safeEditOrSend(ctx, {
+    text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraText}`,
+    extra: payKeyboard(cfg),
   });
 }
 
@@ -1030,7 +977,7 @@ function getWhatsappOrderLink(cfg, orderId) {
   if (!waBase) return "";
 
   const text = encodeURIComponent(`Hola! Te envío el comprobante de transferencia del pedido ${orderId}.`);
-  if (waBase.includes("?text=")) return waBase;
+  if (waBase.includes("?text=")) return waBase; // si ya lo tenés armado
   return waBase.includes("?") ? `${waBase}&text=${text}` : `${waBase}?text=${text}`;
 }
 
@@ -1054,9 +1001,10 @@ async function finalizeOrderCreate(ctx) {
 
   const moneda = cfg.Moneda || "ARS";
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
-  const shippingCost = (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") ? costoEnvio : 0;
 
-  let total = cartTotal(sess.cart) + shippingCost;
+  // ✅ TOTAL CORRECTO (cart + envío una sola vez)
+  let total = cartTotal(sess.cart);
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total = roundARS(total + costoEnvio);
 
   // sellos por compra
   const usaSellos = parseYes(cfg.UsaSellos || "SI");
@@ -1070,7 +1018,7 @@ async function finalizeOrderCreate(ctx) {
   const direccion = sess.checkout.direccion || "";
   const notas = sess.checkout.notas || "";
 
-  // persist cliente
+  // persist cliente (sumar sellos ahora)
   await upsertCliente({
     chatId: ctx.chat.id,
     nombre,
@@ -1080,7 +1028,7 @@ async function finalizeOrderCreate(ctx) {
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
 
-  // referido bonus
+  // referido bonus al referente por compra
   const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
   if (sess.refBy) {
     for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
@@ -1112,7 +1060,7 @@ async function finalizeOrderCreate(ctx) {
     sess.refBy ? String(sess.refBy) : "",
   ]);
 
-  // avisar vendedor
+  // avisar vendedor por Telegram (Config: VendedorChatId)
   const vendedorIdReal = String(cfg.VendedorChatId || "").trim();
   const vendedor = vendedorIdReal ? Number(vendedorIdReal) : null;
 
@@ -1127,7 +1075,7 @@ async function finalizeOrderCreate(ctx) {
     direccion,
     notas,
     estado: "PENDIENTE (espera comprobante)",
-    shippingCost,
+    costoEnvio,
   });
 
   if (vendedor && Number.isFinite(vendedor)) {
@@ -1141,7 +1089,7 @@ async function finalizeOrderCreate(ctx) {
     });
   }
 
-  // cliente
+  // cliente: ticket + transferencia + 1h
   const ticketCliente = ticketPOS(cfg, {
     orderId,
     items: sess.cart,
@@ -1153,7 +1101,7 @@ async function finalizeOrderCreate(ctx) {
     direccion,
     notas,
     estado: "PENDIENTE",
-    shippingCost,
+    costoEnvio,
   });
 
   const waOrder = getWhatsappOrderLink(cfg, orderId);
@@ -1178,7 +1126,7 @@ async function finalizeOrderCreate(ctx) {
     extra: Markup.inlineKeyboard(kbClienteRows),
   });
 
-  // vencimiento programado
+  // programar vencimiento
   scheduleExpire(orderId, expMs, async () => {
     const row = await setPedidoEstado(orderId, "VENCIDO");
     if (!row) return;
@@ -1227,6 +1175,9 @@ const bot = new Telegraf(TelegramBotToken);
 
 /* START */
 bot.start(async (ctx) => {
+  await ensureBaseSheets();
+  await expireOldPending();
+
   const sess = getSess(ctx.chat.id);
 
   const payload = (ctx.startPayload || "").trim();
@@ -1239,6 +1190,7 @@ bot.start(async (ctx) => {
 
   await showMenu(ctx);
 
+  // salto a producto si viene por link
   if (sess.jumpProdCode) {
     const code = sess.jumpProdCode;
     sess.jumpProdCode = null;
@@ -1246,10 +1198,7 @@ bot.start(async (ctx) => {
     const { items } = await loadCatalog();
     const p = items.find((x) => x.code === code);
     if (p) {
-      // arrancamos catálogo "hojeando"
-      sess.lastMessageId = null;
       await showProductCarousel(ctx, p.cat || "General");
-
       const sess2 = getSess(ctx.chat.id);
       const idx = sess2.productsInView.findIndex((x) => x.code === code);
       if (idx >= 0) {
@@ -1266,18 +1215,9 @@ bot.start(async (ctx) => {
 });
 
 /* MENÚ */
-bot.action("GO_MENU", async (ctx) => {
-  await ctx.answerCbQuery();
-  await showMenu(ctx);
-});
+bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
 
-bot.action("MENU_CATALOGO", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  // arrancamos hoja del catálogo sin tocar los mensajes fijos
-  sess.lastMessageId = null;
-  await showCategories(ctx);
-});
+bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
 bot.action("SELLOS_LEVELS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, true); });
 bot.action("SELLOS_BACK", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
@@ -1347,7 +1287,10 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
   const p = items.find((x) => x.code === productCode);
   const botLink = String(cfg.BotLink || "").trim();
   if (!p || !botLink) {
-    await safeEditOrSend(ctx, { text: "No pude preparar el link de compartir (falta BotLink o producto).", extra: Markup.inlineKeyboard([goMenuRow()]) });
+    await safeEditOrSend(ctx, {
+      text: "No pude preparar el link de compartir (falta BotLink o producto).",
+      extra: Markup.inlineKeyboard([goMenuRow()]),
+    });
     return;
   }
 
@@ -1393,6 +1336,11 @@ bot.action("DELIVERY_RETIRO", async (ctx) => {
   sess.checkout.entregaTipo = "RETIRO";
   sess.waiting = { type: "NAME", payload: { retiro: true } };
   await safeEditOrSend(ctx, { text: `🏪 <b>Retiro en el local</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+});
+
+bot.action("BACK_TO_DELIVERY", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showDelivery(ctx);
 });
 
 bot.action(/^PAY_(.+)$/i, async (ctx) => {
@@ -1496,11 +1444,10 @@ bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
   if (!row) return;
   const chatIdCliente = Number(row[3]);
   if (Number.isFinite(chatIdCliente)) {
-    await bot.telegram.sendMessage(
-      chatIdCliente,
-      `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`,
-      { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard([goMenuRow()]).reply_markup }
-    );
+    await bot.telegram.sendMessage(chatIdCliente, `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`, {
+      parse_mode: "HTML",
+      reply_markup: Markup.inlineKeyboard([goMenuRow()]).reply_markup,
+    });
   }
   await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
 });
@@ -1523,9 +1470,11 @@ bot.action("CART_CLEAR", async (ctx) => {
 
 /* =========================================================
    TEXT HANDLER (cantidad + datos + ayuda)
-   CORRECCIÓN: no hacemos ensureBaseSheets/expireOldPending en cada texto
 ========================================================= */
 bot.on("text", async (ctx) => {
+  await ensureBaseSheets();
+  await expireOldPending();
+
   const sess = getSess(ctx.chat.id);
   const cfg = await loadConfig();
   const text = String(ctx.message.text || "").trim();
@@ -1610,15 +1559,6 @@ app.get("/", (req, res) => res.status(200).send("EzerBot OK ✅"));
 async function start() {
   await ensureBaseSheets();
   await expireOldPending();
-
-  // mantenimiento: cada 2 min vencimientos + refrescar caches suave
-  setInterval(async () => {
-    try {
-      await expireOldPending();
-    } catch (e) {
-      console.error("expireOldPending error:", e?.message || e);
-    }
-  }, 120000);
 
   if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
     const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
