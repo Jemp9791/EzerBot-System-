@@ -420,17 +420,66 @@ function goMenuRow() {
 /* =========================================================
    LOADERS
 ========================================================= */
+/* =========================================================
+   LOADERS (CON CACHE PARA QUE NO TARDE)
+========================================================= */
+
+// Cache en memoria (evita pedir a Sheets en cada click/mensaje)
+const CACHE = {
+  cfg: { data: null, ts: 0 },
+  catalog: { data: null, ts: 0 },
+};
+
+// TTLs (ajustables)
+const CFG_TTL_MS = 15 * 1000;      // 15s
+const CATALOG_TTL_MS = 30 * 1000;  // 30s
+
 async function loadConfig() {
+  const now = Date.now();
+  if (CACHE.cfg.data && (now - CACHE.cfg.ts) < CFG_TTL_MS) return CACHE.cfg.data;
+
   const rows = await getSheetValues(`Config!A:B`);
-  return kvFromRows(rows);
+  const cfg = kvFromRows(rows);
+
+  CACHE.cfg = { data: cfg, ts: now };
+  return cfg;
 }
 
 async function loadCatalog() {
+  const now = Date.now();
+  if (CACHE.catalog.data && (now - CACHE.catalog.ts) < CATALOG_TTL_MS) return CACHE.catalog.data;
+
   const rows = await getSheetValues(`Catalogo!A1:Z`);
-  if (!rows.length) return { items: [], headers: {} };
+  if (!rows.length) {
+    const empty = { items: [], headers: {} };
+    CACHE.catalog = { data: empty, ts: now };
+    return empty;
+  }
+
   const headerRow = rows[0];
   const hmap = normalizeHeaders(headerRow);
-  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
+  const data = rows
+    .slice(1)
+    .filter((r) => r.some((c) => String(c || "").trim() !== ""));
+
+  const items = data.map((r, i) => {
+    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
+    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
+    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
+    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0), 0);
+    const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
+    const unit = inferUnit(unitRaw);
+    const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
+    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
+    const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
+    const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
+    return { code, name, price, pricePerKg, unit, cat, img, desc, isCombo };
+  });
+
+  const result = { items, headers: hmap };
+  CACHE.catalog = { data: result, ts: now };
+  return result;
+}
 
   const items = data.map((r, i) => {
     const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
