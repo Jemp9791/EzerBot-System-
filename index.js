@@ -1575,4 +1575,3 @@ start().catch((e) => {
   console.error("FATAL:", e?.message || e);
   process.exit(1);
 });
-```0
