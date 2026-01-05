@@ -908,6 +908,592 @@ function buildTransferDataText(cfg) {
 }
 
 function getWhatsappOrderLink(cfg, orderId) {
-  const link = String(cfg
+  const link = String(cfg.WhatsAppLink || "").trim();
+  const telRaw = String(cfg.NegocioTelefono || "").trim();
+  const tel = telRaw.replace(/[^\d]/g, "");
+  const waBase = link || (tel ? `https://wa.me/${tel}` : "");
+  if (!waBase) return "";
 
+  const text = encodeURIComponent(`Hola! Te envío el comprobante de transferencia del pedido ${orderId}.`);
+  if (waBase.includes("?text=")) return waBase; // si ya lo tenés armado
+  return waBase.includes("?") ? `${waBase}&text=${text}` : `${waBase}?text=${text}`;
+}
+
+function scheduleExpire(orderId, expMs, onExpire) {
+  if (ORDER_TIMERS.has(orderId)) clearTimeout(ORDER_TIMERS.get(orderId));
+  const t = setTimeout(onExpire, expMs);
+  ORDER_TIMERS.set(orderId, t);
+}
+
+async function finalizeOrderCreate(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  if (!sess.cart.length) {
+    await safeEditOrSend(ctx, { text: "Tu carrito está vacío.", extra: mainMenuKeyboard() });
+    return;
+  }
+
+  const entregaTipo = sess.checkout.entregaTipo || "RETIRO";
+  const pagoTipo = sess.checkout.pagoTipo || "EFECTIVO";
+
+  // total + envío si corresponde
+  const moneda = cfg.Moneda || "ARS";
+  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
+  let total = cartTotal(sess.cart);
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total += costoEnvio;
+
+  // sellos por compra
+  const usaSellos = parseYes(cfg.UsaSellos || "SI");
+  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
+  const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
+
+  // datos cliente
+  const nombre = sess.checkout.nombre || `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
+  const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
+  const telefono = sess.checkout.telefono || "";
+  const direccion = sess.checkout.direccion || "";
+  const notas = sess.checkout.notas || "";
+
+  // persist cliente (sumar sellos ahora)
+  await upsertCliente({
+    chatId: ctx.chat.id,
+    nombre,
+    usuario,
+    addSellos: sellosGanados,
+    addTotal: total,
+    refBy: sess.refBy ? String(sess.refBy) : "",
+  });
+
+  // referido bonus al referente por compra
+  const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
+  if (sess.refBy) {
+    // gana BonusSellosShare sello(s) sin importar valor
+    for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
+  }
+
+  // pedido
+  const orderId = buildOrderId();
+  const now = new Date();
+  const expMs = 60 * 60 * 1000; // 1 hora
+  const expIso = new Date(now.getTime() + expMs).toISOString();
+
+  const itemsText = sess.cart.map((it) => `${it.name} (${fmtQty(it)})`).join(" | ");
+
+  await appendRow(PEDIDOS_SHEET, [
+    orderId,
+    now.toISOString(),
+    expIso,
+    String(ctx.chat.id),
+    nombre,
+    usuario,
+    itemsText,
+    total,
+    entregaTipo,
+    pagoTipo,
+    direccion,
+    telefono,
+    notas,
+    "PENDIENTE",
+    sess.refBy ? String(sess.refBy) : "",
+  ]);
+
+  // avisar vendedor por Telegram (Config: VendedorChatId)
+  const vendedorIdReal = String(cfg.VendedorChatId || "").trim();
+  const vendedor = vendedorIdReal ? Number(vendedorIdReal) : null;
+
+  const ticketVendedor = ticketPOS(cfg, {
+    orderId,
+    items: sess.cart,
+    total,
+    entregaTipo,
+    pagoTipo,
+    nombre,
+    telefono,
+    direccion,
+    notas,
+    estado: "PENDIENTE (espera comprobante)",
+  });
+
+  if (vendedor && Number.isFinite(vendedor)) {
+    const kbVend = Markup.inlineKeyboard([
+      [Markup.button.callback("✅ Confirmar pago", `V_CONFIRM_${orderId}`)],
+      [Markup.button.callback("❌ Rechazar", `V_REJECT_${orderId}`)],
+    ]);
+    await bot.telegram.sendMessage(vendedor, ticketVendedor, {
+      parse_mode: "HTML",
+      reply_markup: kbVend.reply_markup,
+    });
+  }
+
+  // cliente: ticket + transferencia + 1h
+  const ticketCliente = ticketPOS(cfg, {
+    orderId,
+    items: sess.cart,
+    total,
+    entregaTipo,
+    pagoTipo,
+    nombre,
+    telefono,
+    direccion,
+    notas,
+    estado: "PENDIENTE",
+  });
+
+  const waOrder = getWhatsappOrderLink(cfg, orderId);
+
+  const extra = [];
+  extra.push(`⏳ Este pedido queda <b>pendiente</b> hasta que el vendedor confirme el pago.`);
+  extra.push(`🕐 Si no se confirma en <b>1 hora</b>, se cancela automáticamente.`);
+  if (String(pagoTipo).toUpperCase().includes("TRANSF")) {
+    extra.push("");
+    extra.push(buildTransferDataText(cfg));
+    extra.push("");
+    extra.push(`📲 Enviá el <b>comprobante</b> por WhatsApp para que lo confirmen.`);
+  }
+
+  const kbClienteRows = [];
+  if (waOrder) kbClienteRows.push([Markup.button.url("📲 Enviar comprobante por WhatsApp", waOrder)]);
+  kbClienteRows.push([Markup.button.callback("❌ Cancelar compra", `CANCEL_${orderId}`)]);
+  kbClienteRows.push(goMenuRow());
+
+  await safeEditOrSend(ctx, {
+    text: `${ticketCliente}\n\n${extra.join("\n")}`,
+    extra: Markup.inlineKeyboard(kbClienteRows),
+  });
+
+  // programar vencimiento
+  scheduleExpire(orderId, expMs, async () => {
+    const row = await setPedidoEstado(orderId, "VENCIDO");
+    if (!row) return;
+    const chatIdCliente = Number(row[3]);
+    if (Number.isFinite(chatIdCliente)) {
+      await bot.telegram.sendMessage(
+        chatIdCliente,
+        `⏳ Tu pedido <b>${orderId}</b> venció por falta de confirmación y fue cancelado automáticamente.`,
+        { parse_mode: "HTML" }
+      );
+    }
+  });
+
+  // limpiar estado compra (sin romper carrusel)
+  sess.cart = [];
+  sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
+  sess.waiting = null;
+}
+
+/* =========================================================
+   HELP CONTACT (manda mensaje al vendedor)
+========================================================= */
+async function forwardToVendedor(cfg, fromCtx, text) {
+  const vendedorId = String(cfg.VendedorChatId || "").trim();
+  const vendedor = vendedorId ? Number(vendedorId) : null;
+  if (!vendedor || !Number.isFinite(vendedor)) return false;
+
+  const nombre = `${fromCtx.from.first_name || ""} ${fromCtx.from.last_name || ""}`.trim();
+  const usuario = fromCtx.from.username ? `@${fromCtx.from.username}` : "";
+  const msg = [
+    `📩 <b>Mensaje de cliente</b>`,
+    `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
+    `🆔 <code>${fromCtx.chat.id}</code>`,
+    `──────────────────`,
+    `${text}`,
+  ].join("\n");
+
+  await bot.telegram.sendMessage(vendedor, msg, { parse_mode: "HTML" });
+  return true;
+}
+
+/* =========================================================
+   TELEGRAM BOT
+========================================================= */
+const bot = new Telegraf(TelegramBotToken);
+
+/* START */
+bot.start(async (ctx) => {
+  await ensureBaseSheets();
+  await expireOldPending();
+
+  const sess = getSess(ctx.chat.id);
+
+  const payload = (ctx.startPayload || "").trim();
+  if (payload) {
+    const mRef = payload.match(/ref_(\d+)/);
+    if (mRef) sess.refBy = Number(mRef[1]);
+    const mProd = payload.match(/prod_([^_]+)/);
+    if (mProd) sess.jumpProdCode = decodeURIComponent(mProd[1]);
+  }
+
+  await showMenu(ctx);
+
+  if (sess.jumpProdCode) {
+    const code = sess.jumpProdCode;
+    sess.jumpProdCode = null;
+
+    const { items } = await loadCatalog();
+    const p = items.find((x) => x.code === code);
+    if (p) {
+      await showProductCarousel(ctx, p.cat || "General");
+      const sess2 = getSess(ctx.chat.id);
+      const idx = sess2.productsInView.findIndex((x) => x.code === code);
+      if (idx >= 0) {
+        sess2.productIndex = idx;
+        const cfg = await loadConfig();
+        const p2 = sess2.productsInView[idx];
+        const caption = productCaption(cfg, p2, idx, sess2.productsInView.length);
+        const photo = p2.img && p2.img.startsWith("http") ? p2.img : undefined;
+        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p2) });
+        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p2) });
+      }
+    }
+  }
+});
+
+/* MENÚ */
+bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
+
+bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
+bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
+bot.action("SELLOS_LEVELS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, true); });
+bot.action("SELLOS_BACK", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
+bot.action("MENU_AYUDA", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx); });
+bot.action("MENU_COMPARTIR", async (ctx) => { await ctx.answerCbQuery(); await showShareBot(ctx); });
+
+/* CATEGORÍAS */
+bot.action(/^CAT_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  const cat = decodeURIComponent(ctx.match[1]);
+  await showProductCarousel(ctx, cat);
+});
+
+/* PRODUCT CAROUSEL */
+bot.action("PROD_NEXT", async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  if (!sess.productsInView.length) return;
+  sess.productIndex = (sess.productIndex + 1) % sess.productsInView.length;
+  const p = sess.productsInView[sess.productIndex];
+  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+});
+
+bot.action("PROD_PREV", async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  if (!sess.productsInView.length) return;
+  sess.productIndex = (sess.productIndex - 1 + sess.productsInView.length) % sess.productsInView.length;
+  const p = sess.productsInView[sess.productIndex];
+  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+});
+
+/* QUIERO ESTE -> PREGUNTAR CANTIDAD */
+bot.action(/^WANT_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  const code = ctx.match[1];
+
+  const p = sess.productsInView.find((x) => x.code === code);
+  if (!p) return;
+
+  const qtyType = p.unit === "g" ? "g" : "u";
+  sess.waiting = { type: "QTY", payload: { code, qtyType } };
+
+  await safeEditOrSend(ctx, {
+    text: qtyPromptText(cfg, p),
+    extra: Markup.inlineKeyboard([goMenuRow()]),
+  });
+});
+
+/* COMPARTIR PRODUCTO */
+bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const { items } = await loadCatalog();
+
+  const productCode = ctx.match[1];
+  const p = items.find((x) => x.code === productCode);
+  const botLink = String(cfg.BotLink || "").trim();
+  if (!p || !botLink) {
+    await safeEditOrSend(ctx, { text: "No pude preparar el link de compartir (falta BotLink o producto).", extra: Markup.inlineKeyboard([goMenuRow()]) });
+    return;
+  }
+
+  const ref = ctx.chat.id;
+  const deepLink = botLink.includes("?start=")
+    ? botLink
+    : `${botLink}${botLink.includes("?") ? "&" : "?"}start=ref_${ref}__prod_${encodeURIComponent(p.code)}`;
+
+  const moneda = cfg.Moneda || "ARS";
+  const priceTxt = p.unit === "g" && p.pricePerKg > 0 ? `${money(p.pricePerKg, moneda)} / kg` : money(p.price, moneda);
+  const text = `🧀 ${cfg.NegocioNombre || "Todo Queso"}\n\nPromo: ${p.name} — ${priceTxt}\nTocá el link para ver y comprar 👇`;
+  const links = buildShareLinks({ botLink: deepLink, text });
+
+  await safeEditOrSend(ctx, {
+    text: `🔗 <b>Compartir producto</b>\n\n${p.name}\n\nElegí dónde compartir 👇`,
+    extra: shareKeyboard(links),
+  });
+});
+
+/* CART / CHECKOUT */
+bot.action("CHK_DELIVERY", async (ctx) => { await ctx.answerCbQuery(); await showDelivery(ctx); });
+bot.action("BACK_TO_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
+
+bot.action("DELIVERY_ENVIO", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.checkout.entregaTipo = "ENVIO";
+  sess.waiting = { type: "NAME", payload: {} };
+  await safeEditOrSend(ctx, { text: `🚚 <b>Envío a domicilio</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+});
+
+bot.action("DELIVERY_EXPRESS", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.checkout.entregaTipo = "EXPRESS";
+  sess.waiting = { type: "NAME", payload: {} };
+  await safeEditOrSend(ctx, { text: `⚡ <b>Envío express</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+});
+
+bot.action("DELIVERY_RETIRO", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.checkout.entregaTipo = "RETIRO";
+  sess.waiting = { type: "NAME", payload: { retiro: true } };
+  await safeEditOrSend(ctx, { text: `🏪 <b>Retiro en el local</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+});
+
+bot.action(/^PAY_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  const pago = (ctx.match[1] || "TRANSFERENCIA").toUpperCase();
+  sess.checkout.pagoTipo = pago;
+  await showCheckoutTicketPreview(ctx);
+});
+
+bot.action("PAY_EFECTIVO", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.checkout.pagoTipo = "EFECTIVO";
+  await showCheckoutTicketPreview(ctx);
+});
+
+bot.action("FINALIZE_ORDER", async (ctx) => {
+  await ctx.answerCbQuery();
+  await finalizeOrderCreate(ctx);
+});
+
+bot.action("CANCEL_FLOW", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.cart = [];
+  sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
+  sess.waiting = null;
+  await safeEditOrSend(ctx, { text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`, extra: mainMenuKeyboard() });
+});
+
+bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  const orderId = ctx.match[1];
+  const row = await setPedidoEstado(orderId, "CANCELADO");
+  if (!row) {
+    await safeEditOrSend(ctx, { text: "No pude cancelar ese pedido (no lo encontré).", extra: mainMenuKeyboard() });
+    return;
+  }
+  await safeEditOrSend(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
+});
+
+/* VENDEDOR CONFIRMA/RECHAZA */
+bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery("Confirmado ✅");
+  const cfg = await loadConfig();
+  const orderId = ctx.match[1];
+  const row = await setPedidoEstado(orderId, "APROBADO");
+  if (!row) return;
+
+  const chatIdCliente = Number(row[3]);
+  const entregaTipo = row[8] || "";
+  const pagoTipo = row[9] || "";
+  const nombre = row[4] || "";
+  const usuario = row[5] || "";
+  const itemsText = row[6] || "";
+  const total = parseNumber(row[7], 0);
+  const direccion = row[10] || "";
+  const telefono = row[11] || "";
+  const notas = row[12] || "";
+
+  const msgConfirm = String(cfg.TextoConfirmacionPedido || "").trim() || "✅ Pago confirmado. Ya estamos preparando tu pedido.";
+  const extraEntrega =
+    entregaTipo === "RETIRO"
+      ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
+      : entregaTipo === "EXPRESS"
+      ? `⚡ Envío express: lo enviamos lo antes posible.`
+      : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
+
+  const t = [
+    `✅ <b>Pedido confirmado</b>`,
+    `<code>${orderId}</code>`,
+    `──────────────────`,
+    `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
+    `📦 ${itemsText}`,
+    `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
+    `🚚 <b>Entrega:</b> ${entregaTipo}`,
+    `💳 <b>Pago:</b> ${pagoTipo}`,
+    direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
+    telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
+    notas ? `📝 <b>Notas:</b> ${notas}` : "",
+    `──────────────────`,
+    msgConfirm,
+    extraEntrega,
+  ].filter(Boolean).join("\n");
+
+  if (Number.isFinite(chatIdCliente)) {
+    await bot.telegram.sendMessage(chatIdCliente, t, { parse_mode: "HTML" });
+  }
+
+  await ctx.editMessageText(`${t}\n\n✅ <b>Estado:</b> APROBADO`, { parse_mode: "HTML" });
+});
+
+bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery("Rechazado ❌");
+  const orderId = ctx.match[1];
+  const row = await setPedidoEstado(orderId, "RECHAZADO");
+  if (!row) return;
+  const chatIdCliente = Number(row[3]);
+  if (Number.isFinite(chatIdCliente)) {
+    await bot.telegram.sendMessage(chatIdCliente, `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`, { parse_mode: "HTML" });
+  }
+  await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
+});
+
+/* HELP CONTACT */
+bot.action("HELP_CONTACT", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.waiting = { type: "HELP_MSG", payload: {} };
+  await safeEditOrSend(ctx, { text: `📝 Escribime tu mensaje y se lo paso al vendedor (1 solo mensaje).`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+});
+
+/* CART CLEAR */
+bot.action("CART_CLEAR", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  sess.cart = [];
+  await showCart(ctx);
+});
+
+/* =========================================================
+   TEXT HANDLER (cantidad + datos + ayuda)
+========================================================= */
+bot.on("text", async (ctx) => {
+  await ensureBaseSheets();
+  await expireOldPending();
+
+  const sess = getSess(ctx.chat.id);
+  const cfg = await loadConfig();
+  const text = String(ctx.message.text || "").trim();
+
+  if (!sess.waiting) return;
+
+  const w = sess.waiting;
+  sess.waiting = null;
+
+  if (w.type === "HELP_MSG") {
+    const ok = await forwardToVendedor(cfg, ctx, text);
+    if (ok) await safeEditOrSend(ctx, { text: `✅ Listo. Ya le mandé tu mensaje al vendedor.`, extra: mainMenuKeyboard() });
+    else await safeEditOrSend(ctx, { text: `Falta <b>VendedorChatId</b> en Config para enviar el mensaje.`, extra: mainMenuKeyboard() });
+    return;
+  }
+
+  if (w.type === "QTY") {
+    const { code, qtyType } = w.payload || {};
+    const p = sess.productsInView.find((x) => x.code === code);
+    if (!p) {
+      await safeEditOrSend(ctx, { text: "No encontré el producto. Volvé al catálogo.", extra: mainMenuKeyboard() });
+      return;
+    }
+
+    const n = parseNumber(text, 0);
+    if (!n || n <= 0) {
+      sess.waiting = { type: "QTY", payload: { code, qtyType } };
+      await safeEditOrSend(ctx, { text: `⚠️ Pasame un número válido.\n\n${qtyPromptText(cfg, p)}`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+      return;
+    }
+
+    addToCart(sess, p, qtyType, n);
+    await showCart(ctx);
+    return;
+  }
+
+  if (w.type === "NAME") {
+    sess.checkout.nombre = text.slice(0, 60);
+    sess.waiting = { type: "PHONE", payload: w.payload || {} };
+    await safeEditOrSend(ctx, { text: `📞 Perfecto, ${sess.checkout.nombre}.\n\nAhora tu <b>teléfono</b> (solo números):`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+    return;
+  }
+
+  if (w.type === "PHONE") {
+    const tel = text.replace(/[^\d+]/g, "").slice(0, 25);
+    sess.checkout.telefono = tel;
+    const isRetiro = !!(w.payload && w.payload.retiro);
+
+    if (isRetiro) {
+      await safeEditOrSend(ctx, { text: `✅ Listo.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
+      return;
+    }
+
+    sess.waiting = { type: "ADDR", payload: {} };
+    await safeEditOrSend(ctx, { text: `📍 Ahora la <b>dirección</b> completa (calle + altura + localidad):`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+    return;
+  }
+
+  if (w.type === "ADDR") {
+    sess.checkout.direccion = text.slice(0, 140);
+    sess.waiting = { type: "NOTES", payload: {} };
+    await safeEditOrSend(ctx, { text: `📝 ¿Alguna nota? (timbre / piso / entre calles). Si no, escribí <code>NO</code>.`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+    return;
+  }
+
+  if (w.type === "NOTES") {
+    const t = text.toLowerCase();
+    sess.checkout.notas = (t === "no" || t === "n" || t === "0") ? "" : text.slice(0, 140);
+    await safeEditOrSend(ctx, { text: `✅ Datos listos.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
+    return;
+  }
+});
+
+/* =========================================================
+   WEB SERVER (Render)
+========================================================= */
+const app = express();
+app.use(express.json());
+
+app.get("/", (req, res) => res.status(200).send("EzerBot OK ✅"));
+
+async function start() {
+  await ensureBaseSheets();
+  await expireOldPending();
+
+  if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
+    const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
+    await bot.telegram.setWebhook(hook);
+    app.use(bot.webhookCallback("/telegram"));
+    app.listen(PORT, () => console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`));
+  } else {
+    bot.launch();
+    app.listen(PORT, () => console.log(`✅ Long-polling activo | Puerto ${PORT}`));
+  }
+}
+
+start().catch((e) => {
+  console.error("FATAL:", e?.message || e);
+  process.exit(1);
+}); 
                       
