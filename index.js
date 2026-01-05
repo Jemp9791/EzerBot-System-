@@ -2,27 +2,39 @@ import express from "express";
 import { Telegraf, Markup } from "telegraf";
 import { google } from "googleapis";
 
-/* =========================
-   NOTA IMPORTANTE
-   NO CAMBIAR VARIABLES
-========================= */
-const BOT_TOKEN = process.env.BOT_TOKEN;
+/* =========================================================
+   ENV (NO CAMBIAR NOMBRES)
+   - TelegramBotToken (Render Env)
+   - GOOGLE_SHEET_ID
+   - GOOGLE_SERVICE_ACCOUNT_B64
+   - PUBLIC_URL (opcional)
+   - PORT (Render)
+========================================================= */
+const TelegramBotToken = process.env.TelegramBotToken || process.env.TELEGRAM_BOT_TOKEN; // fallback sin romper
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
-const BOT_LINK = process.env.BOT_LINK || "";
+const PORT = process.env.PORT || 10000;
 
-if (!BOT_TOKEN) throw new Error("Falta BOT_TOKEN");
+if (!TelegramBotToken) throw new Error("Falta TelegramBotToken");
 if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
 if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
-/* =========================
+/* =========================================================
    GOOGLE AUTH
-========================= */
-function decodeServiceAccount(b64) {
-  return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+========================================================= */
+function decodeServiceAccountB64(b64) {
+  const raw = Buffer.from(b64, "base64").toString("utf8").trim();
+  let obj;
+  try {
+    obj = JSON.parse(raw);
+  } catch {
+    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON válido.");
+  }
+  return obj;
 }
-const sa = decodeServiceAccount(GOOGLE_SERVICE_ACCOUNT_B64);
+
+const sa = decodeServiceAccountB64(GOOGLE_SERVICE_ACCOUNT_B64);
 
 const auth = new google.auth.JWT({
   email: sa.client_email,
@@ -31,394 +43,476 @@ const auth = new google.auth.JWT({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-/* =========================
-   HELPERS SHEETS
-========================= */
-async function getValues(range) {
-  const r = await sheets.spreadsheets.values.get({
+/* =========================================================
+   SHEETS HELPERS
+========================================================= */
+async function getSheetValues(rangeA1) {
+  const res = await sheets.spreadsheets.values.get({
     spreadsheetId: GOOGLE_SHEET_ID,
-    range,
+    range: rangeA1,
   });
-  return r.data.values || [];
+  return res.data.values || [];
 }
-async function setValues(range, values) {
+
+async function setSheetValues(rangeA1, values) {
   await sheets.spreadsheets.values.update({
     spreadsheetId: GOOGLE_SHEET_ID,
-    range,
+    range: rangeA1,
     valueInputOption: "USER_ENTERED",
     requestBody: { values },
   });
 }
-async function appendRow(sheet, row) {
+
+async function appendRow(sheetName, row) {
   await sheets.spreadsheets.values.append({
     spreadsheetId: GOOGLE_SHEET_ID,
-    range: `${sheet}!A:Z`,
+    range: `${sheetName}!A:Z`,
     valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
     requestBody: { values: [row] },
   });
 }
-
-/* =========================
-   UTILS
-========================= */
-const yes = (v) => String(v || "").toLowerCase() === "si";
-const num = (v, d = 0) => (isNaN(Number(v)) ? d : Number(v));
-const money = (n, m = "ARS") => `${m} ${Math.round(n).toLocaleString("es-AR")}`;
-const nowISO = () => new Date().toISOString();
-const in1hISO = () => new Date(Date.now() + 60 * 60000).toISOString();
-const token = () => Math.random().toString(36).substring(2, 10).toUpperCase();
-
-/* =========================
-   BADGES VISUALES
-========================= */
-const B_CLIENTE = "🟦 <b>CLIENTE</b>";
-const B_VENDEDOR = "🟧 <b>VENDEDOR</b>";
-const B_OK = "🟩 <b>PAGO CONFIRMADO</b>";
-const B_PEND = "🟨 <b>PAGO PENDIENTE</b>";
-const B_CANCEL = "🟥 <b>CANCELADO</b>";
-
-/* =========================
-   BOT
-========================= */
-const bot = new Telegraf(BOT_TOKEN);
-
-/* =========================
-   MEMORIA SIMPLE
-========================= */
-const SESS = new Map();
-function S(chat) {
-  if (!SESS.has(chat)) {
-    SESS.set(chat, {
-      cart: [],
-      step: null,
-      entrega: null,
-      pago: null,
-      nombre: "",
-      telefono: "",
-      direccion: "",
-      lastMsg: null,
-    });
-  }
-  return SESS.get(chat);
-}
-
-/* =========================
-   SAFE SEND (NO SPAM)
-========================= */
-async function send(ctx, text, kb) {
-  const s = S(ctx.chat.id);
-  try {
-    if (s.lastMsg) {
-      await ctx.telegram.editMessageText(
-        ctx.chat.id,
-        s.lastMsg,
-        null,
-        text,
-        { parse_mode: "HTML", ...kb }
-      );
-      return;
-    }
-  } catch {}
-  const m = await ctx.reply(text, { parse_mode: "HTML", ...kb });
-  s.lastMsg = m.message_id;
-}
-
-/* =========================
-   CONFIG
-========================= */
-async function loadConfig() {
-  const rows = await getValues("Config!A:B");
-  const cfg = {};
-  rows.forEach(r => cfg[r[0]] = r[1]);
-  return cfg;
-}
-
-/* =========================
-   CATALOGO
-========================= */
-async function loadCatalogo() {
-  const rows = await getValues("Catalogo!A1:Z");
-  const h = rows[0];
-  return rows.slice(1).map(r => ({
-    codigo: r[h.indexOf("codigo")],
-    nombre: r[h.indexOf("nombre")],
-    precio: num(r[h.indexOf("precio")]),
-    unidad: r[h.indexOf("unidad")],
-    categoria: r[h.indexOf("categoria")],
-  }));
-}
-
-/* =========================
-   MENU INICIAL (CON LOGO)
-========================= */
-bot.start(async ctx => {
-  const cfg = await loadConfig();
-  const logo = cfg.LogoURL;
-  const txt = `
-${B_CLIENTE}
-🏠 <b>${cfg.NegocioNombre}</b>
-📍 ${cfg.NegocioDireccion || ""}
-🕒 ${cfg.NegocioHorario || ""}
-
-${cfg.Descripcion || ""}
-`.trim();
-
-  if (logo) {
-    const m = await ctx.replyWithPhoto(logo, {
-      caption: txt,
-      parse_mode: "HTML",
-      reply_markup: Markup.inlineKeyboard([
-        [Markup.button.callback("🧀 Catálogo", "CAT")],
-        [Markup.button.callback("🎟️ Sellos", "SELL")],
-      ]).reply_markup,
-    });
-    S(ctx.chat.id).lastMsg = m.message_id;
-  } else {
-    await send(ctx, txt, Markup.inlineKeyboard([
-      [Markup.button.callback("🧀 Catálogo", "CAT")],
-      [Markup.button.callback("🎟️ Sellos", "SELL")],
-    ]));
-  }
-});
-
-/* =========================
-   PARTE 2 / 2  (PEGAR DEBAJO)
-========================= */
-
-/* ====== SHEETS BASE ====== */
-const SHEET_CATALOGO = "Catalogo";
-const SHEET_CLIENTES = "Clientes";
-const SHEET_PEDIDOS  = "Pedidos";
 
 async function listSheets() {
   const res = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
   return (res.data.sheets || []).map((s) => s.properties.title);
 }
-async function ensureSheet(name, headers) {
+
+async function ensureSheet(sheetName, headers) {
   const existing = await listSheets();
-  if (!existing.includes(name)) {
+  if (!existing.includes(sheetName)) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: GOOGLE_SHEET_ID,
-      requestBody: { requests: [{ addSheet: { properties: { title: name } } }] },
+      requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
     });
-    await setValues(`${name}!A1`, [headers]);
+    await setSheetValues(`${sheetName}!A1`, [headers]);
   } else {
-    const first = await getValues(`${name}!A1:Z1`);
-    if (!first.length || String(first[0]?.join("") || "").trim() === "") {
-      await setValues(`${name}!A1`, [headers]);
+    const firstRow = await getSheetValues(`${sheetName}!A1:Z1`);
+    if (!firstRow.length || firstRow[0].join("").trim() === "") {
+      await setSheetValues(`${sheetName}!A1`, [headers]);
     }
   }
 }
 
-const HEAD_CLIENTES = ["ChatId","Nombre","Usuario","Sellos","TotalComprado","UltISO"];
-const HEAD_PEDIDOS  = ["PedidoId","FechaISO","ExpiraISO","Estado","ChatIdCliente","Nombre","Telefono","Direccion","Entrega","Pago","Items","Total","RefBy","ConfirmToken"];
-
-async function ensureBase() {
-  await ensureSheet(SHEET_CLIENTES, HEAD_CLIENTES);
-  await ensureSheet(SHEET_PEDIDOS,  HEAD_PEDIDOS);
+/* =========================================================
+   CONFIG HELPERS
+========================================================= */
+function kvFromRows(rows) {
+  const out = {};
+  for (const r of rows) {
+    const k = (r[0] || "").toString().trim();
+    const v = (r[1] || "").toString().trim();
+    if (k) out[k] = v;
+  }
+  return out;
 }
 
-/* ====== CATALOGO ====== */
-function hmapFrom(headerRow) {
-  const m = {};
-  headerRow.forEach((h,i)=>{
-    const k = String(h||"").trim().toLowerCase().replace(/\s+/g,"");
-    if (k) m[k]=i;
+function parseYes(v) {
+  return String(v || "").trim().toLowerCase() === "si";
+}
+
+function parseNumber(v, def = 0) {
+  const n = Number(String(v || "").replace(/[^\d.-]/g, ""));
+  return Number.isFinite(n) ? n : def;
+}
+
+function money(n, moneda = "ARS") {
+  const num = Math.round(n);
+  return `${moneda} ${num.toLocaleString("es-AR")}`;
+}
+
+function splitPipes(v) {
+  const s = String(v || "").trim();
+  if (!s) return [];
+  return s.split("|").map((x) => x.trim()).filter(Boolean);
+}
+
+function pickRandom(arr) {
+  if (!arr || !arr.length) return "";
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+/* =========================================================
+   CATALOGO HELPERS
+========================================================= */
+function normalizeHeaders(headerRow) {
+  const map = {};
+  headerRow.forEach((h, i) => {
+    const key = String(h || "").trim().toLowerCase().replace(/\s+/g, "");
+    if (key) map[key] = i;
   });
-  return m;
+  return map;
 }
-function pick(row, hm, keys, def="") {
+
+function pick(row, hmap, keys, def = "") {
   for (const k of keys) {
-    const i = hm[k];
-    if (i !== undefined && row[i] !== undefined && String(row[i]).trim() !== "") return row[i];
+    const idx = hmap[k];
+    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "") return row[idx];
   }
   return def;
 }
-function normUnit(u) {
-  const s = String(u||"").trim().toLowerCase();
-  if (!s) return "";
-  if (s.includes("gram") || s==="g") return "g";
-  if (s.includes("kilo") || s==="kg" || s==="k") return "kg";
-  if (s.includes("unidad") || s==="u" || s==="un" || s==="uni") return "u";
-  return s;
+
+function inferUnit(raw) {
+  const u = String(raw || "").trim().toLowerCase();
+  if (!u) return "u";
+  if (u.includes("gr") || u === "g" || u.includes("gram")) return "g";
+  if (u.includes("kg") || u.includes("kilo")) return "g"; // pedimos gramos igual
+  if (u.includes("unidad") || u === "u" || u.includes("unid")) return "u";
+  if (u.includes("pack")) return "u";
+  return "u";
+}
+
+/* =========================================================
+   STATE (chat limpio + flujo)
+========================================================= */
+const SESS = new Map(); // chatId -> state
+const ORDER_TIMERS = new Map(); // orderId -> timeout
+
+function getSess(chatId) {
+  if (!SESS.has(chatId)) {
+    SESS.set(chatId, {
+      mode: "MENU",
+      category: null,
+      productIndex: 0,
+      productsInView: [],
+      cart: [], // {code,name,cat,img,desc,unit,price,pricePerKg,qtyType,qty,grams,subtotal}
+      refBy: null,
+      lastMessageId: null,
+
+      // flujo compra
+      checkout: {
+        entregaTipo: null, // ENVIO/RETIRO/EXPRESS
+        pagoTipo: null, // TRANSFERENCIA/EFECTIVO/...
+        nombre: "",
+        telefono: "",
+        direccion: "",
+        notas: "",
+      },
+
+      waiting: null, // {type, payload}
+      jumpProdCode: null,
+    });
+  }
+  return SESS.get(chatId);
+}
+
+/* =========================================================
+   SHEETS MODELO
+========================================================= */
+const CLIENTES_SHEET = "Clientes";
+const PEDIDOS_SHEET = "Pedidos";
+
+const CLIENTES_HEADERS = [
+  "ChatId",
+  "Nombre",
+  "Usuario",
+  "Sellos",
+  "TotalComprado",
+  "UltimaCompraISO",
+  "ReferidoPor",
+  "ReferidosGanados",
+];
+
+const PEDIDOS_HEADERS = [
+  "PedidoId",
+  "FechaISO",
+  "ExpiraISO",
+  "ChatIdCliente",
+  "NombreCliente",
+  "UsuarioCliente",
+  "Items",
+  "Total",
+  "EntregaTipo",
+  "PagoTipo",
+  "Direccion",
+  "Telefono",
+  "Notas",
+  "Estado", // PENDIENTE/APROBADO/CANCELADO/RECHAZADO/VENCIDO
+  "RefBy",
+];
+
+async function ensureBaseSheets() {
+  await ensureSheet(CLIENTES_SHEET, CLIENTES_HEADERS);
+  await ensureSheet(PEDIDOS_SHEET, PEDIDOS_HEADERS);
+}
+
+async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
+  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
+  const idx = rows.findIndex((r) => String(r[0] || "") === String(chatId));
+
+  const now = new Date().toISOString();
+
+  if (idx === -1) {
+    await appendRow(CLIENTES_SHEET, [
+      String(chatId),
+      nombre || "",
+      usuario || "",
+      addSellos,
+      addTotal,
+      now,
+      refBy || "",
+      0,
+    ]);
+    return { sellos: addSellos, total: addTotal };
+  }
+
+  const row = rows[idx];
+  const currentSellos = parseNumber(row[3], 0);
+  const currentTotal = parseNumber(row[4], 0);
+  const currentRefGanados = parseNumber(row[7], 0);
+
+  const newSellos = currentSellos + addSellos;
+  const newTotal = currentTotal + addTotal;
+
+  const rowNumber = idx + 2;
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
+    String(chatId),
+    nombre || row[1] || "",
+    usuario || row[2] || "",
+    newSellos,
+    newTotal,
+    now,
+    row[6] || refBy || "",
+    currentRefGanados,
+  ]]);
+
+  return { sellos: newSellos, total: newTotal };
+}
+
+async function addSelloReferido(chatIdReferente) {
+  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
+  const idx = rows.findIndex((r) => String(r[0] || "") === String(chatIdReferente));
+  if (idx === -1) return;
+
+  const row = rows[idx];
+  const currentSellos = parseNumber(row[3], 0);
+  const currentRefGanados = parseNumber(row[7], 0);
+  const rowNumber = idx + 2;
+
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
+    row[0] || "",
+    row[1] || "",
+    row[2] || "",
+    currentSellos + 1,
+    row[4] || 0,
+    new Date().toISOString(),
+    row[6] || "",
+    currentRefGanados + 1,
+  ]]);
+}
+
+async function findPedidoRow(orderId) {
+  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:O`);
+  const idx = rows.findIndex((r) => String(r[0] || "") === String(orderId));
+  if (idx === -1) return null;
+  return { idx, row: rows[idx], rowNumber: idx + 2 };
+}
+
+async function setPedidoEstado(orderId, newEstado) {
+  const found = await findPedidoRow(orderId);
+  if (!found) return null;
+  const { row, rowNumber } = found;
+  row[13] = newEstado;
+  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:O${rowNumber}`, [row]);
+  return row;
+}
+
+async function expireOldPending() {
+  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:O`);
+  const now = Date.now();
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const expIso = r[2];
+    const estado = String(r[13] || "").toUpperCase();
+    if (!expIso || estado !== "PENDIENTE") continue;
+    const exp = Date.parse(expIso);
+    if (Number.isFinite(exp) && exp <= now) {
+      const rowNumber = i + 2;
+      r[13] = "VENCIDO";
+      await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:O${rowNumber}`, [r]);
+    }
+  }
+}
+
+/* =========================================================
+   UI HELPERS (editar mensaje)
+========================================================= */
+async function safeEditOrSend(ctx, payload) {
+  const chatId = ctx.chat?.id;
+  const sess = chatId ? getSess(chatId) : null;
+  const canEdit = !!(sess?.lastMessageId);
+
+  try {
+    if (canEdit) {
+      if (payload.animation) {
+        // si había un mensaje anterior de texto/foto, no siempre se puede “editar” a animation -> mandamos nuevo
+        throw new Error("forceSend");
+      }
+      if (payload.photo) {
+        await ctx.telegram.editMessageMedia(
+          chatId,
+          sess.lastMessageId,
+          undefined,
+          {
+            type: "photo",
+            media: payload.photo,
+            caption: payload.caption || "",
+            parse_mode: "HTML",
+          },
+          payload.extra || {}
+        );
+        return;
+      } else {
+        await ctx.telegram.editMessageText(
+          chatId,
+          sess.lastMessageId,
+          undefined,
+          payload.text || " ",
+          { parse_mode: "HTML", ...(payload.extra || {}) }
+        );
+        return;
+      }
+    }
+  } catch {
+    // fallback send new
+  }
+
+  let msg;
+  if (payload.animation) {
+    msg = await ctx.replyWithAnimation(payload.animation, {
+      caption: payload.caption || "",
+      parse_mode: "HTML",
+      ...(payload.extra || {}),
+    });
+  } else if (payload.photo) {
+    msg = await ctx.replyWithPhoto(payload.photo, {
+      caption: payload.caption || "",
+      parse_mode: "HTML",
+      ...(payload.extra || {}),
+    });
+  } else {
+    msg = await ctx.reply(payload.text || " ", {
+      parse_mode: "HTML",
+      ...(payload.extra || {}),
+    });
+  }
+
+  if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
+}
+
+function mainMenuKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+    [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
+    [Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")],
+  ]);
+}
+
+function goMenuRow() {
+  return [Markup.button.callback("🏠 Menú", "GO_MENU")];
+}
+
+/* =========================================================
+   LOADERS
+========================================================= */
+async function loadConfig() {
+  const rows = await getSheetValues(`Config!A:B`);
+  return kvFromRows(rows);
 }
 
 async function loadCatalog() {
-  const rows = await getValues(`${SHEET_CATALOGO}!A1:Z`);
-  if (!rows.length) return { items: [], cats: [] };
-  const header = rows[0];
-  const hm = hmapFrom(header);
-  const data = rows.slice(1).filter(r => r.some(c => String(c||"").trim()!==""));
+  const rows = await getSheetValues(`Catalogo!A1:Z`);
+  if (!rows.length) return { items: [], headers: {} };
+  const headerRow = rows[0];
+  const hmap = normalizeHeaders(headerRow);
+  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
 
-  const items = data.map((r, idx) => {
-    const code = String(pick(r, hm, ["codigo","codigoproducto","id","sku"], `P${idx+1}`)).trim();
-    const name = String(pick(r, hm, ["nombre","producto","name"], "Producto")).trim();
-    const cat  = String(pick(r, hm, ["categoria","categoría","rubro"], "General")).trim() || "General";
-    const img  = String(pick(r, hm, ["imagenurl","imagen","foto","urlimagen"], "")).trim();
-    const desc = String(pick(r, hm, ["descripcion","descripción","detalle"], "")).trim();
-
-    const unidad = normUnit(pick(r, hm, ["unidad","unidadtipo","tipo","medida"], ""));
-    const precio = num(pick(r, hm, ["precio","price","preciounitario"], 0), 0);
-    const precioKg = num(pick(r, hm, ["precioporkg","precioxkg","preciokg"], 0), 0);
-
-    const pesable = (unidad === "g" || unidad === "kg") || (precioKg > 0);
-
-    return {
-      code, name, cat, img, desc,
-      unidad: unidad || (pesable ? "g" : "u"),
-      pesable,
-      precioUnit: precio,
-      precioKg: precioKg || (pesable ? precio : 0),
-    };
+  const items = data.map((r, i) => {
+    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
+    const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
+    const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
+    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0), 0);
+    const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
+    const unit = inferUnit(unitRaw);
+    const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
+    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
+    const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
+    const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
+    return { code, name, price, pricePerKg, unit, cat, img, desc, isCombo };
   });
 
-  const set = new Set(items.map(i=>i.cat||"General"));
-  const cats = Array.from(set).sort((a,b)=>a.localeCompare(b,"es"));
-
-  return { items, cats };
+  return { items, headers: hmap };
 }
 
-function productCaption(cfg, p, idx, total) {
+function categoriesFromItems(items) {
+  const set = new Set();
+  for (const it of items) set.add(it.cat || "General");
+  return Array.from(set).sort((a, b) => a.localeCompare(b, "es"));
+}
+
+/* =========================================================
+   PRODUCT UI
+========================================================= */
+function productCaption(cfg, p, index, total) {
   const moneda = cfg.Moneda || "ARS";
-  const showPrice = yes(cfg.CatalogoMostrarPrecios || "SI");
+  const showPrice = parseYes(cfg.CatalogoMostrarPrecios || "SI");
   const lines = [];
   lines.push(`<b>${p.name}</b>`);
-  if (p.desc) lines.push(`${p.desc}`);
-  lines.push(`📌 ${p.cat}`);
 
   if (showPrice) {
-    if (p.pesable) {
-      const pk = p.precioKg || 0;
-      if (pk>0) lines.push(`💰 <b>${money(pk, moneda)}</b> / kg`);
-      else lines.push(`💰 <b>${money(p.precioUnit, moneda)}</b>`);
-    } else {
-      lines.push(`💰 <b>${money(p.precioUnit, moneda)}</b>`);
-    }
+    if (p.unit === "g" && p.pricePerKg > 0) lines.push(`💰 <b>${money(p.pricePerKg, moneda)}</b> / kg`);
+    else lines.push(`💰 <b>${money(p.price, moneda)}</b>`);
   }
 
-  lines.push(`<code>${idx+1}/${total}</code>`);
+  if (p.desc) lines.push(`\n${p.desc}`);
+  lines.push(`\n📌 ${p.cat}`);
+  lines.push(`\n<code>${index + 1}/${total}</code>`);
   return lines.join("\n");
 }
 
-function kbCategories(cats) {
-  const rows = [];
-  for (let i=0;i<cats.length;i+=2) {
-    const r = [];
-    r.push(Markup.button.callback(`📁 ${cats[i]}`, `CATSEL_${encodeURIComponent(cats[i])}`));
-    if (cats[i+1]) r.push(Markup.button.callback(`📁 ${cats[i+1]}`, `CATSEL_${encodeURIComponent(cats[i+1])}`));
-    rows.push(r);
-  }
-  rows.push([Markup.button.callback("🏠 Menú", "HOME")]);
-  return Markup.inlineKeyboard(rows);
-}
-
-function kbProduct() {
-  return (p)=>Markup.inlineKeyboard([
-    [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
-    [Markup.button.callback("🔥 Quiero éste", `BUY_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
-    [Markup.button.callback("🏠 Menú", "HOME")],
-  ]);
-}
-
-function kbCart() {
+function productKeyboard(p) {
   return Markup.inlineKeyboard([
-    [Markup.button.callback("✅ Finalizar compra", "CHECKOUT")],
-    [Markup.button.callback("🧀 Seguir comprando", "CAT")],
-    [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
-    [Markup.button.callback("🏠 Menú", "HOME")],
+    [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
+    [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    goMenuRow(),
   ]);
 }
 
-/* ====== CLIENTES / SELLOS ====== */
-async function getClienteRow(chatId) {
-  const rows = await getValues(`${SHEET_CLIENTES}!A2:F`);
-  const idx = rows.findIndex(r => String(r[0]||"") === String(chatId));
-  if (idx === -1) return { idx:-1, row:null, rowNumber:null };
-  return { idx, row: rows[idx], rowNumber: idx+2 };
+/* =========================================================
+   CART + TICKETS
+========================================================= */
+function cartTotal(cart) {
+  return cart.reduce((acc, it) => acc + (it.subtotal || 0), 0);
 }
 
-async function upsertClienteBase({ chatId, nombre, usuario }) {
-  const ex = await getClienteRow(chatId);
-  if (ex.idx === -1) {
-    await appendRow(SHEET_CLIENTES, [String(chatId), nombre||"", usuario||"", 0, 0, nowISO()]);
-    return;
+function fmtQty(it) {
+  if (it.qtyType === "g") return `${it.grams} g`;
+  return `${it.qty} u`;
+}
+
+function ticketPOS(cfg, { orderId, items, total, entregaTipo, pagoTipo, nombre, telefono, direccion, notas, estado }) {
+  const moneda = cfg.Moneda || "ARS";
+  const lines = [];
+  lines.push(`🧾 <b>TICKET</b>`);
+  lines.push(`<code>${orderId}</code>`);
+  lines.push(`──────────────────`);
+  for (const it of items) {
+    const sub = it.subtotal || 0;
+    lines.push(`• <b>${it.name}</b>`);
+    lines.push(`  ${fmtQty(it)}  ·  ${money(sub, moneda)}`);
   }
-  const r = ex.row;
-  await setValues(`${SHEET_CLIENTES}!A${ex.rowNumber}:F${ex.rowNumber}`, [[
-    String(chatId),
-    nombre || r[1] || "",
-    usuario || r[2] || "",
-    num(r[3],0),
-    num(r[4],0),
-    nowISO()
-  ]]);
+  lines.push(`──────────────────`);
+  lines.push(`🧮 <b>Total:</b> ${money(total, moneda)}`);
+  lines.push(`🚚 <b>Entrega:</b> ${entregaTipo}`);
+  lines.push(`💳 <b>Pago:</b> ${pagoTipo}`);
+  if (nombre) lines.push(`👤 <b>Nombre:</b> ${nombre}`);
+  if (telefono) lines.push(`📞 <b>Tel:</b> ${telefono}`);
+  if (direccion) lines.push(`📍 <b>Dirección:</b> ${direccion}`);
+  if (notas) lines.push(`📝 <b>Notas:</b> ${notas}`);
+  if (estado) lines.push(`📌 <b>Estado:</b> ${estado}`);
+  return lines.join("\n");
 }
 
-async function addSellos(chatId, add, addTotal = 0) {
-  const ex = await getClienteRow(chatId);
-  if (ex.idx === -1) return;
-  const r = ex.row;
-  const sellos = num(r[3],0) + (add||0);
-  const total  = num(r[4],0) + (addTotal||0);
-  await setValues(`${SHEET_CLIENTES}!A${ex.rowNumber}:F${ex.rowNumber}`, [[
-    r[0]||"",
-    r[1]||"",
-    r[2]||"",
-    sellos,
-    total,
-    nowISO()
-  ]]);
-  return sellos;
-}
-
-/* ====== TICKETS POS (CLIENTE / VENDEDOR) ====== */
-function ticketBox(title, bodyLines) {
-  const top = `┏━━━━━━━━━━━━━━━━━━━━━━┓`;
-  const mid = `┣━━━━━━━━━━━━━━━━━━━━━━┫`;
-  const bot = `┗━━━━━━━━━━━━━━━━━━━━━━┛`;
-  const t = String(title||"").slice(0,20);
-  const head = `┃ ${t.padEnd(20," ")} ┃`;
-  const lines = bodyLines.map(l=>{
-    const s = String(l||"");
-    return `┃ ${s.slice(0,20).padEnd(20," ")} ┃`;
-  });
-  return `<pre>${[top, head, mid, ...lines, bot].join("\n")}</pre>`;
-}
-
-function buildTicketCliente(cfg, pedido) {
-  const moneda = cfg.Moneda || "ARS";
-  const lines = [];
-  lines.push(`PEDIDO ${pedido.id}`);
-  lines.push(`Total: ${money(pedido.total, moneda)}`);
-  lines.push(`Entrega: ${pedido.entrega}`);
-  lines.push(`Pago: ${pedido.pago}`);
-  lines.push(`Estado: ${pedido.estado}`);
-  lines.push(`Vence: 1 hora`);
-  lines.push(`— Items —`);
-  pedido.items.forEach(it=>{
-    lines.push(`${it.name} x${it.qtyLabel}`);
-  });
-  return `${B_CLIENTE}\n${ticketBox("TICKET", lines)}`;
-}
-
-function buildTicketVendedor(cfg, pedido) {
-  const moneda = cfg.Moneda || "ARS";
-  const lines = [];
-  lines.push(`PEDIDO ${pedido.id}`);
-  lines.push(`Cliente: ${pedido.nombre}`);
-  lines.push(`Tel: ${pedido.tel}`);
-  if (pedido.dir) lines.push(`Dir: ${pedido.dir}`);
-  lines.push(`Entrega: ${pedido.entrega}`);
-  lines.push(`Pago: ${pedido.pago}`);
-  lines.push(`Total: ${money(pedido.total, moneda)}`);
-  lines.push(`— Items —`);
-  pedido.items.forEach(it=>{
-    lines.push(`${it.name} x${it.qtyLabel}`);
-  });
-  return `${B_VENDEDOR}\n${ticketBox("PEDIDO", lines)}`;
-}
-
-/* ====== SHARE LINKS ====== */
 function buildShareLinks({ botLink, text }) {
   const url = encodeURIComponent(botLink);
   const t = encodeURIComponent(text);
@@ -427,697 +521,393 @@ function buildShareLinks({ botLink, text }) {
     tg: `https://t.me/share/url?url=${url}&text=${t}`,
   };
 }
-function kbShare(links) {
+
+function shareKeyboard(links) {
   return Markup.inlineKeyboard([
-    [Markup.button.url("📲 WhatsApp", links.wa)],
-    [Markup.button.url("✈️ Telegram", links.tg)],
-    [Markup.button.callback("🏠 Menú", "HOME")],
+    [Markup.button.url("📲 WhatsApp", links.wa), Markup.button.url("✈️ Telegram", links.tg)],
+    goMenuRow(),
   ]);
 }
 
-function deepLinkFrom(cfg, payload) {
-  const base = (BOT_LINK || cfg.BotLink || "").trim();
-  if (!base) return "";
-  if (base.includes("?start=")) return base.replace(/\?start=.*$/,"?start="+encodeURIComponent(payload));
-  const sep = base.includes("?") ? "&" : "?";
-  return `${base}${sep}start=${encodeURIComponent(payload)}`;
-}
-
-/* ====== FLUJO UI ====== */
-async function showCategories(ctx) {
-  const cfg = await loadConfig();
-  const { cats } = await loadCatalog();
-  if (!cats.length) return send(ctx, "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>.", Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-  return send(ctx, `🧀 <b>Catálogo</b>\nElegí categoría 👇`, kbCategories(cats));
-}
-
-async function showProduct(ctx) {
-  const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
-  const p = sess._prods[sess._i];
-  if (!p) return showCategories(ctx);
-
-  const cap = productCaption(cfg, p, sess._i, sess._prods.length);
-  const kb = kbProduct()(p);
-
-  if (p.img && p.img.startsWith("http")) {
-    try {
-      if (sess.lastMsg) {
-        await ctx.telegram.editMessageMedia(
-          ctx.chat.id,
-          sess.lastMsg,
-          null,
-          { type:"photo", media:p.img, caption:cap, parse_mode:"HTML" },
-          { reply_markup: kb.reply_markup }
-        );
-        return;
-      }
-    } catch {}
-    const m = await ctx.replyWithPhoto(p.img, { caption:cap, parse_mode:"HTML", reply_markup: kb.reply_markup });
-    sess.lastMsg = m.message_id;
-    return;
-  }
-  return send(ctx, cap, kb);
-}
-
-function cartTotal(sess, cfg) {
+/* =========================================================
+   SELL0S UI
+========================================================= */
+function sellosTextShort(cfg, sellos) {
+  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const moneda = cfg.Moneda || "ARS";
-  let total = 0;
-  sess.cart.forEach(it => total += it.subtotal);
-  return { total, totalTxt: money(total, moneda) };
+  const tip = `✨ Tip: si alguien entra por tu link y compra, ganás <b>${parseNumber(cfg.BonusSellosShare || "1", 1)}</b> sello(s).`;
+  return [
+    `🎟️ <b>Sellos</b>`,
+    `Tenés <b>${sellos}</b> sellos acumulados.`,
+    `Cada <b>${money(montoPorSello, moneda)}</b> = <b>1 sello</b>.`,
+    ``,
+    tip,
+  ].join("\n");
 }
 
-async function showCart(ctx) {
-  const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
-  if (!sess.cart.length) return send(ctx, "🛒 Tu carrito está vacío.\nVolvé al catálogo para elegir productos.", Markup.inlineKeyboard([[Markup.button.callback("🧀 Catálogo","CAT")],[Markup.button.callback("🏠 Menú","HOME")]]));
+function sellosTextLevels(cfg) {
+  const sellosPorNivel = String(cfg.SellosPorNivel || "").trim();
+  const beneficios = String(cfg.BeneficiosPorNivel || "").trim();
+  const nombres = String(cfg.NombresNiveles || "").trim();
 
-  const { totalTxt } = cartTotal(sess, cfg);
   const lines = [];
-  lines.push(`${B_CLIENTE}\n🛒 <b>Carrito</b>\n`);
-  sess.cart.forEach((it,i)=>{
-    lines.push(`${i+1}) <b>${it.name}</b> — ${it.qtyLabel} → ${money(it.subtotal, cfg.Moneda||"ARS")}`);
-  });
-  lines.push(`\n<b>Total:</b> ${totalTxt}`);
-  return send(ctx, lines.join("\n"), kbCart());
-}
-
-/* ====== CHECKOUT (datos + pago + pendiente 1h) ====== */
-function kbEntrega(cfg) {
-  const rows = [];
-  if (yes(cfg.UsaEnvíoDomicilio || cfg.UsaEnvioDomicilio || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "ENT_ENVIO")]);
-  if (yes(cfg.UsaRetiroLocal || "SI")) rows.push([Markup.button.callback("🏪 Retiro en local", "ENT_RETIRO")]);
-  rows.push([Markup.button.callback("⚡ Envío express", "ENT_EXPRESS")]);
-  rows.push([Markup.button.callback("⬅️ Volver al carrito", "CART")]);
-  return Markup.inlineKeyboard(rows);
-}
-
-function kbPago(cfg) {
-  const tipoOnline = String(cfg.TipoPagoOnline || "TRANSFERENCIA").toUpperCase();
-  const rows = [];
-  if (yes(cfg.PermitirPagoOnline || cfg.PermitePagoOnline || "SI")) {
-    rows.push([Markup.button.callback(`💳 ${tipoOnline}`, `PAY_${tipoOnline}`)]);
+  lines.push(`🏅 <b>Niveles</b>`);
+  if (nombres) lines.push(nombres);
+  if (sellosPorNivel) lines.push(sellosPorNivel);
+  if (beneficios) {
+    lines.push(`\n🎁 <b>Beneficios</b>`);
+    lines.push(beneficios);
   }
-  rows.push([Markup.button.callback("💵 EFECTIVO", "PAY_EFECTIVO")]);
-  rows.push([Markup.button.callback("⬅️ Volver", "CHECKOUT")]);
-  return Markup.inlineKeyboard(rows);
+  return lines.join("\n");
 }
 
-function kbCancelConfirm() {
-  return Markup.inlineKeyboard([
-    [Markup.button.callback("🟥 Confirmar cancelación", "CANCEL_YES")],
-    [Markup.button.callback("🏠 Menú", "HOME")],
-  ]);
-}
-
-async function askCheckoutData(ctx) {
+/* =========================================================
+   FLOW SCREENS
+========================================================= */
+async function showMenu(ctx) {
   const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
-  if (!sess.cart.length) return showCart(ctx);
+  const nombre = cfg.NegocioNombre || "Tu Negocio";
+  const dire = cfg.NegocioDireccion || "";
+  const hora = cfg.NegocioHorario || "";
+  const estado = cfg.Estado || "";
 
-  sess.step = "ENTREGA";
-  return send(ctx, `${B_CLIENTE}\n✅ <b>Finalizar compra</b>\nElegí entrega 👇`, kbEntrega(cfg));
-}
+  const gif = pickRandom(splitPipes(cfg.GifBienvenidaURL || ""));
+  const logo = String(cfg.LogoURL || "").trim();
 
-async function askNombre(ctx) {
-  const sess = S(ctx.chat.id);
-  sess.step = "NOMBRE";
-  return send(ctx, `${B_CLIENTE}\n🧾 Decime tu <b>nombre</b> para el pedido (ej: Jenny).`);
-}
-async function askTelefono(ctx) {
-  const sess = S(ctx.chat.id);
-  sess.step = "TEL";
-  return send(ctx, `${B_CLIENTE}\n📞 Pasame tu <b>teléfono</b> (solo números si podés).`);
-}
-async function askDireccion(ctx, cfg) {
-  const sess = S(ctx.chat.id);
-  sess.step = "DIR";
-  const texto = cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "";
-  const costo = num(cfg.CostoEnvio || "0", 0);
-  return send(ctx, `${B_CLIENTE}\n📍 Pasame la <b>dirección completa</b> (calle, número, entre calles, localidad).\n\n🚚 Envío: <b>${money(costo, cfg.Moneda||"ARS")}</b>\n${texto}`);
-}
+  const header = [];
+  header.push(`🏠 <b>${nombre}</b>`);
+  if (estado) header.push(`🟢 <b>${estado}</b>`);
+  if (dire) header.push(`📍 ${dire}`);
+  if (hora) header.push(`🕒 ${hora}`);
 
-async function showPago(ctx) {
-  const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
+  const desc = String(cfg.Descripcion || "").trim();
+  const txt = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
 
-  const nota =
-    sess.entrega === "RETIRO"
-      ? (cfg.TextoRetiroLocal || "")
-      : sess.entrega === "EXPRESS"
-        ? `⚡ Envío express: se entregará lo más pronto posible.\n${cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || ""}`
-        : `🚚 Envío a domicilio.\n${cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || ""}`;
-
-  sess.step = "PAGO";
-  return send(ctx, `${B_CLIENTE}\n💳 Elegí <b>pago</b> 👇\n\n${nota}`.trim(), kbPago(cfg));
-}
-
-async function createPedidoAndNotify(ctx) {
-  const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
-
-  const moneda = cfg.Moneda || "ARS";
-  let total = 0;
-  sess.cart.forEach(it => total += it.subtotal);
-
-  const envioCost = num(cfg.CostoEnvio || "0", 0);
-  if (sess.entrega === "ENVIO" || sess.entrega === "EXPRESS") total += envioCost;
-
-  const pedidoId = `TQ-${new Date().toISOString().replace(/[-:]/g,"").slice(0,15)}-${token(4)}`;
-  const confirmToken = token(16);
-
-  const itemsText = sess.cart.map(it => `${it.name} x${it.qtyLabel}`).join(" | ");
-  const expira = in1hISO();
-
-  const nombre = sess.nombre || `${ctx.from.first_name||""} ${ctx.from.last_name||""}`.trim();
-  const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
-
-  await upsertClienteBase({ chatId: ctx.chat.id, nombre, usuario });
-
-  await appendRow(SHEET_PEDIDOS, [
-    pedidoId, nowISO(), expira, "PENDIENTE",
-    String(ctx.chat.id), nombre, sess.telefono||"", sess.direccion||"",
-    sess.entrega, sess.pago,
-    itemsText,
-    total,
-    sess.refBy || "",
-    confirmToken
-  ]);
-
-  // Sellos por compra (solo si está activo)
-  const usaSellos = yes(cfg.UsaSellos || "SI");
-  const montoPorSello = num(cfg.MontoPorSello || "10000", 10000);
-  const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
-  if (sellosGanados > 0) await addSellos(ctx.chat.id, sellosGanados, total);
-  else await addSellos(ctx.chat.id, 0, total);
-
-  // Sello extra por referido (si existe refBy)
-  if (sess.refBy) await addSellos(sess.refBy, 1, 0);
-
-  const pedidoObj = {
-    id: pedidoId,
-    total,
-    entrega: sess.entrega,
-    pago: sess.pago,
-    estado: "PENDIENTE",
-    nombre,
-    tel: sess.telefono||"",
-    dir: sess.direccion||"",
-    items: sess.cart.map(it=>({ name: it.name, qtyLabel: it.qtyLabel })),
-  };
-
-  // Cliente: ticket + instrucciones transferencia
-  const alias = (cfg.AliasTransferencia || "").trim();
-  const cbu   = (cfg.CBUPago || "").trim();
-  const msgTr = (cfg.MensajeTransferencia || "").trim();
-
-  const wa = (cfg.WhatsAppLink || "").trim() || (() => {
-    const tel = String(cfg.NegocioTelefono||"").replace(/[^\d]/g,"");
-    return tel ? `https://wa.me/${tel}` : "";
-  })();
-
-  const avisoPend = `${B_PEND}\nTu pedido queda <b>PENDIENTE</b> por <b>1 hora</b> hasta confirmación del vendedor.`;
-
-  let extraPay = "";
-  if (String(sess.pago).toUpperCase() !== "EFECTIVO") {
-    extraPay = [
-      `\n<b>Transferencia</b>`,
-      alias ? `• Alias: <code>${alias}</code>` : "",
-      cbu ? `• CBU: <code>${cbu}</code>` : "",
-      msgTr ? `\n${msgTr}` : "",
-      wa ? `\n📲 Enviá el <b>comprobante</b> por WhatsApp:\n${wa}` : "",
-      `\nLuego el vendedor confirma y te avisa por acá.`
-    ].filter(Boolean).join("\n");
+  // prioridad: LogoURL como foto. Si no, GIF. Si no, texto.
+  if (logo && logo.startsWith("http")) {
+    await safeEditOrSend(ctx, { photo: logo, caption: txt, extra: mainMenuKeyboard() });
+  } else if (gif && gif.startsWith("http")) {
+    await safeEditOrSend(ctx, { animation: gif, caption: txt, extra: mainMenuKeyboard() });
   } else {
-    extraPay = `\n💵 Pagás en <b>efectivo</b>. El vendedor confirma y se prepara el pedido.`;
+    await safeEditOrSend(ctx, { text: txt, extra: mainMenuKeyboard() });
   }
-
-  await send(ctx, `${buildTicketCliente(cfg, pedidoObj)}\n${avisoPend}\n${extraPay}`, Markup.inlineKeyboard([
-    [Markup.button.callback("❌ Cancelar compra", `CANCEL_${pedidoId}`)],
-    [Markup.button.callback("🏠 Menú", "HOME")],
-  ]));
-
-  // Vendedor: ticket + botón confirmar
-  const vendChat = String(cfg.VendedorChatId || cfg.ChatIdVendedor || cfg.ChatIdVendedor || "").trim();
-  const botLink = (BOT_LINK || cfg.BotLink || "").trim();
-
-  const confirmStart = botLink ? deepLinkFrom(cfg, `CONF_${pedidoId}__TK_${confirmToken}`) : "";
-  const vendMsg = `${buildTicketVendedor(cfg, pedidoObj)}\n${B_PEND}\nConfirmar pago del pedido 👇\n${confirmStart ? `\nLink directo (WhatsApp→Telegram):\n${confirmStart}` : ""}`;
-
-  if (vendChat) {
-    try {
-      await bot.telegram.sendMessage(vendChat, vendMsg, {
-        parse_mode:"HTML",
-        reply_markup: Markup.inlineKeyboard([
-          [Markup.button.callback("✅ Confirmar transferencia", `CONFIRM_${pedidoId}__TK_${confirmToken}`)],
-        ]).reply_markup
-      });
-    } catch {}
-  }
-
-  // limpiar carrito y pasos
-  sess.cart = [];
-  sess.step = null;
-  sess.entrega = null;
-  sess.pago = null;
-  sess.nombre = "";
-  sess.telefono = "";
-  sess.direccion = "";
 }
 
-/* ====== SELL0S / AYUDA / COMPARTIR ====== */
-async function showSellos(ctx) {
-  const cfg = await loadConfig();
-  const ex = await getClienteRow(ctx.chat.id);
-  const sellos = ex.idx === -1 ? 0 : num(ex.row[3],0);
+async function showCategories(ctx) {
+  const { items } = await loadCatalog();
+  const cats = categoriesFromItems(items);
 
-  const montoPorSello = num(cfg.MontoPorSello || "10000", 10000);
-  const lines = [];
-  lines.push(`${B_CLIENTE}`);
-  lines.push(`🎟️ <b>Sellos</b>`);
-  lines.push(`Tenés <b>${sellos}</b> sellos.`);
-  lines.push(`Cada <b>${money(montoPorSello, cfg.Moneda||"ARS")}</b> = <b>1 sello</b>.`);
-  if (yes(cfg.UsaNiveles || "SI")) {
-    if (cfg.SellosPorNivel) lines.push(`\n🏅 <b>Niveles</b>\n${cfg.SellosPorNivel}`);
-    if (cfg.BeneficiosPorNivel) lines.push(`\n🎁 <b>Beneficios</b>\n${cfg.BeneficiosPorNivel}`);
-  }
-  lines.push(`\n✨ Tip: si un referido compra desde tu link, ganás <b>1 sello</b>.`);
-
-  const card = (cfg.CARD_URL || cfg.SelloURL || "").trim();
-  const kb = Markup.inlineKeyboard([[Markup.button.callback("🧀 Catálogo","CAT")],[Markup.button.callback("🏠 Menú","HOME")]]);
-
-  if (card && card.startsWith("http")) {
-    const sess = S(ctx.chat.id);
-    try {
-      if (sess.lastMsg) {
-        await ctx.telegram.editMessageMedia(
-          ctx.chat.id, sess.lastMsg, null,
-          { type:"photo", media: card, caption: lines.join("\n"), parse_mode:"HTML" },
-          { reply_markup: kb.reply_markup }
-        );
-        return;
-      }
-    } catch {}
-    const m = await ctx.replyWithPhoto(card, { caption: lines.join("\n"), parse_mode:"HTML", reply_markup: kb.reply_markup });
-    sess.lastMsg = m.message_id;
+  if (!cats.length) {
+    await safeEditOrSend(ctx, { text: "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>." , extra: Markup.inlineKeyboard([goMenuRow()]) });
     return;
   }
-  return send(ctx, lines.join("\n"), kb);
+
+  const buttons = [];
+  for (let i = 0; i < cats.length; i += 2) {
+    const row = [];
+    row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
+    if (cats[i + 1]) row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
+    buttons.push(row);
+  }
+  buttons.push(goMenuRow());
+
+  await safeEditOrSend(ctx, {
+    text: `🧀 <b>Catálogo</b>\n\nElegí una <b>categoría</b> 👇`,
+    extra: Markup.inlineKeyboard(buttons),
+  });
+}
+
+async function showProductCarousel(ctx, cat) {
+  const cfg = await loadConfig();
+  const chatId = ctx.chat.id;
+  const sess = getSess(chatId);
+
+  const { items } = await loadCatalog();
+  const prods = items.filter((p) => (p.cat || "General") === cat);
+
+  if (!prods.length) {
+    await safeEditOrSend(ctx, { text: `No hay productos en <b>${cat}</b>.`, extra: Markup.inlineKeyboard([goMenuRow()]) });
+    return;
+  }
+
+  sess.mode = "CATALOGO";
+  sess.category = cat;
+  sess.productsInView = prods;
+  sess.productIndex = 0;
+
+  const p = prods[0];
+  const caption = productCaption(cfg, p, 0, prods.length);
+
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+}
+
+async function showSellos(ctx, showLevels = false) {
+  const cfg = await loadConfig();
+
+  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
+  const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
+  const sellos = me ? parseNumber(me[3], 0) : 0;
+
+  const cardUrl = String(cfg.CARD_URL || cfg.CardURL || cfg.SelloURL || "").trim();
+
+  const caption = showLevels ? `${sellosTextShort(cfg, sellos)}\n\n${sellosTextLevels(cfg)}` : sellosTextShort(cfg, sellos);
+
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback(showLevels ? "⬅️ Volver" : "🏅 Ver niveles", showLevels ? "SELLOS_BACK" : "SELLOS_LEVELS")],
+    [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
+    goMenuRow(),
+  ]);
+
+  if (cardUrl && cardUrl.startsWith("http")) {
+    await safeEditOrSend(ctx, { photo: cardUrl, caption, extra: kb });
+  } else {
+    await safeEditOrSend(ctx, { text: caption, extra: kb });
+  }
 }
 
 async function showHelp(ctx) {
   const cfg = await loadConfig();
-  const wa = (cfg.WhatsAppLink || "").trim() || (() => {
-    const tel = String(cfg.NegocioTelefono||"").replace(/[^\d]/g,"");
-    return tel ? `https://wa.me/${tel}` : "";
-  })();
+  const gif = pickRandom(splitPipes(cfg.GifAyudaURL || ""));
+  const nombre = cfg.NegocioNombre || "Todo Queso";
+  const wa = String(cfg.WhatsAppLink || "").trim() || String(cfg.NegocioTelefono || "").trim();
 
-  const vend = String(cfg.VendedorChatId || cfg.ChatIdVendedor || "").trim();
-  const kb = Markup.inlineKeyboard([
-    wa ? [Markup.button.url("🧑‍🍳 Contactar vendedor (WhatsApp)", wa)] : [],
-    [Markup.button.callback("🧀 Ver catálogo", "CAT")],
-    [Markup.button.callback("🏠 Menú", "HOME")],
-  ].filter(r=>r.length));
-
-  const txt = [
-    `${B_CLIENTE}`,
-    `🆘 <b>Ayuda</b>`,
-    `¿No encontraste algo?`,
-    `• Decime qué te falta y lo agregamos.`,
-    `• ¿Querés sugerir un producto?`,
-    `• ¿Tenés alguna consulta del pedido?`,
-    ``,
-    `Tip: el catálogo se ojea con ⬅️➡️ para no llenar el chat.`
+  const text = [
+    `ℹ️ <b>Ayuda - ${nombre}</b>\n`,
+    `¿Qué necesitás?\n`,
+    `• ¿No encontraste un producto? Decime <b>qué buscás</b> y te ayudo.`,
+    `• ¿Querés sugerir algo o hacer un comentario? Escribilo y lo paso al vendedor.`,
+    `• ¿Querés hablar con un vendedor? Tocá el botón 👇`,
   ].join("\n");
 
-  return send(ctx, txt, kb);
-}
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback("👩‍🍳 Contactar vendedor", "HELP_CONTACT")],
+    goMenuRow(),
+  ]);
 
-async function shareBot(ctx) {
-  const cfg = await loadConfig();
-  const link = (BOT_LINK || cfg.BotLink || "").trim();
-  if (!link) return send(ctx, "Falta <b>BOT_LINK</b> (env) o <b>BotLink</b> (Config).", Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-
-  const text = (cfg.TextoCompartirBot || `🧀 Comprá en ${cfg.NegocioNombre||"Todo Queso"} desde este bot:`).trim();
-  const links = buildShareLinks({ botLink: link, text });
-
-  const contacto = (cfg.EmailSistema || "").trim();
-  const sistema  = (cfg.TextoSistema || "").trim();
-  const extra = (contacto || sistema) ? `\n\n${sistema}\n${contacto}`.trim() : "";
-
-  return send(ctx, `${B_CLIENTE}\n📣 <b>Compartir bot</b>\nElegí dónde compartir 👇${extra ? "\n\n"+extra : ""}`, kbShare(links));
-}
-
-async function shareProduct(ctx, code) {
-  const cfg = await loadConfig();
-  const { items } = await loadCatalog();
-  const p = items.find(x => x.code === code);
-  if (!p) return send(ctx, "No encontré ese producto.", Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-
-  const payload = `PROD_${code}`;
-  const deep = deepLinkFrom(cfg, payload);
-  if (!deep) return send(ctx, "Falta <b>BOT_LINK</b> (env) o <b>BotLink</b> (Config).", Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-
-  const moneda = cfg.Moneda || "ARS";
-  const priceTxt = p.pesable ? `${money(p.precioKg||0,moneda)} / kg` : `${money(p.precioUnit,moneda)}`;
-  const text = `🧀 ${cfg.NegocioNombre||"Todo Queso"}\nPromo: ${p.name} — ${priceTxt}\nTocá el link y compralo 👇`;
-  const links = buildShareLinks({ botLink: deep, text });
-
-  return send(ctx, `${B_CLIENTE}\n🔗 <b>Compartir producto</b>\n${p.name}\nElegí dónde compartir 👇`, kbShare(links));
-}
-
-/* ====== COMPRA: cantidad (gramos/unidades) ====== */
-async function startBuy(ctx, code) {
-  const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
-  const p = sess._prods.find(x => x.code === code);
-  if (!p) return;
-
-  sess._buying = p.code;
-
-  if (p.pesable) {
-    sess.step = "QTY_G";
-    const ejemplo = "250";
-    return send(ctx, `${B_CLIENTE}\n🔥 <b>${p.name}</b>\n¿Cuántos <b>gramos</b> querés? (ej: <b>${ejemplo}</b>)`);
+  if (gif && gif.startsWith("http")) {
+    await safeEditOrSend(ctx, { animation: gif, caption: text, extra: kb });
   } else {
-    sess.step = "QTY_U";
-    return send(ctx, `${B_CLIENTE}\n🔥 <b>${p.name}</b>\n¿Cuántas <b>unidades</b> querés? (ej: <b>2</b>)`);
+    await safeEditOrSend(ctx, { text, extra: kb });
   }
 }
 
-function addToCart(sess, p, qtyValue, cfg) {
-  const moneda = cfg.Moneda || "ARS";
-  if (p.pesable) {
-    const grams = Math.max(1, Math.round(qtyValue));
-    const priceKg = p.precioKg || 0;
-    const subtotal = (priceKg * grams) / 1000;
+async function showShareBot(ctx) {
+  const cfg = await loadConfig();
+  const gif = pickRandom(splitPipes(cfg.GifCompartirURL || ""));
+  const botLink = String(cfg.BotLink || "").trim();
+  const textShare = String(cfg.TextoCompartirBot || "").trim() || `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y pedí en 1 minuto.`;
+
+  if (!botLink) {
+    await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: Markup.inlineKeyboard([goMenuRow()]) });
+    return;
+  }
+
+  const links = buildShareLinks({ botLink, text: textShare });
+
+  const caption = [
+    `📣 <b>Compartir</b>\n`,
+    `Si querés un sistema como este, escribinos a:\n<b>${cfg.EmailSistema || ""}</b>\n`,
+    `Elegí dónde compartir 👇`,
+  ].join("\n");
+
+  const kb = shareKeyboard(links);
+
+  if (gif && gif.startsWith("http")) {
+    await safeEditOrSend(ctx, { animation: gif, caption, extra: kb });
+  } else {
+    await safeEditOrSend(ctx, { text: caption, extra: kb });
+  }
+}
+
+/* =========================================================
+   PRODUCT -> QUIERO ESTE -> CANTIDAD
+========================================================= */
+function qtyPromptText(cfg, p) {
+  if (p.unit === "g") {
+    return `✅ <b>${p.name}</b>\n\n¿Cuántos <b>gramos</b> querés?\nEj: <code>250</code> o <code>1000</code>`;
+  }
+  return `✅ <b>${p.name}</b>\n\n¿Cuántas <b>unidades</b> querés?\nEj: <code>1</code> o <code>2</code>`;
+}
+
+function computeSubtotal(p, qtyType, value) {
+  if (qtyType === "g") {
+    const grams = Math.max(1, parseNumber(value, 0));
+    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price; // si no hay precio/kg, asumimos price es por kg
+    const subtotal = (grams / 1000) * perKg;
+    return { grams, qty: 0, subtotal };
+  }
+  const qty = Math.max(1, parseNumber(value, 0));
+  const subtotal = qty * p.price;
+  return { grams: 0, qty, subtotal };
+}
+
+function addToCart(sess, p, qtyType, value) {
+  const calc = computeSubtotal(p, qtyType, value);
+  const existing = sess.cart.find((x) => x.code === p.code && x.qtyType === qtyType && x.grams === calc.grams && x.qty === calc.qty);
+  if (existing) {
+    existing.subtotal += calc.subtotal;
+    if (qtyType === "g") existing.grams += calc.grams;
+    else existing.qty += calc.qty;
+  } else {
     sess.cart.push({
       code: p.code,
       name: p.name,
-      qtyLabel: `${grams}g`,
-      subtotal
+      cat: p.cat,
+      img: p.img,
+      desc: p.desc,
+      unit: p.unit,
+      price: p.price,
+      pricePerKg: p.pricePerKg,
+      qtyType,
+      qty: calc.qty,
+      grams: calc.grams,
+      subtotal: calc.subtotal,
     });
-    return { subtotalTxt: money(subtotal, moneda) };
-  } else {
-    const units = Math.max(1, Math.round(qtyValue));
-    const subtotal = (p.precioUnit || 0) * units;
-    sess.cart.push({
-      code: p.code,
-      name: p.name,
-      qtyLabel: `${units}u`,
-      subtotal
+  }
+}
+
+async function showCheckoutTicketPreview(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  const total = cartTotal(sess.cart);
+  const entrega = sess.checkout.entregaTipo || "-";
+  const pago = sess.checkout.pagoTipo || "-";
+
+  const t = ticketPOS(cfg, {
+    orderId: "—",
+    items: sess.cart,
+    total,
+    entregaTipo: entrega,
+    pagoTipo: pago,
+    nombre: sess.checkout.nombre,
+    telefono: sess.checkout.telefono,
+    direccion: sess.checkout.direccion,
+    notas: sess.checkout.notas,
+    estado: "Pendiente de confirmación",
+  });
+
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback("✅ Finalizar compra", "FINALIZE_ORDER")],
+    [Markup.button.callback("❌ Cancelar compra", "CANCEL_FLOW")],
+    goMenuRow(),
+  ]);
+
+  await safeEditOrSend(ctx, { text: t, extra: kb });
+}
+
+/* =========================================================
+   ENTREGA + DATOS
+========================================================= */
+function deliveryKeyboard(cfg) {
+  const rows = [];
+  if (parseYes(cfg.UsaEnvíoDomicilio || cfg.UsaEnvioDomicilio || "SI")) rows.push([Markup.button.callback("🚚 Envío a domicilio", "DELIVERY_ENVIO")]);
+  if (parseYes(cfg.EnvioExpress || "SI")) rows.push([Markup.button.callback("⚡ Envío express", "DELIVERY_EXPRESS")]);
+  if (parseYes(cfg.UsaRetiroLocal || "SI")) rows.push([Markup.button.callback("🏪 Retiro en el local", "DELIVERY_RETIRO")]);
+  rows.push([Markup.button.callback("⬅️ Volver", "BACK_TO_CART")]);
+  rows.push(goMenuRow());
+  return Markup.inlineKeyboard(rows);
+}
+
+function payKeyboard(cfg) {
+  const rows = [];
+  if (parseYes(cfg.PermitirPagoOnline || cfg.PermitePagoOnline || "SI")) {
+    const tipo = (cfg.TipoPagoOnline || "TRANSFERENCIA").toUpperCase();
+    rows.push([Markup.button.callback(`💳 ${tipo}`, `PAY_${tipo}`)]);
+  }
+  rows.push([Markup.button.callback("💵 Efectivo", "PAY_EFECTIVO")]);
+  rows.push([Markup.button.callback("⬅️ Volver", "BACK_TO_DELIVERY")]);
+  rows.push(goMenuRow());
+  return Markup.inlineKeyboard(rows);
+}
+
+async function showCart(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  if (!sess.cart.length) {
+    await safeEditOrSend(ctx, {
+      text: `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\nVolvé al catálogo para elegir productos.`,
+      extra: Markup.inlineKeyboard([[Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")], goMenuRow()]),
     });
-    return { subtotalTxt: money(subtotal, moneda) };
+    return;
   }
+
+  const moneda = cfg.Moneda || "ARS";
+  const lines = [];
+  lines.push(`🛒 <b>Carrito</b>`);
+  lines.push(`──────────────────`);
+  sess.cart.forEach((it, i) => {
+    lines.push(`${i + 1}) <b>${it.name}</b>`);
+    lines.push(`   ${fmtQty(it)} · ${money(it.subtotal || 0, moneda)}`);
+  });
+  lines.push(`──────────────────`);
+  lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
+
+  const kb = Markup.inlineKeyboard([
+    [Markup.button.callback("🚚 Elegir entrega", "CHK_DELIVERY")],
+    [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
+    [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
+    goMenuRow(),
+  ]);
+
+  await safeEditOrSend(ctx, { text: lines.join("\n"), extra: kb });
 }
 
-/* ====== PEDIDOS: confirmar / cancelar ====== */
-async function findPedido(pedidoId) {
-  const rows = await getValues(`${SHEET_PEDIDOS}!A2:N`);
-  const idx = rows.findIndex(r => String(r[0]||"") === String(pedidoId));
-  if (idx === -1) return { idx:-1, row:null, rowNumber:null };
-  return { idx, row: rows[idx], rowNumber: idx+2 };
-}
-
-async function updatePedidoEstado(pedidoId, estado) {
-  const p = await findPedido(pedidoId);
-  if (p.idx === -1) return null;
-  const r = p.row;
-  r[3] = estado; // Estado
-  await setValues(`${SHEET_PEDIDOS}!A${p.rowNumber}:N${p.rowNumber}`, [r]);
-  return r;
-}
-
-function isExpired(expiraISO) {
-  const t = Date.parse(expiraISO || "");
-  return Number.isFinite(t) ? Date.now() > t : false;
-}
-
-/* ====== BOT: ACCIONES ====== */
-bot.action("HOME", async (ctx)=>{ await ctx.answerCbQuery(); await showHome(ctx); });
-
-bot.action("CAT", async (ctx)=>{ await ctx.answerCbQuery(); await showCategories(ctx); });
-
-bot.action(/^CATSEL_(.+)$/i, async (ctx)=>{
-  await ctx.answerCbQuery();
-  const cat = decodeURIComponent(ctx.match[1]);
-  const { items } = await loadCatalog();
-  const sess = S(ctx.chat.id);
-  sess._prods = items.filter(x => (x.cat||"General") === cat);
-  sess._i = 0;
-  if (!sess._prods.length) return send(ctx, "No hay productos en esa categoría.", Markup.inlineKeyboard([[Markup.button.callback("🧀 Catálogo","CAT")],[Markup.button.callback("🏠 Menú","HOME")]]));
-  await showProduct(ctx);
-});
-
-bot.action("PROD_NEXT", async (ctx)=>{
-  await ctx.answerCbQuery();
-  const sess = S(ctx.chat.id);
-  if (!sess._prods.length) return showCategories(ctx);
-  sess._i = (sess._i + 1) % sess._prods.length;
-  await showProduct(ctx);
-});
-
-bot.action("PROD_PREV", async (ctx)=>{
-  await ctx.answerCbQuery();
-  const sess = S(ctx.chat.id);
-  if (!sess._prods.length) return showCategories(ctx);
-  sess._i = (sess._i - 1 + sess._prods.length) % sess._prods.length;
-  await showProduct(ctx);
-});
-
-bot.action(/^BUY_(.+)$/i, async (ctx)=>{
-  await ctx.answerCbQuery();
-  await startBuy(ctx, ctx.match[1]);
-});
-
-bot.action("CART", async (ctx)=>{ await ctx.answerCbQuery(); await showCart(ctx); });
-bot.action("CART_CLEAR", async (ctx)=>{ await ctx.answerCbQuery(); const s=S(ctx.chat.id); s.cart=[]; await showCart(ctx); });
-
-bot.action("CHECKOUT", async (ctx)=>{ await ctx.answerCbQuery(); await askCheckoutData(ctx); });
-
-bot.action("ENT_ENVIO", async (ctx)=>{ await ctx.answerCbQuery(); const s=S(ctx.chat.id); s.entrega="ENVIO"; await askNombre(ctx); });
-bot.action("ENT_RETIRO", async (ctx)=>{ await ctx.answerCbQuery(); const s=S(ctx.chat.id); s.entrega="RETIRO"; await askNombre(ctx); });
-bot.action("ENT_EXPRESS", async (ctx)=>{ await ctx.answerCbQuery(); const s=S(ctx.chat.id); s.entrega="EXPRESS"; await askNombre(ctx); });
-
-bot.action(/^PAY_(.+)$/i, async (ctx)=>{ await ctx.answerCbQuery(); const s=S(ctx.chat.id); s.pago=String(ctx.match[1]||"TRANSFERENCIA").toUpperCase(); await createPedidoAndNotify(ctx); });
-bot.action("PAY_EFECTIVO", async (ctx)=>{ await ctx.answerCbQuery(); const s=S(ctx.chat.id); s.pago="EFECTIVO"; await createPedidoAndNotify(ctx); });
-
-bot.action(/^CANCEL_(.+)$/i, async (ctx)=>{
-  await ctx.answerCbQuery();
-  const pedidoId = ctx.match[1];
-  const sess = S(ctx.chat.id);
-  sess._cancelPedido = pedidoId;
-  return send(ctx, `${B_CLIENTE}\n${B_CANCEL}\n¿Confirmás que querés <b>cancelar</b> el pedido <b>${pedidoId}</b>?`, kbCancelConfirm());
-});
-
-bot.action("CANCEL_YES", async (ctx)=>{
-  await ctx.answerCbQuery();
-  const sess = S(ctx.chat.id);
-  const pedidoId = sess._cancelPedido;
-  sess._cancelPedido = "";
-  if (!pedidoId) return showHome(ctx);
-  const row = await updatePedidoEstado(pedidoId, "CANCELADO");
-  if (row) await send(ctx, `${B_CLIENTE}\n${B_CANCEL}\nPedido <b>${pedidoId}</b> cancelado.`, Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-  else await send(ctx, "No encontré ese pedido.", Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-});
-
-bot.action("SELL", async (ctx)=>{ await ctx.answerCbQuery(); await showSellos(ctx); });
-bot.action("HELP", async (ctx)=>{ await ctx.answerCbQuery(); await showHelp(ctx); });
-bot.action("SHARE_BOT", async (ctx)=>{ await ctx.answerCbQuery(); await shareBot(ctx); });
-bot.action(/^SHARE_PROD_(.+)$/i, async (ctx)=>{ await ctx.answerCbQuery(); await shareProduct(ctx, ctx.match[1]); });
-
-/* ====== CONFIRMACION VENDEDOR ====== */
-async function confirmPedido(pedidoId, tk, fromCtx) {
+async function showDelivery(ctx) {
   const cfg = await loadConfig();
-  const p = await findPedido(pedidoId);
-  if (p.idx === -1) return { ok:false, msg:"No encontré el pedido." };
-
-  const r = p.row;
-  const expira = r[2];
-  const estado = String(r[3]||"");
-  const chatCliente = r[4];
-  const tkSheet = String(r[13]||"");
-
-  if (tk && tkSheet && String(tk) !== tkSheet) return { ok:false, msg:"Token inválido." };
-  if (estado === "CONFIRMADO") return { ok:true, msg:"Ya estaba confirmado." };
-  if (estado === "CANCELADO") return { ok:false, msg:"Está cancelado." };
-  if (isExpired(expira)) {
-    await updatePedidoEstado(pedidoId, "VENCIDO");
-    return { ok:false, msg:"El pedido venció (1 hora).", expired:true };
-  }
-
-  await updatePedidoEstado(pedidoId, "CONFIRMADO");
-
-  // Aviso al cliente (ticket confirmado)
-  const pedidoObj = {
-    id: pedidoId,
-    total: num(r[11],0),
-    entrega: r[8],
-    pago: r[9],
-    estado: "CONFIRMADO",
-    nombre: r[5],
-    tel: r[6],
-    dir: r[7],
-    items: String(r[10]||"").split("|").map(s=>({ name: String(s).trim(), qtyLabel:"" })).filter(x=>x.name)
-  };
-
-  const txtConf = (cfg.TextoConfirmacionPedido || "✅ Pedido confirmado. ¡Se está preparando!").trim();
-  const extraEntrega =
-    pedidoObj.entrega === "RETIRO"
-      ? `\n🏪 Podés retirar dentro del horario: ${cfg.NegocioHorario||""}`.trim()
-      : pedidoObj.entrega === "EXPRESS"
-        ? `\n⚡ Envío express: lo antes posible.` : `\n🚚 Envío a domicilio.`;
-
-  try {
-    await bot.telegram.sendMessage(chatCliente, `${B_OK}\n${buildTicketCliente(cfg, pedidoObj)}\n${txtConf}${extraEntrega}`, { parse_mode:"HTML" });
-  } catch {}
-
-  return { ok:true, msg:"Confirmado y avisado al cliente." };
+  await safeEditOrSend(ctx, {
+    text: `🚚 <b>Entrega</b>\n\nElegí cómo querés recibir tu pedido 👇`,
+    extra: deliveryKeyboard(cfg),
+  });
 }
 
-bot.action(/^CONFIRM_(.+)__TK_(.+)$/i, async (ctx)=>{
-  await ctx.answerCbQuery();
-  const pedidoId = ctx.match[1];
-  const tk = ctx.match[2];
-  const res = await confirmPedido(pedidoId, tk, ctx);
-  const msg = res.ok ? `✅ ${res.msg}` : `⚠️ ${res.msg}`;
-  await send(ctx, `${B_VENDEDOR}\n${msg}`, Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-});
-
-/* ====== /start payloads: PROD_ / CONF_ / REF_ ====== */
-bot.command("start", async (ctx) => {
-  await ensureBase();
-
-  const sess = S(ctx.chat.id);
-  const payload = String(ctx.startPayload || "").trim();
-
-  // CONFIRMACION desde link (WhatsApp→Telegram)
-  // formato: CONF_<pedidoId>__TK_<token>
-  if (payload.startsWith("CONF_")) {
-    const m = payload.match(/^CONF_(.+)__TK_(.+)$/i);
-    if (!m) return send(ctx, `${B_VENDEDOR}\n⚠️ Link inválido.`, Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-    const pedidoId = m[1];
-    const tk = m[2];
-    const res = await confirmPedido(pedidoId, tk, ctx);
-    const msg = res.ok ? `✅ ${res.msg}` : `⚠️ ${res.msg}`;
-    return send(ctx, `${B_VENDEDOR}\n${msg}`, Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú","HOME")]]));
-  }
-
-  // Link a producto: PROD_<code>
-  if (payload.startsWith("PROD_")) {
-    const code = payload.replace(/^PROD_/i,"").trim();
-    const { items } = await loadCatalog();
-    const p = items.find(x => x.code === code);
-    if (p) {
-      sess._prods = items.filter(x => (x.cat||"General") === (p.cat||"General"));
-      sess._i = Math.max(0, sess._prods.findIndex(x=>x.code===code));
-      await showProduct(ctx);
-      return;
-    }
-  }
-
-  // Referidos (si algún día lo querés activar): REF_<chatId>__PROD_<code>
-  if (payload.includes("REF_")) {
-    const mRef = payload.match(/REF_(\d+)/i);
-    if (mRef) sess.refBy = mRef[1];
-    const mProd = payload.match(/PROD_([A-Za-z0-9_-]+)/i);
-    if (mProd) {
-      const code = mProd[1];
-      const { items } = await loadCatalog();
-      const p = items.find(x => x.code === code);
-      if (p) {
-        sess._prods = items.filter(x => (x.cat||"General") === (p.cat||"General"));
-        sess._i = Math.max(0, sess._prods.findIndex(x=>x.code===code));
-        await showProduct(ctx);
-        return;
-      }
-    }
-  }
-
-  await showHome(ctx);
-});
-
-/* ====== INPUT TEXT (cantidad + datos envío) ====== */
-bot.on("text", async (ctx) => {
-  await ensureBase();
-
+async function showPayment(ctx) {
   const cfg = await loadConfig();
-  const sess = S(ctx.chat.id);
-  const txt = String(ctx.message.text || "").trim();
+  const sess = getSess(ctx.chat.id);
 
-  // cantidad pesable (gramos)
-  if (sess.step === "QTY_G" && sess._buying) {
-    const grams = Math.round(num(txt, 0));
-    if (!grams || grams <= 0) return send(ctx, `${B_CLIENTE}\nDecime un número de <b>gramos</b> (ej: 250).`);
-    const p = sess._prods.find(x => x.code === sess._buying);
-    if (!p) return showCategories(ctx);
-    addToCart(sess, p, grams, cfg);
-    sess._buying = null;
-    sess.step = null;
-    return showCart(ctx);
-  }
+  const entregaTipo = sess.checkout.entregaTipo || "";
+  const moneda = cfg.Moneda || "ARS";
+  const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
-  // cantidad unidades
-  if (sess.step === "QTY_U" && sess._buying) {
-    const units = Math.round(num(txt, 0));
-    if (!units || units <= 0) return send(ctx, `${B_CLIENTE}\nDecime cuántas <b>unidades</b> (ej: 2).`);
-    const p = sess._prods.find(x => x.code === sess._buying);
-    if (!p) return showCategories(ctx);
-    addToCart(sess, p, units, cfg);
-    sess._buying = null;
-    sess.step = null;
-    return showCart(ctx);
-  }
-
-  // datos checkout
-  if (sess.step === "NOMBRE") {
-    sess.nombre = txt.slice(0, 60);
-    await askTelefono(ctx);
-    return;
-  }
-  if (sess.step === "TEL") {
-    sess.telefono = txt.slice(0, 40);
-    if (sess.entrega === "ENVIO" || sess.entrega === "EXPRESS") {
-      await askDireccion(ctx, cfg);
-      return;
-    }
-    // retiro
-    await showPago(ctx);
-    return;
-  }
-  if (sess.step === "DIR") {
-    sess.direccion = txt.slice(0, 120);
-    await showPago(ctx);
-    return;
-  }
-
-  // si no está en flujo, no ensucia: vuelve al menú
-  return showHome(ctx);
-});
-
-/* ====== SERVER (Render) ====== */
-const app = express();
-app.use(express.json());
-app.get("/", (req,res)=>res.status(200).send("EzerBot OK ✅"));
-app.get("/health", (req,res)=>res.status(200).send("OK"));
-
-const PORT = process.env.PORT || 10000;
-
-async function start() {
-  await ensureBase();
-
-  if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
-    const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
-    await bot.telegram.setWebhook(hook);
-    app.use(bot.webhookCallback("/telegram"));
-    app.listen(PORT, ()=>console.log(`✅ Webhook: ${hook} | PORT ${PORT}`));
+  let extraText = "";
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
+    extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
   } else {
-    bot.launch();
-    app.listen(PORT, ()=>console.log(`✅ Long polling | PORT ${PORT}`));
+    extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
   }
+
+  await safeEditOrSend(ctx, {
+    text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraText}`,
+    extra: payKeyboard(cfg),
+  });
 }
 
-start().catch((e)=>{
-  console.error("FATAL:", e?.message || e);
-  process.exit(1);
-});
+/* =========================================================
+   FINALIZAR PEDIDO + VENDEDOR CONFIRMA
+========================================================= */
+function buildOrderId() {
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+function buildTransferDataText(cfg) {
+  const alias = String(cfg.AliasTransferencia || "").trim();
+  const cbu = String(cfg.CBUPago || "").trim();
+  const msg = String(cfg.MensajeTransferencia || "").trim();
+
+  const lines = [];
+  lines.push(`💳 <b>Transferencia</b>`);
+  if (alias) lines.push(`• <b>Alias:</b> <code>${alias}</code>`);
+  if (cbu) lines.push(`• <b>CBU:</b> <code>${cbu}</code>`);
+  if (msg) lines.push(`\n${msg}`);
+  return lines.join("\n");
+}
+
+function getWhatsappOrderLink(cfg, orderId) {
+  const link = String(cfg
+
+                      
