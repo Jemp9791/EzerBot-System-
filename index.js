@@ -292,8 +292,8 @@ function getSess(chatId) {
       cart: [],
       refBy: null,
 
-      lastEditableMessageId: null, // catálogo/carrito/checkout (se edita)
-      utilityMessageId: null, // menú/sellos/ayuda/compartir
+      lastEditableMessageId: null,
+      utilityMessageId: null,
       utilityIsAnimation: false,
 
       checkout: {
@@ -946,7 +946,20 @@ async function showSellos(ctx, showLevels = false) {
   const me = data.find((r) => String(getCell(r, hmap, "ChatId", "")) === String(ctx.chat.id));
   const sellos = me ? parseNumber(getCell(me, hmap, "Sellos", 0), 0) : 0;
 
-  const cardUrl = String(cfg.CARD_URL || cfg.CardURL || cfg.SelloURL || "").trim();
+  // ✅ FIX TARJETA: acepta varias claves de Config para que SIEMPRE la encuentre
+  const cardUrl = String(
+    cfg.TarjetaSellosURL ||
+    cfg.TarjetaSellosUrl ||
+    cfg.TarjetaURL ||
+    cfg.TarjetaUrl ||
+    cfg.SellosCardURL ||
+    cfg.SellosCardUrl ||
+    cfg.CARD_URL ||
+    cfg.CardURL ||
+    cfg.SelloURL ||
+    cfg.SelloUrl ||
+    ""
+  ).trim();
 
   const caption = showLevels
     ? `${sellosTextShort(cfg, sellos)}\n\n${sellosTextLevels(cfg)}`
@@ -1183,7 +1196,6 @@ async function showCart(ctx) {
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
   const kb = Markup.inlineKeyboard([
-    // ✅ CAMBIO: mostrar "Finalizar compra" (mantiene el flujo y entra a entrega)
     [Markup.button.callback("✅ Finalizar compra", "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
     [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
@@ -1295,6 +1307,7 @@ async function finalizeOrderCreate(ctx) {
   const direccion = sess.checkout.direccion || "";
   const notas = sess.checkout.notas || "";
 
+  // ✅ SUMA SELLOS Y TOTAL REALMENTE (cliente)
   await upsertCliente({
     chatId: ctx.chat.id,
     nombre,
@@ -1304,6 +1317,7 @@ async function finalizeOrderCreate(ctx) {
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
 
+  // ✅ SUMA SELLOS POR REFERIDO REALMENTE (referente)
   const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
   if (sess.refBy) {
     for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
@@ -1738,93 +1752,136 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   await safeEditOrSendEditable(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
 });
 
-/*/* VENDEDOR CONFIRMA */
+/* =========================================================
+   ✅ VENDEDOR CONFIRMA PAGO (TRANSFERENCIA) - FIX COMPLETO
+========================================================= */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
-  await ctx.answerCbQuery("Confirmando pago…");
+  try {
+    await ctx.answerCbQuery("Confirmando pago…");
+    const cfg = await loadConfig();
+    const orderId = ctx.match[1];
 
-  const orderId = ctx.match[1];
+    const found = await findPedidoRow(orderId);
+    if (!found) {
+      await ctx.answerCbQuery("Pedido no encontrado", { show_alert: true });
+      return;
+    }
 
-  const found = await findPedidoRow(orderId);
-  if (!found) {
-    await ctx.answerCbQuery("Pedido no encontrado", { show_alert: true });
-    return;
-  }
+    const { row, hmap } = found;
 
-  const { row, hmap } = found;
+    // Si ya estaba confirmado / rechazado / vencido, no repetir
+    const estadoActual = String(getCell(row, hmap, "Estado", "") || "").toUpperCase();
+    if (estadoActual === "PENDIENTE_ENTREGA" || estadoActual === "APROBADO") {
+      await ctx.answerCbQuery("Ya estaba confirmado ✅", { show_alert: false });
+      return;
+    }
+    if (estadoActual === "RECHAZADO" || estadoActual === "CANCELADO" || estadoActual === "VENCIDO") {
+      await ctx.answerCbQuery(`No se puede confirmar (estado: ${estadoActual})`, { show_alert: true });
+      return;
+    }
 
-  // 🔒 Cambiamos estado correctamente
-  await setPedidoEstado(orderId, "PENDIENTE_ENTREGA");
+    // ✅ Cambiar estado en Sheets
+    await setPedidoEstado(orderId, "PENDIENTE_ENTREGA");
 
-  const chatIdCliente = Number(getCell(row, hmap, "ChatIdCliente", ""));
-  const entregaTipo = getCell(row, hmap, "EntregaTipo", "");
-  const pagoTipo = getCell(row, hmap, "PagoTipo", "");
-  const nombre = getCell(row, hmap, "NombreCliente", "");
-  const itemsText = getCell(row, hmap, "Items", "");
-  const total = parseNumber(getCell(row, hmap, "Total", 0), 0);
+    const chatIdCliente = Number(getCell(row, hmap, "ChatIdCliente", ""));
+    const entregaTipo = String(getCell(row, hmap, "EntregaTipo", "") || "");
+    const pagoTipo = String(getCell(row, hmap, "PagoTipo", "") || "");
+    const nombre = String(getCell(row, hmap, "NombreCliente", "") || "");
+    const usuario = String(getCell(row, hmap, "UsuarioCliente", "") || "");
+    const itemsText = String(getCell(row, hmap, "Items", "") || "");
+    const total = parseNumber(getCell(row, hmap, "Total", 0), 0);
+    const direccion = String(getCell(row, hmap, "Direccion", "") || "");
+    const telefono = String(getCell(row, hmap, "Telefono", "") || "");
+    const notas = String(getCell(row, hmap, "Notas", "") || "");
 
-  /* 📩 MENSAJE AL COMPRADOR */
-  if (Number.isFinite(chatIdCliente)) {
-    await bot.telegram.sendMessage(
-      chatIdCliente,
-      `✅ <b>Pago confirmado</b>\n\n🧾 Pedido: <code>${orderId}</code>\n📦 ${itemsText}\n💰 Total: ARS ${total}\n\nTu pedido fue confirmado por el vendedor.\n📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
-      { parse_mode: "HTML" }
+    const moneda = cfg.Moneda || "ARS";
+
+    // Texto comprador (Config opcional)
+    const msgCliente =
+      String(cfg.TextoPagoConfirmadoCliente || "").trim() ||
+      "✅ Transferencia recibida. Tu pedido ya está en preparación.";
+
+    // Texto vendedor (Config opcional)
+    const msgVendedor =
+      String(cfg.TextoPagoConfirmadoVendedor || "").trim() ||
+      "✅ Pago confirmado. Ya se avisó al comprador y queda pendiente de entrega.";
+
+    // Extra por tipo de entrega
+    const extraEntrega =
+      entregaTipo === "RETIRO"
+        ? `🏪 Retiro en el local.\n${String(cfg.NegocioHorario || "").trim()}`
+        : entregaTipo === "EXPRESS"
+        ? `⚡ Envío express: lo enviamos lo antes posible.`
+        : `🚚 Envío a domicilio: coordinamos la entrega.\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
+
+    // ✅ Mensaje al comprador
+    if (Number.isFinite(chatIdCliente)) {
+      await bot.telegram.sendMessage(
+        chatIdCliente,
+        [
+          `✅ <b>Pago confirmado</b>`,
+          ``,
+          `🧾 Pedido: <code>${orderId}</code>`,
+          itemsText ? `📦 ${itemsText}` : "",
+          `💰 Total: <b>${money(total, moneda)}</b>`,
+          ``,
+          msgCliente,
+          extraEntrega,
+          ``,
+          `📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
+        ].filter(Boolean).join("\n"),
+        { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
+      );
+    }
+
+    // ✅ Actualiza el mensaje del vendedor (NO quito botones)
+    await ctx.editMessageText(
+      [
+        `✅ <b>Pago confirmado</b>`,
+        ``,
+        `🧾 Pedido: <code>${orderId}</code>`,
+        nombre ? `👤 ${nombre} ${usuario ? `(${usuario})` : ""}` : "",
+        itemsText ? `📦 ${itemsText}` : "",
+        `💰 Total: <b>${money(total, moneda)}</b>`,
+        entregaTipo ? `🚚 Entrega: <b>${entregaTipo}</b>` : "",
+        pagoTipo ? `💳 Pago: <b>${pagoTipo}</b>` : "",
+        direccion ? `📍 Dirección: ${direccion}` : "",
+        telefono ? `📞 Tel: ${telefono}` : "",
+        notas ? `📝 Notas: ${notas}` : "",
+        ``,
+        `📨 Se avisó al comprador.`,
+        `📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
+      ].filter(Boolean).join("\n"),
+      {
+        parse_mode: "HTML",
+        // dejo los botones como estaban (tal como pediste)
+        reply_markup: ctx.update.callback_query.message.reply_markup,
+      }
     );
 
-  /* 📩 ACTUALIZA MENSAJE DEL VENDEDOR */
-  await ctx.editMessageText(
-    `✅ <b>Pago confirmado</b>\n\n🧾 Pedido: <code>${orderId}</code>\n👤 ${nombre}\n📦 ${itemsText}\n💰 Total: ARS ${total}\n\n📨 El comprador fue notificado.\n📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
-    {
-      parse_mode: "HTML",
-      reply_markup: ctx.update.callback_query.message.reply_markup,
-    }
-  );
-
-  await ctx.answerCbQuery("Pago confirmado ✅");
-});
-
-    const t = [
-      `✅ <b>Pedido confirmado</b>`,
-      `<code>${orderId}</code>`,
-      `──────────────────`,
-      `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
-      `📦 ${itemsText}`,
-      `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
-      `🚚 <b>Entrega:</b> ${entregaTipo}`,
-      `💳 <b>Pago:</b> ${pagoTipo}`,
-      direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
-      telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
-      notas ? `📝 <b>Notas:</b> ${notas}` : "",
-      `──────────────────`,
-      msgConfirm,
-      extraEntrega,
-    ]
-      .filter(Boolean)
-      .join("\n");
-
-    if (Number.isFinite(chatIdCliente)) {
-      await bot.telegram.sendMessage(chatIdCliente, t, {
-        parse_mode: "HTML",
-        reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
-      });
-    }
-
-    // ✅ NO EDITAR EL TEXTO LARGO (evita error). Solo quitar botones y mandar confirmación al vendedor.
-    try {
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-    } catch {}
-
+    // ✅ Mensaje extra al vendedor (confirmación interna)
     await bot.telegram.sendMessage(
       ctx.chat.id,
-      `✅ <b>Listo.</b>\n\nPedido <code>${orderId}</code> confirmado.\nSe envió el mensaje al comprador.`,
+      [
+        `✅ <b>Confirmación registrada</b>`,
+        `Pedido <code>${orderId}</code>`,
+        msgVendedor,
+        `📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
+      ].join("\n"),
       { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
     );
-  } catch {
+
+    await ctx.answerCbQuery("Pago confirmado ✅");
+  } catch (e) {
     try {
-      await ctx.answerCbQuery("⚠️ Error al confirmar.", { show_alert: false });
+      await ctx.answerCbQuery("⚠️ Error al confirmar.", { show_alert: true });
     } catch {}
   }
 });
 
+/* =========================================================
+   VENDEDOR RECHAZA
+========================================================= */
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
   try {
     await ctx.answerCbQuery("Rechazado ❌");
@@ -1841,8 +1898,9 @@ bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
       );
     }
 
+    // No toco botones si vos querés mantenerlos; pero esto evita reacciones raras
     try {
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+      await ctx.answerCbQuery();
     } catch {}
 
     await bot.telegram.sendMessage(
