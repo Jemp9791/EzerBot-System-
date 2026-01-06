@@ -808,7 +808,14 @@ async function showPayment(ctx) {
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
     extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
   } else {
-    extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
+    // ✅ MEJORA RETIRO (sin Config nueva): usa NegocioHorario que ya existe
+    const h = String(cfg.NegocioHorario || "").trim();
+    const base = String(cfg.TextoRetiroLocal || "").trim();
+
+    extraText =
+      `\n\n🏪 ${base}` +
+      (h ? `\n🕒 Podés retirarlo hasta: <b>${h}</b>` : "") +
+      `\n📲 Si necesitás otro horario, comunicate para coordinar.`;
   }
 
   await safeEditOrSend(ctx, {
@@ -841,7 +848,6 @@ async function showCart(ctx) {
   lines.push(`──────────────────`);
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
-  // ✅ BOTÓN CORREGIDO: Finalizar compra (NO "Elegir entrega")
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback("✅ Finalizar compra", "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
@@ -936,7 +942,11 @@ async function showCheckoutTicketPreview(ctx) {
     ...backMenuRows(),
   ]);
 
-  await safeEditOrSend(ctx, { text: t, extra: kb });
+  // ✅ Texto más claro (sin tocar el flujo)
+  await safeEditOrSend(ctx, {
+    text: `🧾 <b>Revisá tu pedido</b>\n\n${t}\n\n👉 Si todo está correcto, confirmá para enviarlo al vendedor.`,
+    extra: kb,
+  });
 }
 
 /* ===================== ORDER / VENDOR CONFIRM ===================== */
@@ -1168,6 +1178,35 @@ bot.action("GO_BACK", async (ctx) => {
 bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_COMPARTIR", async (ctx) => { await ctx.answerCbQuery(); await showShareBot(ctx); });
 
+/* ✅ FIX: BOTONES QUE NO RESPONDÍAN */
+bot.action("MENU_SELLOS", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  setScreen(sess, "SELLOS");
+  await safeEditOrSend(ctx, {
+    text:
+      `🎟️ <b>Sellos</b>\n\n` +
+      `Los sellos se acreditan automáticamente cuando el vendedor confirma tu pago.\n\n` +
+      `📌 Si pagás por transferencia, recordá enviar el comprobante.`,
+    extra: Markup.inlineKeyboard(backMenuRows()),
+  });
+});
+
+bot.action("MENU_AYUDA", async (ctx) => {
+  await ctx.answerCbQuery();
+  const sess = getSess(ctx.chat.id);
+  setScreen(sess, "HELP");
+  await safeEditOrSend(ctx, {
+    text:
+      `ℹ️ <b>Ayuda</b>\n\n` +
+      `1️⃣ Entrá a <b>Catálogo</b> y elegí productos\n` +
+      `2️⃣ Indicá <b>Entrega</b> y <b>Pago</b>\n` +
+      `3️⃣ Si es transferencia, enviá el <b>comprobante</b>\n\n` +
+      `📲 Ante cualquier duda, escribinos.`,
+    extra: Markup.inlineKeyboard(backMenuRows()),
+  });
+});
+
 /* CATEGORÍAS */
 bot.action(/^CAT_(.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
@@ -1374,16 +1413,17 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
       await setPedidoField(orderId, "SellosAcreditados", "SI");
     }
 
+    // ✅ Texto pedido por vos (sin Config nueva): confirmación + “te avisamos cuando esté listo”
     const msgConfirm =
       String(cfg.TextoConfirmacionPedido || "").trim() ||
-      "✅ Transferencia recibida. Pedido confirmado y en preparación.";
+      "✅ Transferencia recibida. Pedido confirmado y en preparación. Te avisamos cuando esté listo.";
 
     const extraEntrega =
       entregaTipo === "RETIRO"
-        ? `🏪 Retiro en local. ${String(cfg.NegocioHorario || "").trim()}`
+        ? `🏪 Retiro en local. Te avisamos cuando esté listo para retirar. ${String(cfg.NegocioHorario || "").trim()}`
         : entregaTipo === "EXPRESS"
-        ? `⚡ Envío express en preparación.`
-        : `🚚 Envío a domicilio en preparación.`;
+        ? `⚡ Envío express en preparación. Te avisamos cuando esté listo para salir.`
+        : `🚚 Envío a domicilio en preparación. Te avisamos cuando esté listo para salir.`;
 
     const sellosLine =
       sellosGanados > 0
@@ -1417,14 +1457,14 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
 
     const kbVendDone = Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]);
 
-    // ✅ FIX: si no puede editar, manda nuevo mensaje y no falla
+    // ✅ FIX: si no puede editar, manda nuevo mensaje y no falla (evita “Error al confirmar” falso)
     try {
-      await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> confirmado.\n✅ Aviso enviado al comprador.`, {
+      await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> confirmado.\n📲 El comprador fue notificado.`, {
         parse_mode: "HTML",
         reply_markup: kbVendDone.reply_markup,
       });
     } catch {
-      await bot.telegram.sendMessage(ctx.chat.id, `✅ Pedido <b>${orderId}</b> confirmado.\n✅ Aviso enviado al comprador.`, {
+      await bot.telegram.sendMessage(ctx.chat.id, `✅ Pedido <b>${orderId}</b> confirmado.\n📲 El comprador fue notificado.`, {
         parse_mode: "HTML",
         reply_markup: kbVendDone.reply_markup,
       });
@@ -1506,7 +1546,15 @@ bot.on("text", async (ctx) => {
   if (w.type === "ADDR") {
     sess.checkout.direccion = text.slice(0, 140);
     sess.waiting = { type: "NOTES", payload: {} };
-    await safeEditOrSend(ctx, { text: `📝 Notas (o escribí <code>NO</code>):`, extra: Markup.inlineKeyboard(backMenuRows()) });
+
+    // ✅ Pide horario preferido SOLO si es envío/express (guardado en "Notas", sin campos nuevos)
+    const entrega = String(sess.checkout.entregaTipo || "").toUpperCase();
+    const ask =
+      (entrega === "ENVIO" || entrega === "EXPRESS")
+        ? `🕒 <b>Horario preferido</b> para la entrega (y si querés, agregá notas).\nEj: <code>Entre 14 y 16</code>\n\nO escribí <code>NO</code> si no tenés preferencia.`
+        : `📝 Notas (o escribí <code>NO</code>):`;
+
+    await safeEditOrSend(ctx, { text: ask, extra: Markup.inlineKeyboard(backMenuRows()) });
     return;
   }
 
