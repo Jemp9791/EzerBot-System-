@@ -613,11 +613,11 @@ function productCaption(cfg, p, index, total) {
   return lines.join("\n");
 }
 
+// ✅ Ajustado: NO mostrar botón "Ver carrito" en la ficha de producto
 function productKeyboard(p) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
     [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
-    [Markup.button.callback("🛒 Ver carrito", "VIEW_CART")],
     ...backMenuRows(),
   ]);
 }
@@ -1090,8 +1090,11 @@ async function showCart(ctx) {
   lines.push(`──────────────────`);
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
+  // ✅ Ajustado: si ya eligió entrega y pago, mostrar "Finalizar compra" en lugar de "Elegir entrega"
+  const readyToFinalize = !!(sess.checkout?.entregaTipo && sess.checkout?.pagoTipo);
+
   const kb = Markup.inlineKeyboard([
-    [Markup.button.callback("🚚 Elegir entrega", "CHK_DELIVERY")],
+    [Markup.button.callback(readyToFinalize ? "✅ Finalizar compra" : "🚚 Elegir entrega", readyToFinalize ? "FINALIZE_ORDER" : "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
     [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
     ...backMenuRows(),
@@ -1457,9 +1460,6 @@ bot.action("PROD_PREV", async (ctx) => {
   else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 });
 
-/* VER CARRITO */
-bot.action("VIEW_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
-
 /* QUIERO ESTE -> PREGUNTAR CANTIDAD */
 bot.action(/^WANT_(.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
@@ -1591,6 +1591,7 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
 /* =========================================================
    VENDEDOR CONFIRMA/RECHAZA
    ✅ Acredita sellos y total comprado SOLO al confirmar, 1 vez
+   ✅ Al confirmar: avisa al comprador y limpia botones del vendedor
 ========================================================= */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
   await ctx.answerCbQuery("Confirmado ✅");
@@ -1634,7 +1635,6 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
     });
     newSellosTotal = resCli.sellos;
 
-    // referido bonus por compra confirmada
     const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
     if (refBy) {
       for (let i = 0; i < bonusShare; i++) await addSelloReferido(refBy);
@@ -1681,7 +1681,11 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
     });
   }
 
-  await ctx.editMessageText(`${t}\n\n✅ <b>Estado:</b> APROBADO`, { parse_mode: "HTML" });
+  // ✅ limpiar botones al vendedor (y dejar estado final)
+  try { await ctx.editMessageReplyMarkup(undefined); } catch {}
+  try {
+    await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> APROBADO.\n\n${msgConfirm}`, { parse_mode: "HTML" });
+  } catch {}
 });
 
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
@@ -1700,7 +1704,9 @@ bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
       { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
     );
   }
-  await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
+
+  try { await ctx.editMessageReplyMarkup(undefined); } catch {}
+  try { await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" }); } catch {}
 });
 
 /* HELP CONTACT */
@@ -1851,3 +1857,4 @@ bot.on("animation", async (ctx) => {
   const fuid = ctx.message?.animation?.file_unique_id;
   await ctx.reply(`✅ GIF detectado\nfile_id:\n${fid}\n\nfile_unique_id:\n${fuid}`);
 });
+```0
