@@ -11,7 +11,7 @@ import { google } from "googleapis";
    - PORT (Render)
 ========================================================= */
 const TelegramBotToken =
-  process.env.TelegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
+  process.env.TelegramBotToken || process.env.TELEGRAM_BOT_TOKEN; // fallback sin romper
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
@@ -80,7 +80,6 @@ async function listSheets() {
   return (res.data.sheets || []).map((s) => s.properties.title);
 }
 
-// ✅ Mejorado: si la hoja existe, asegura encabezados al menos con los headers pedidos (sin borrar columnas extras)
 async function ensureSheet(sheetName, headers) {
   const existing = await listSheets();
   if (!existing.includes(sheetName)) {
@@ -89,23 +88,11 @@ async function ensureSheet(sheetName, headers) {
       requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
     });
     await setSheetValues(`${sheetName}!A1`, [headers]);
-    return;
-  }
-
-  const firstRow = await getSheetValues(`${sheetName}!A1:Z1`);
-  const current = (firstRow[0] || []).map((x) => String(x || "").trim());
-  const empty = !firstRow.length || current.join("").trim() === "";
-  if (empty) {
-    await setSheetValues(`${sheetName}!A1`, [headers]);
-    return;
-  }
-
-  // si faltan columnas de headers, las agregamos al final (no tocamos las existentes)
-  const currentLower = new Set(current.map((h) => h.toLowerCase()));
-  const missing = headers.filter((h) => !currentLower.has(String(h).toLowerCase()));
-  if (missing.length) {
-    const merged = [...current, ...missing];
-    await setSheetValues(`${sheetName}!A1`, [merged]);
+  } else {
+    const firstRow = await getSheetValues(`${sheetName}!A1:Z1`);
+    if (!firstRow.length || firstRow[0].join("").trim() === "") {
+      await setSheetValues(`${sheetName}!A1`, [headers]);
+    }
   }
 }
 
@@ -122,21 +109,8 @@ function kvFromRows(rows) {
   return out;
 }
 
-// ✅ Más tolerante: SI / Sí / S / TRUE / 1 / YES
 function parseYes(v) {
-  const s = String(v || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\./g, "");
-  return (
-    s === "si" ||
-    s === "sí" ||
-    s === "s" ||
-    s === "true" ||
-    s === "1" ||
-    s === "yes" ||
-    s === "y"
-  );
+  return String(v || "").trim().toLowerCase() === "si";
 }
 
 function parseNumber(v, def = 0) {
@@ -191,29 +165,26 @@ function inferUnit(raw) {
   const u = String(raw || "").trim().toLowerCase();
   if (!u) return "u";
   if (u.includes("gr") || u === "g" || u.includes("gram")) return "g";
-  if (u.includes("kg") || u.includes("kilo")) return "g";
+  if (u.includes("kg") || u.includes("kilo")) return "g"; // pedimos gramos igual
   if (u.includes("unidad") || u === "u" || u.includes("unid")) return "u";
   if (u.includes("pack")) return "u";
   return "u";
 }
 
 /* =========================================================
-   CACHE
+   CACHE (B) - evita demoras / “no responde”
 ========================================================= */
 const CACHE = {
   cfg: { value: null, ts: 0, inflight: null },
   cat: { value: null, ts: 0, inflight: null },
-  pedidosHdr: { value: null, ts: 0, inflight: null },
 };
-const CFG_TTL_MS = 10_000;
-const CAT_TTL_MS = 20_000;
-const HDR_TTL_MS = 30_000;
+const CFG_TTL_MS = 10_000; // 10s
+const CAT_TTL_MS = 20_000; // 20s
 
 async function loadConfigRaw() {
   const rows = await getSheetValues(`Config!A:B`);
   return kvFromRows(rows);
 }
-
 async function loadCatalogRaw() {
   const rows = await getSheetValues(`Catalogo!A1:Z`);
   if (!rows.length) return { items: [], headers: {} };
@@ -222,17 +193,13 @@ async function loadCatalogRaw() {
   const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
 
   const items = data.map((r, i) => {
-    const code =
-      String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() ||
-      `P${i + 1}`;
+    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
     const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
     const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
     const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0), 0);
     const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
     const unit = inferUnit(unitRaw);
-    const cat =
-      String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() ||
-      "General";
+    const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
     const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
     const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
     const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
@@ -287,10 +254,10 @@ function categoriesFromItems(items) {
 }
 
 /* =========================================================
-   STATE
+   STATE (chat limpio + flujo) + NAV (A)
 ========================================================= */
-const SESS = new Map();
-const ORDER_TIMERS = new Map();
+const SESS = new Map(); // chatId -> state
+const ORDER_TIMERS = new Map(); // orderId -> timeout
 
 function getSess(chatId) {
   if (!SESS.has(chatId)) {
@@ -315,8 +282,9 @@ function getSess(chatId) {
       waiting: null,
       jumpProdCode: null,
 
-      lastScreen: "MENU",
-      lastScreenData: {},
+      // (A) Back / menú consistente
+      lastScreen: "MENU", // MENU | CATS | PROD | CART | DELIVERY | PAY | TICKET | SELLOS | HELP | SHARE
+      lastScreenData: {}, // e.g. {cat}
     });
   }
   return SESS.get(chatId);
@@ -344,7 +312,6 @@ const CLIENTES_HEADERS = [
   "ReferidosGanados",
 ];
 
-// ✅ agregamos columnas para sellos (backward compatible)
 const PEDIDOS_HEADERS = [
   "PedidoId",
   "FechaISO",
@@ -361,43 +328,11 @@ const PEDIDOS_HEADERS = [
   "Notas",
   "Estado",
   "RefBy",
-  "SellosGanados",
-  "SellosAcreditados",
 ];
 
 async function ensureBaseSheets() {
   await ensureSheet(CLIENTES_SHEET, CLIENTES_HEADERS);
   await ensureSheet(PEDIDOS_SHEET, PEDIDOS_HEADERS);
-}
-
-// ===== Pedidos header map (para no hardcodear índices) =====
-function normalizeHdrKey(h) {
-  return String(h || "").trim().toLowerCase().replace(/\s+/g, "");
-}
-
-async function loadPedidosHeaderMap() {
-  const now = Date.now();
-  if (CACHE.pedidosHdr.value && now - CACHE.pedidosHdr.ts < HDR_TTL_MS) return CACHE.pedidosHdr.value;
-  if (CACHE.pedidosHdr.inflight) return CACHE.pedidosHdr.inflight;
-
-  CACHE.pedidosHdr.inflight = (async () => {
-    const row = await getSheetValues(`${PEDIDOS_SHEET}!A1:Z1`);
-    const headers = row[0] || [];
-    const map = {};
-    headers.forEach((h, i) => {
-      const k = normalizeHdrKey(h);
-      if (k) map[k] = i;
-    });
-    CACHE.pedidosHdr.value = map;
-    CACHE.pedidosHdr.ts = Date.now();
-    CACHE.pedidosHdr.inflight = null;
-    return map;
-  })().catch((e) => {
-    CACHE.pedidosHdr.inflight = null;
-    throw e;
-  });
-
-  return CACHE.pedidosHdr.inflight;
 }
 
 async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
@@ -416,7 +351,7 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
       refBy || "",
       0,
     ]);
-    return { sellos: addSellos, total: addTotal, isNew: true };
+    return { sellos: addSellos, total: addTotal };
   }
 
   const row = rows[idx];
@@ -439,7 +374,7 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
     currentRefGanados,
   ]]);
 
-  return { sellos: newSellos, total: newTotal, isNew: false };
+  return { sellos: newSellos, total: newTotal };
 }
 
 async function addSelloReferido(chatIdReferente) {
@@ -465,7 +400,7 @@ async function addSelloReferido(chatIdReferente) {
 }
 
 async function findPedidoRow(orderId) {
-  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:Z`);
+  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:O`);
   const idx = rows.findIndex((r) => String(r[0] || "") === String(orderId));
   if (idx === -1) return null;
   return { idx, row: rows[idx], rowNumber: idx + 2 };
@@ -475,52 +410,30 @@ async function setPedidoEstado(orderId, newEstado) {
   const found = await findPedidoRow(orderId);
   if (!found) return null;
   const { row, rowNumber } = found;
-
-  const hdr = await loadPedidosHeaderMap();
-  const estadoIdx = hdr["estado"] ?? 13; // fallback
-  row[estadoIdx] = newEstado;
-
-  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:Z${rowNumber}`, [row]);
-  return row;
-}
-
-async function setPedidoField(orderId, key, value) {
-  const found = await findPedidoRow(orderId);
-  if (!found) return null;
-  const { row, rowNumber } = found;
-
-  const hdr = await loadPedidosHeaderMap();
-  const idx = hdr[normalizeHdrKey(key)];
-  if (idx === undefined) return null;
-
-  row[idx] = value;
-  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:Z${rowNumber}`, [row]);
+  row[13] = newEstado;
+  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:O${rowNumber}`, [row]);
   return row;
 }
 
 async function expireOldPending() {
-  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:Z`);
-  const hdr = await loadPedidosHeaderMap();
-  const expIdx = hdr["expiraiso"] ?? 2;
-  const estadoIdx = hdr["estado"] ?? 13;
-
+  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:O`);
   const now = Date.now();
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const expIso = r[expIdx];
-    const estado = String(r[estadoIdx] || "").toUpperCase();
+    const expIso = r[2];
+    const estado = String(r[13] || "").toUpperCase();
     if (!expIso || estado !== "PENDIENTE") continue;
     const exp = Date.parse(expIso);
     if (Number.isFinite(exp) && exp <= now) {
       const rowNumber = i + 2;
-      r[estadoIdx] = "VENCIDO";
-      await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:Z${rowNumber}`, [r]);
+      r[13] = "VENCIDO";
+      await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:O${rowNumber}`, [r]);
     }
   }
 }
 
 /* =========================================================
-   UI HELPERS
+   UI HELPERS (editar mensaje) -> SOLO para catálogo/compra
 ========================================================= */
 async function safeEditOrSend(ctx, payload) {
   const chatId = ctx.chat?.id;
@@ -529,7 +442,7 @@ async function safeEditOrSend(ctx, payload) {
 
   try {
     if (canEdit) {
-      if (payload.animation) throw new Error("forceSend");
+      if (payload.animation) throw new Error("forceSend"); // no edit animations
       if (payload.photo) {
         await ctx.telegram.editMessageMedia(
           chatId,
@@ -577,7 +490,7 @@ async function safeEditOrSend(ctx, payload) {
 }
 
 /* =========================================================
-   KEYBOARDS
+   KEYBOARDS (A) Menú + Volver + Menú
 ========================================================= */
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
@@ -603,7 +516,7 @@ function backMenuRows() {
 ========================================================= */
 function productCaption(cfg, p, index, total) {
   const moneda = cfg.Moneda || "ARS";
-  const showPrice = parseYes(cfg.CatalogoMostrarPrecios ?? "SI");
+  const showPrice = parseYes(cfg.CatalogoMostrarPrecios || "SI");
   const lines = [];
   lines.push(`<b>${p.name}</b>`);
 
@@ -618,16 +531,13 @@ function productCaption(cfg, p, index, total) {
   return lines.join("\n");
 }
 
-// ✅ SOLO: compartir promo, quiero éste, anterior, siguiente, volver, menú
-// ✅ botón de carrito SOLO si ya hay productos en el carrito
-function productKeyboard(p, hasCart = false) {
-  const rows = [
+function productKeyboard(p) {
+  return Markup.inlineKeyboard([
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
-    [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir promo", `SHARE_PROD_${p.code}`)],
-  ];
-  if (hasCart) rows.push([Markup.button.callback("🛒 Carrito", "VIEW_CART")]);
-  rows.push(...backMenuRows());
-  return Markup.inlineKeyboard(rows);
+    [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    [Markup.button.callback("🛒 Ver carrito", "VIEW_CART")],
+    ...backMenuRows(),
+  ]);
 }
 
 /* =========================================================
@@ -720,41 +630,9 @@ function sellosTextLevels(cfg) {
 }
 
 /* =========================================================
-   GIF SEND (ROBUSTO) — si falla, hace fallback (incluye video)
-========================================================= */
-async function sendAnimOrVideo(ctx, { animationId, animationUrl, caption, reply_markup }) {
-  try {
-    if (animationId) {
-      const msg = await ctx.replyWithAnimation(animationId, { caption, parse_mode: "HTML", reply_markup });
-      return msg || null;
-    }
-  } catch {}
-  try {
-    if (animationUrl && animationUrl.startsWith("http")) {
-      const msg = await ctx.replyWithAnimation(animationUrl, { caption, parse_mode: "HTML", reply_markup });
-      return msg || null;
-    }
-  } catch {}
-
-  // fallback: algunos "GIFs" vienen como video (mp4)
-  try {
-    if (animationId) {
-      const msg = await ctx.replyWithVideo(animationId, { caption, parse_mode: "HTML", reply_markup });
-      return msg || null;
-    }
-  } catch {}
-  try {
-    if (animationUrl && animationUrl.startsWith("http")) {
-      const msg = await ctx.replyWithVideo(animationUrl, { caption, parse_mode: "HTML", reply_markup });
-      return msg || null;
-    }
-  } catch {}
-
-  return null;
-}
-
-/* =========================================================
-   FLOW SCREENS
+   FLOW SCREENS (C + GIFs por file_id desde Config)
+   - GIFs (start/ayuda/compartir): QUEDAN FIJOS en el chat (no editar)
+   - Catálogo + compra: se edita con safeEditOrSend (chat limpio)
 ========================================================= */
 async function showMenu(ctx) {
   const cfg = await loadConfig();
@@ -767,8 +645,9 @@ async function showMenu(ctx) {
   const estado = cfg.Estado || "";
   const desc = String(cfg.Descripcion || "").trim();
 
+  // ✅ GIF por file_id (Telegram) desde Config
   const gifId = pickRandom(splitPipes(cfg.GifBienvenidaID || cfg.GifBienvenidaFileId || ""));
-  const gifUrl = pickRandom(splitPipes(cfg.GifBienvenidaURL || ""));
+  const gifUrl = pickRandom(splitPipes(cfg.GifBienvenidaURL || "")); // opcional fallback
   const logo = String(cfg.LogoURL || "").trim();
 
   const header = [];
@@ -777,30 +656,37 @@ async function showMenu(ctx) {
   if (dire) header.push(`📍 ${dire}`);
   if (hora) header.push(`🕒 ${hora}`);
 
-  let caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
-  if (caption.length > 1000) caption = caption.slice(0, 980) + "…";
+  const caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
 
-  const msg = await sendAnimOrVideo(ctx, {
-    animationId: gifId,
-    animationUrl: gifUrl,
-    caption,
-    reply_markup: mainMenuKeyboard().reply_markup,
-  });
-  if (msg?.message_id) sess.lastMessageId = msg.message_id;
-  if (msg) return;
-
-  if (logo && logo.startsWith("http")) {
-    const m2 = await ctx.replyWithPhoto(logo, {
+  // FIJO (no editar): primero file_id, luego URL
+  if (gifId) {
+    await ctx.replyWithAnimation(gifId, {
       caption,
       parse_mode: "HTML",
       reply_markup: mainMenuKeyboard().reply_markup,
     });
-    if (m2?.message_id) sess.lastMessageId = m2.message_id;
     return;
   }
 
-  const m3 = await ctx.reply(caption, { parse_mode: "HTML", reply_markup: mainMenuKeyboard().reply_markup });
-  if (m3?.message_id) sess.lastMessageId = m3.message_id;
+  if (gifUrl && gifUrl.startsWith("http")) {
+    await ctx.replyWithAnimation(gifUrl, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: mainMenuKeyboard().reply_markup,
+    });
+    return;
+  }
+
+  if (logo && logo.startsWith("http")) {
+    await ctx.replyWithPhoto(logo, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: mainMenuKeyboard().reply_markup,
+    });
+    return;
+  }
+
+  await ctx.reply(caption, { parse_mode: "HTML", reply_markup: mainMenuKeyboard().reply_markup });
 }
 
 async function showCategories(ctx) {
@@ -861,8 +747,8 @@ async function showProductCarousel(ctx, cat) {
   const caption = productCaption(cfg, p, 0, prods.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
 
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p, sess.cart.length > 0) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p, sess.cart.length > 0) });
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 }
 
 async function showSellos(ctx, showLevels = false) {
@@ -874,16 +760,7 @@ async function showSellos(ctx, showLevels = false) {
   const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
   const sellos = me ? parseNumber(me[3], 0) : 0;
 
-  const cardUrl = String(
-    cfg.CARD_URL ||
-      cfg.CardURL ||
-      cfg.SelloURL ||
-      cfg.TarjetaURL ||
-      cfg.TarjetaSellosURL ||
-      cfg.ImagenSellosURL ||
-      ""
-  ).trim();
-
+  const cardUrl = String(cfg.CARD_URL || cfg.CardURL || cfg.SelloURL || "").trim();
   const caption = showLevels
     ? `${sellosTextShort(cfg, sellos)}\n\n${sellosTextLevels(cfg)}`
     : sellosTextShort(cfg, sellos);
@@ -910,7 +787,7 @@ async function showHelp(ctx) {
   const gifUrl = pickRandom(splitPipes(cfg.GifAyudaURL || ""));
 
   const nombre = cfg.NegocioNombre || "Todo Queso";
-  let text = [
+  const text = [
     `ℹ️ <b>Ayuda - ${nombre}</b>\n`,
     `• Tocá 🧀 <b>Catálogo</b> y elegí productos.`,
     `• Tocá ✅ <b>Quiero éste</b> y escribí gramos o unidades.`,
@@ -918,23 +795,27 @@ async function showHelp(ctx) {
     `• Si pagás por transferencia: enviás comprobante por WhatsApp y el vendedor confirma.`,
   ].join("\n");
 
-  if (text.length > 1000) text = text.slice(0, 980) + "…";
-
   const kb = Markup.inlineKeyboard([
     [Markup.button.callback("✉️ Hablar con vendedor", "HELP_CONTACT")],
     ...backMenuRows(),
   ]);
 
-  const msg = await sendAnimOrVideo(ctx, {
-    animationId: gifId,
-    animationUrl: gifUrl,
-    caption: text,
-    reply_markup: kb.reply_markup,
-  });
-  if (msg?.message_id) sess.lastMessageId = msg.message_id;
-  if (msg) return;
-
-  await safeEditOrSend(ctx, { text, extra: kb });
+  // FIJO: no editar (para evitar fallos)
+  if (gifId) {
+    await ctx.replyWithAnimation(gifId, {
+      caption: text,
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
+  } else if (gifUrl && gifUrl.startsWith("http")) {
+    await ctx.replyWithAnimation(gifUrl, {
+      caption: text,
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
+  } else {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
+  }
 }
 
 async function showShareBot(ctx) {
@@ -945,44 +826,43 @@ async function showShareBot(ctx) {
   const gifId = pickRandom(splitPipes(cfg.GifCompartirID || cfg.GifCompartirFileId || ""));
   const gifUrl = pickRandom(splitPipes(cfg.GifCompartirURL || ""));
   const botLink = String(cfg.BotLink || "").trim();
-
-  const mailSistema = String(
-    cfg.MailSistema || cfg.EmailSistema || cfg.SystemEmail || cfg.EmailDelSistema || cfg.MailDelSistema || ""
-  ).trim();
-
   const textShare =
     String(cfg.TextoCompartirBot || "").trim() ||
     `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y pedí en 1 minuto.`;
 
   if (!botLink) {
-    await safeEditOrSend(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: Markup.inlineKeyboard(backMenuRows()) });
+    await ctx.reply("Falta <b>BotLink</b> en Config para compartir.", { parse_mode: "HTML" });
     return;
   }
 
   const links = buildShareLinks({ botLink, text: textShare });
-  let caption = [`📣 <b>Compartir</b>\n`, `Elegí dónde compartir 👇`].join("\n");
-  if (mailSistema) caption += `\n\n✉️ <b>Mail del sistema:</b> ${mailSistema}`;
-  if (caption.length > 1000) caption = caption.slice(0, 980) + "…";
+  const caption = [`📣 <b>Compartir</b>\n`, `Elegí dónde compartir 👇`].join("\n");
 
   const kb = Markup.inlineKeyboard([
     [Markup.button.url("📲 WhatsApp", links.wa), Markup.button.url("✈️ Telegram", links.tg)],
     ...backMenuRows(),
   ]);
 
-  const msg = await sendAnimOrVideo(ctx, {
-    animationId: gifId,
-    animationUrl: gifUrl,
-    caption,
-    reply_markup: kb.reply_markup,
-  });
-  if (msg?.message_id) sess.lastMessageId = msg.message_id;
-  if (msg) return;
-
-  await safeEditOrSend(ctx, { text: caption, extra: kb });
+  // FIJO: no editar
+  if (gifId) {
+    await ctx.replyWithAnimation(gifId, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
+  } else if (gifUrl && gifUrl.startsWith("http")) {
+    await ctx.replyWithAnimation(gifUrl, {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: kb.reply_markup,
+    });
+  } else {
+    await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb.reply_markup });
+  }
 }
 
 /* =========================================================
-   QUIERO ESTE -> CANTIDAD
+   PRODUCT -> QUIERO ESTE -> CANTIDAD
 ========================================================= */
 function qtyPromptText(cfg, p) {
   if (p.unit === "g") {
@@ -994,7 +874,7 @@ function qtyPromptText(cfg, p) {
 function computeSubtotal(p, qtyType, value) {
   if (qtyType === "g") {
     const grams = Math.max(1, parseNumber(value, 0));
-    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price;
+    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price; // si no hay precio/kg, asumimos price es por kg
     const subtotal = roundARS((grams / 1000) * perKg);
     return { grams, qty: 0, subtotal };
   }
@@ -1003,7 +883,7 @@ function computeSubtotal(p, qtyType, value) {
   return { grams: 0, qty, subtotal };
 }
 
-// ✅ sumar bien
+// ✅ (C) CORREGIDO: sumar bien por producto sin inflar
 function addToCart(sess, p, qtyType, value) {
   const calc = computeSubtotal(p, qtyType, value);
   const existing = sess.cart.find((x) => x.code === p.code && x.qtyType === qtyType);
@@ -1119,9 +999,8 @@ async function showCart(ctx) {
   lines.push(`──────────────────`);
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
-  // ✅ Cambiado: "Finalizar compra" en lugar de "Elegir entrega" (acción igual)
   const kb = Markup.inlineKeyboard([
-    [Markup.button.callback("✅ Finalizar compra", "CHK_DELIVERY")],
+    [Markup.button.callback("🚚 Elegir entrega", "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
     [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
     ...backMenuRows(),
@@ -1214,26 +1093,45 @@ async function finalizeOrderCreate(ctx) {
 
   const entregaTipo = sess.checkout.entregaTipo || "RETIRO";
   const pagoTipo = sess.checkout.pagoTipo || "EFECTIVO";
+
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
+  // ✅ TOTAL CORRECTO (cart + envío una sola vez)
   let total = cartTotal(sess.cart);
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total = roundARS(total + costoEnvio);
 
-  // ✅ Calculamos sellos pero NO acreditamos acá (se acredita al confirmar)
-  const usaSellos = parseYes(cfg.UsaSellos ?? "SI");
+  // sellos por compra
+  const usaSellos = parseYes(cfg.UsaSellos || "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
 
-  const nombre =
-    sess.checkout.nombre || `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
+  // datos cliente
+  const nombre = sess.checkout.nombre || `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
   const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
   const telefono = sess.checkout.telefono || "";
   const direccion = sess.checkout.direccion || "";
   const notas = sess.checkout.notas || "";
 
+  // persist cliente (sumar sellos ahora)
+  await upsertCliente({
+    chatId: ctx.chat.id,
+    nombre,
+    usuario,
+    addSellos: sellosGanados,
+    addTotal: total,
+    refBy: sess.refBy ? String(sess.refBy) : "",
+  });
+
+  // referido bonus al referente por compra
+  const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
+  if (sess.refBy) {
+    for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
+  }
+
+  // pedido
   const orderId = buildOrderId();
   const now = new Date();
-  const expMs = 60 * 60 * 1000;
+  const expMs = 60 * 60 * 1000; // 1 hora
   const expIso = new Date(now.getTime() + expMs).toISOString();
 
   const itemsText = sess.cart.map((it) => `${it.name} (${fmtQty(it)})`).join(" | ");
@@ -1254,10 +1152,9 @@ async function finalizeOrderCreate(ctx) {
     notas,
     "PENDIENTE",
     sess.refBy ? String(sess.refBy) : "",
-    sellosGanados,
-    "NO", // SellosAcreditados
   ]);
 
+  // avisar vendedor por Telegram (Config: VendedorChatId)
   const vendedorIdReal = String(cfg.VendedorChatId || "").trim();
   const vendedor = vendedorIdReal ? Number(vendedorIdReal) : null;
 
@@ -1277,7 +1174,7 @@ async function finalizeOrderCreate(ctx) {
 
   if (vendedor && Number.isFinite(vendedor)) {
     const kbVend = Markup.inlineKeyboard([
-      [Markup.button.callback("✅ Confirmar transferencia", `V_CONFIRM_${orderId}`)],
+      [Markup.button.callback("✅ Confirmar pago", `V_CONFIRM_${orderId}`)],
       [Markup.button.callback("❌ Rechazar", `V_REJECT_${orderId}`)],
     ]);
     await bot.telegram.sendMessage(vendedor, ticketVendedor, {
@@ -1286,6 +1183,7 @@ async function finalizeOrderCreate(ctx) {
     });
   }
 
+  // cliente: ticket + transferencia + 1h
   const ticketCliente = ticketPOS(cfg, {
     orderId,
     items: sess.cart,
@@ -1305,8 +1203,6 @@ async function finalizeOrderCreate(ctx) {
   const extra = [];
   extra.push(`⏳ Este pedido queda <b>pendiente</b> hasta que el vendedor confirme el pago.`);
   extra.push(`🕐 Si no se confirma en <b>1 hora</b>, se cancela automáticamente.`);
-  if (sellosGanados > 0) extra.push(`🎟️ Al confirmarse el pago, se acreditan <b>${sellosGanados}</b> sello(s).`);
-
   if (String(pagoTipo).toUpperCase().includes("TRANSF")) {
     extra.push("");
     extra.push(buildTransferDataText(cfg));
@@ -1324,10 +1220,10 @@ async function finalizeOrderCreate(ctx) {
     extra: Markup.inlineKeyboard(kbClienteRows),
   });
 
+  // programar vencimiento
   scheduleExpire(orderId, expMs, async () => {
     const row = await setPedidoEstado(orderId, "VENCIDO");
     if (!row) return;
-
     const chatIdCliente = Number(row[3]);
     if (Number.isFinite(chatIdCliente)) {
       await bot.telegram.sendMessage(
@@ -1338,13 +1234,14 @@ async function finalizeOrderCreate(ctx) {
     }
   });
 
+  // limpiar estado compra
   sess.cart = [];
   sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
   sess.waiting = null;
 }
 
 /* =========================================================
-   HELP CONTACT
+   HELP CONTACT (manda mensaje al vendedor)
 ========================================================= */
 async function forwardToVendedor(cfg, fromCtx, text) {
   const vendedorId = String(cfg.VendedorChatId || "").trim();
@@ -1387,6 +1284,7 @@ bot.start(async (ctx) => {
 
   await showMenu(ctx);
 
+  // salto a producto si viene por link
   if (sess.jumpProdCode) {
     const code = sess.jumpProdCode;
     sess.jumpProdCode = null;
@@ -1403,23 +1301,28 @@ bot.start(async (ctx) => {
         const p2 = sess2.productsInView[idx];
         const caption = productCaption(cfg, p2, idx, sess2.productsInView.length);
         const photo = p2.img && p2.img.startsWith("http") ? p2.img : undefined;
-        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p2, sess2.cart.length > 0) });
-        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p2, sess2.cart.length > 0) });
+        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p2) });
+        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p2) });
       }
     }
   }
 });
 
 /* =========================================================
-   VOLVER UNIVERSAL
+   (A) VOLVER UNIVERSAL
 ========================================================= */
 bot.action("GO_BACK", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
   const s = sess.lastScreen;
 
-  if (s === "PROD") return showCategories(ctx);
+  // “Volver” va a la pantalla lógica anterior del flujo
+  if (s === "PROD") {
+    await showCategories(ctx);
+    return;
+  }
   if (s === "CART") {
+    // si venías de producto, volvemos a producto; si no, a categorías
     const cat = sess.category || sess.lastScreenData?.cat;
     if (cat && sess.productsInView?.length) {
       const cfg = await loadConfig();
@@ -1428,16 +1331,27 @@ bot.action("GO_BACK", async (ctx) => {
       const caption = productCaption(cfg, p, idx, sess.productsInView.length);
       const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
       setScreen(sess, "PROD", { cat });
-      if (photo) return safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p, sess.cart.length > 0) });
-      return safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p, sess.cart.length > 0) });
+      if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+      else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+      return;
     }
-    return showCategories(ctx);
+    await showCategories(ctx);
+    return;
   }
-  if (s === "DELIVERY") return showCart(ctx);
-  if (s === "PAY" || s === "TICKET") return showDelivery(ctx);
-  if (s === "SELLOS" || s === "HELP" || s === "SHARE" || s === "CATS") return showMenu(ctx);
+  if (s === "DELIVERY") {
+    await showCart(ctx);
+    return;
+  }
+  if (s === "PAY" || s === "TICKET") {
+    await showDelivery(ctx);
+    return;
+  }
+  if (s === "SELLOS" || s === "HELP" || s === "SHARE" || s === "CATS") {
+    await showMenu(ctx);
+    return;
+  }
 
-  return showMenu(ctx);
+  await showMenu(ctx);
 });
 
 /* MENÚ */
@@ -1469,8 +1383,8 @@ bot.action("PROD_NEXT", async (ctx) => {
 
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p, sess.cart.length > 0) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p, sess.cart.length > 0) });
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 });
 
 bot.action("PROD_PREV", async (ctx) => {
@@ -1484,8 +1398,8 @@ bot.action("PROD_PREV", async (ctx) => {
 
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p, sess.cart.length > 0) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p, sess.cart.length > 0) });
+  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
+  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
 });
 
 /* VER CARRITO */
@@ -1538,7 +1452,7 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
   const links = buildShareLinks({ botLink: deepLink, text });
 
   await safeEditOrSend(ctx, {
-    text: `🔗 <b>Compartir promo</b>\n\n${p.name}\n\nElegí dónde compartir 👇`,
+    text: `🔗 <b>Compartir producto</b>\n\n${p.name}\n\nElegí dónde compartir 👇`,
     extra: shareKeyboard(links),
   });
 });
@@ -1619,73 +1533,32 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   await safeEditOrSend(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
 });
 
-/* =========================================================
-   VENDEDOR CONFIRMA/RECHAZA
-   ✅ termina flujo + manda confirmación a comprador y vendedor
-========================================================= */
+/* VENDEDOR CONFIRMA/RECHAZA */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
   await ctx.answerCbQuery("Confirmado ✅");
   const cfg = await loadConfig();
   const orderId = ctx.match[1];
+  const row = await setPedidoEstado(orderId, "APROBADO");
+  if (!row) return;
 
-  const found = await findPedidoRow(orderId);
-  if (!found) return;
+  const chatIdCliente = Number(row[3]);
+  const entregaTipo = row[8] || "";
+  const pagoTipo = row[9] || "";
+  const nombre = row[4] || "";
+  const usuario = row[5] || "";
+  const itemsText = row[6] || "";
+  const total = parseNumber(row[7], 0);
+  const direccion = row[10] || "";
+  const telefono = row[11] || "";
+  const notas = row[12] || "";
 
-  const hdr = await loadPedidosHeaderMap();
-  const row = found.row;
-
-  const chatIdCliente = Number(row[hdr["chatidcliente"] ?? 3]);
-  const entregaTipo = row[hdr["entregatipo"] ?? 8] || "";
-  const pagoTipo = row[hdr["pagotipo"] ?? 9] || "";
-  const nombre = row[hdr["nombrecliente"] ?? 4] || "";
-  const usuario = row[hdr["usuariocliente"] ?? 5] || "";
-  const itemsText = row[hdr["items"] ?? 6] || "";
-  const total = parseNumber(row[hdr["total"] ?? 7], 0);
-  const direccion = row[hdr["direccion"] ?? 10] || "";
-  const telefono = row[hdr["telefono"] ?? 11] || "";
-  const notas = row[hdr["notas"] ?? 12] || "";
-  const refBy = row[hdr["refby"] ?? 14] || "";
-
-  const sellosGanados = parseNumber(row[hdr["sellosganados"] ?? 15], 0);
-  const yaAcreditados = parseYes(row[hdr["sellosacreditados"] ?? 16]);
-
-  await setPedidoEstado(orderId, "APROBADO");
-
-  let newSellosTotal = null;
-  if (!yaAcreditados && Number.isFinite(chatIdCliente)) {
-    const resCli = await upsertCliente({
-      chatId: chatIdCliente,
-      nombre,
-      usuario,
-      addSellos: sellosGanados,
-      addTotal: total,
-      refBy: refBy ? String(refBy) : "",
-    });
-    newSellosTotal = resCli.sellos;
-
-    const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
-    if (refBy) {
-      for (let i = 0; i < bonusShare; i++) await addSelloReferido(refBy);
-    }
-
-    await setPedidoField(orderId, "SellosAcreditados", "SI");
-  }
-
-  const msgConfirm =
-    String(cfg.TextoConfirmacionPedido || "").trim() ||
-    "✅ Transferencia confirmada. Tu pedido quedó confirmado y ya está en preparación.";
-
+  const msgConfirm = String(cfg.TextoConfirmacionPedido || "").trim() || "✅ Pago confirmado. Ya estamos preparando tu pedido.";
   const extraEntrega =
     entregaTipo === "RETIRO"
       ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
       : entregaTipo === "EXPRESS"
       ? `⚡ Envío express: lo enviamos lo antes posible.`
       : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
-
-  const sellosLine =
-    sellosGanados > 0
-      ? `🎟️ <b>Sellos acreditados:</b> +${sellosGanados}${newSellosTotal !== null ? ` (Total: ${newSellosTotal})` : ""}`
-      : "";
 
   const t = [
     `✅ <b>Pedido confirmado</b>`,
@@ -1694,7 +1567,6 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
     `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
     `📦 ${itemsText}`,
     `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
-    sellosLine,
     `🚚 <b>Entrega:</b> ${entregaTipo}`,
     `💳 <b>Pago:</b> ${pagoTipo}`,
     direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
@@ -1705,29 +1577,14 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
     extraEntrega,
   ].filter(Boolean).join("\n");
 
-  // comprador: mensaje + botones menú
   if (Number.isFinite(chatIdCliente)) {
     await bot.telegram.sendMessage(chatIdCliente, t, {
       parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard().reply_markup,
+      reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
     });
   }
 
-  // vendedor: editar si se puede; si no, mandar mensaje
-  const vendFinal = `${t}\n\n✅ <b>Estado:</b> APROBADO\n\n✅ Mensaje enviado al comprador.`;
-  try {
-    await ctx.editMessageText(vendFinal, {
-      parse_mode: "HTML",
-      reply_markup: Markup.inlineKeyboard([goMenuRow()]).reply_markup,
-    });
-  } catch {
-    try {
-      await bot.telegram.sendMessage(ctx.chat.id, vendFinal, {
-        parse_mode: "HTML",
-        reply_markup: Markup.inlineKeyboard([goMenuRow()]).reply_markup,
-      });
-    } catch {}
-  }
+  await ctx.editMessageText(`${t}\n\n✅ <b>Estado:</b> APROBADO`, { parse_mode: "HTML" });
 });
 
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
@@ -1735,31 +1592,14 @@ bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
   const orderId = ctx.match[1];
   const row = await setPedidoEstado(orderId, "RECHAZADO");
   if (!row) return;
-
-  const hdr = await loadPedidosHeaderMap();
-  const chatIdCliente = Number(row[hdr["chatidcliente"] ?? 3]);
-
+  const chatIdCliente = Number(row[3]);
   if (Number.isFinite(chatIdCliente)) {
-    await bot.telegram.sendMessage(
-      chatIdCliente,
-      `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`,
-      { parse_mode: "HTML", reply_markup: mainMenuKeyboard().reply_markup }
-    );
-  }
-
-  try {
-    await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.\n\n✅ Mensaje enviado al comprador.`, {
+    await bot.telegram.sendMessage(chatIdCliente, `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`, {
       parse_mode: "HTML",
-      reply_markup: Markup.inlineKeyboard([goMenuRow()]).reply_markup,
+      reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
     });
-  } catch {
-    try {
-      await bot.telegram.sendMessage(ctx.chat.id, `❌ Pedido <b>${orderId}</b> RECHAZADO.\n\n✅ Mensaje enviado al comprador.`, {
-        parse_mode: "HTML",
-        reply_markup: Markup.inlineKeyboard([goMenuRow()]).reply_markup,
-      });
-    } catch {}
   }
+  await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
 });
 
 /* HELP CONTACT */
@@ -1782,7 +1622,7 @@ bot.action("CART_CLEAR", async (ctx) => {
 });
 
 /* =========================================================
-   TEXT HANDLER
+   TEXT HANDLER (cantidad + datos + ayuda)
 ========================================================= */
 bot.on("text", async (ctx) => {
   await ensureBaseSheets();
@@ -1884,6 +1724,7 @@ async function start() {
   await ensureBaseSheets();
   await expireOldPending();
 
+  // (B) limpiar pendientes cada 5 minutos (no en cada click)
   setInterval(() => {
     expireOldPending().catch(() => {});
   }, 5 * 60 * 1000);
@@ -1891,7 +1732,7 @@ async function start() {
   if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
     const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
     await bot.telegram.setWebhook(hook);
-    app.use(bot.webhookCallback("/telegram"));
+    app.use(bot.webhookCallback("/telegram")); // POST /telegram
     app.listen(PORT, () => console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`));
   } else {
     bot.launch();
@@ -1902,11 +1743,4 @@ async function start() {
 start().catch((e) => {
   console.error("FATAL:", e?.message || e);
   process.exit(1);
-});
-
-// === DEBUG TEMPORAL: capturar file_id correcto de GIFs (animation) ===
-bot.on("animation", async (ctx) => {
-  const fid = ctx.message?.animation?.file_id;
-  const fuid = ctx.message?.animation?.file_unique_id;
-  await ctx.reply(`✅ GIF detectado\nfile_id:\n${fid}\n\nfile_unique_id:\n${fuid}`);
 });
