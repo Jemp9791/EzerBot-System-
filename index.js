@@ -1738,38 +1738,50 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   await safeEditOrSendEditable(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
 });
 
-/* VENDEDOR CONFIRMA/RECHAZA */
+/*/* VENDEDOR CONFIRMA */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
-  try {
-    await ctx.answerCbQuery("Confirmado ✅");
-    const cfg = await loadConfig();
-    const orderId = ctx.match[1];
-    const row = await setPedidoEstado(orderId, "APROBADO");
-    if (!row) return;
+  await ctx.answerCbQuery("Confirmando pago…");
 
-    const chatIdCliente = Number(row[3]);
-    const entregaTipo = row[8] || "";
-    const pagoTipo = row[9] || "";
-    const nombre = row[4] || "";
-    const usuario = row[5] || "";
-    const itemsText = row[6] || "";
-    const total = parseNumber(row[7], 0);
-    const direccion = row[10] || "";
-    const telefono = row[11] || "";
-    const notas = row[12] || "";
+  const orderId = ctx.match[1];
 
-    const msgConfirm =
-      String(cfg.TextoConfirmacionPedido || "").trim() ||
-      "✅ Transferencia recibida. Pedido confirmado y en preparación.";
+  const found = await findPedidoRow(orderId);
+  if (!found) {
+    await ctx.answerCbQuery("Pedido no encontrado", { show_alert: true });
+    return;
+  }
 
-    const extraEntrega =
-      entregaTipo === "RETIRO"
-        ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
-        : entregaTipo === "EXPRESS"
-        ? `⚡ Envío express: lo enviamos lo antes posible.`
-        : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(
-            cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || ""
-          ).trim()}`;
+  const { row, hmap } = found;
+
+  // 🔒 Cambiamos estado correctamente
+  await setPedidoEstado(orderId, "PENDIENTE_ENTREGA");
+
+  const chatIdCliente = Number(getCell(row, hmap, "ChatIdCliente", ""));
+  const entregaTipo = getCell(row, hmap, "EntregaTipo", "");
+  const pagoTipo = getCell(row, hmap, "PagoTipo", "");
+  const nombre = getCell(row, hmap, "NombreCliente", "");
+  const itemsText = getCell(row, hmap, "Items", "");
+  const total = parseNumber(getCell(row, hmap, "Total", 0), 0);
+
+  /* 📩 MENSAJE AL COMPRADOR */
+  if (Number.isFinite(chatIdCliente)) {
+    await bot.telegram.sendMessage(
+      chatIdCliente,
+      `✅ <b>Pago confirmado</b>\n\n🧾 Pedido: <code>${orderId}</code>\n📦 ${itemsText}\n💰 Total: ARS ${total}\n\nTu pedido fue confirmado por el vendedor.\n📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  /* 📩 ACTUALIZA MENSAJE DEL VENDEDOR */
+  await ctx.editMessageText(
+    `✅ <b>Pago confirmado</b>\n\n🧾 Pedido: <code>${orderId}</code>\n👤 ${nombre}\n📦 ${itemsText}\n💰 Total: ARS ${total}\n\n📨 El comprador fue notificado.\n📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
+    {
+      parse_mode: "HTML",
+      reply_markup: ctx.update.callback_query.message.reply_markup,
+    }
+  );
+
+  await ctx.answerCbQuery("Pago confirmado ✅");
+});
 
     const t = [
       `✅ <b>Pedido confirmado</b>`,
