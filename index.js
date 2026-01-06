@@ -1769,7 +1769,6 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
       `✅ <b>Pago confirmado</b>\n\n🧾 Pedido: <code>${orderId}</code>\n📦 ${itemsText}\n💰 Total: ARS ${total}\n\nTu pedido fue confirmado por el vendedor.\n📌 Estado: <b>PENDIENTE DE ENTREGA</b>`,
       { parse_mode: "HTML" }
     );
-  }
 
   /* 📩 ACTUALIZA MENSAJE DEL VENDEDOR */
   await ctx.editMessageText(
