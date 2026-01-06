@@ -1857,4 +1857,3 @@ bot.on("animation", async (ctx) => {
   const fuid = ctx.message?.animation?.file_unique_id;
   await ctx.reply(`✅ GIF detectado\nfile_id:\n${fid}\n\nfile_unique_id:\n${fuid}`);
 });
-```0
