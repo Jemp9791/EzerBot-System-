@@ -155,6 +155,18 @@ function inferUnit(raw) {
   return "u";
 }
 
+/* A1 helper (para actualizar UNA celda y evitar el error de “range” en Google Sheets) */
+function colToA1(colIdx0) {
+  let n = colIdx0 + 1;
+  let s = "";
+  while (n > 0) {
+    const m = (n - 1) % 26;
+    s = String.fromCharCode(65 + m) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
 /* ===================== CACHE ===================== */
 const CACHE = {
   cfg: { value: null, ts: 0, inflight: null },
@@ -399,6 +411,13 @@ async function addSelloReferido(chatIdReferente) {
   ]]);
 }
 
+async function getClienteSellos(chatId) {
+  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
+  const r = rows.find((x) => String(x[0] || "") === String(chatId));
+  if (!r) return { sellos: 0, total: 0 };
+  return { sellos: parseNumber(r[3], 0), total: parseNumber(r[4], 0) };
+}
+
 async function findPedidoRow(orderId) {
   const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:Z`);
   const idx = rows.findIndex((r) => String(r[0] || "") === String(orderId));
@@ -406,61 +425,31 @@ async function findPedidoRow(orderId) {
   return { idx, row: rows[idx], rowNumber: idx + 2 };
 }
 
-/* ✅✅ CAMBIO: setPedidoEstado ahora actualiza SOLO la celda de Estado (no toda la fila) */
+/* ✅ FIX REAL del “Error al confirmar”:
+   NO reescribimos A:Z (falla si la fila tiene menos columnas),
+   actualizamos SOLO una celda. */
+async function updatePedidoCell(rowNumber, colIdx0, value) {
+  const col = colToA1(colIdx0);
+  await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [[value]]);
+}
+
 async function setPedidoEstado(orderId, newEstado) {
   const found = await findPedidoRow(orderId);
   if (!found) return null;
-
-  const { row, rowNumber } = found;
   const hdr = await loadPedidosHeaderMap();
   const estadoIdx = hdr["estado"] ?? 13;
-
-  // 0->A, 25->Z, 26->AA...
-  const colLetter = (n) => {
-    let s = "";
-    let x = n + 1;
-    while (x > 0) {
-      const m = (x - 1) % 26;
-      s = String.fromCharCode(65 + m) + s;
-      x = Math.floor((x - 1) / 26);
-    }
-    return s;
-  };
-
-  const col = colLetter(estadoIdx);
-  await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [[newEstado]]);
-
-  row[estadoIdx] = newEstado;
-  return row;
+  await updatePedidoCell(found.rowNumber, estadoIdx, newEstado);
+  return true;
 }
 
-/* ✅✅ CAMBIO: setPedidoField ahora actualiza SOLO la celda (no toda la fila) */
 async function setPedidoField(orderId, key, value) {
   const found = await findPedidoRow(orderId);
   if (!found) return null;
-
-  const { row, rowNumber } = found;
-
   const hdr = await loadPedidosHeaderMap();
   const idx = hdr[normalizeHdrKey(key)];
   if (idx === undefined) return null;
-
-  const colLetter = (n) => {
-    let s = "";
-    let x = n + 1;
-    while (x > 0) {
-      const m = (x - 1) % 26;
-      s = String.fromCharCode(65 + m) + s;
-      x = Math.floor((x - 1) / 26);
-    }
-    return s;
-  };
-
-  const col = colLetter(idx);
-  await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [[value]]);
-
-  row[idx] = value;
-  return row;
+  await updatePedidoCell(found.rowNumber, idx, value);
+  return true;
 }
 
 async function expireOldPending() {
@@ -478,21 +467,7 @@ async function expireOldPending() {
     const exp = Date.parse(expIso);
     if (Number.isFinite(exp) && exp <= now) {
       const rowNumber = i + 2;
-
-      const colLetter = (n) => {
-        let s = "";
-        let x = n + 1;
-        while (x > 0) {
-          const m = (x - 1) % 26;
-          s = String.fromCharCode(65 + m) + s;
-          x = Math.floor((x - 1) / 26);
-        }
-        return s;
-      };
-      const col = colLetter(estadoIdx);
-
-      await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [["VENCIDO"]]);
-      r[estadoIdx] = "VENCIDO";
+      await updatePedidoCell(rowNumber, estadoIdx, "VENCIDO");
     }
   }
 }
@@ -551,16 +526,24 @@ async function safeEditOrSend(ctx, payload) {
   if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
 }
 
+/* ✅ Anti-spam: si ya hay lastMessageId, NO mandamos GIF nuevo (porque no se puede “editar” un animation fácil).
+   Solo mandamos GIF cuando aún no hay mensaje anclado. */
 async function trySendAnimation(ctx, { animationId, animationUrl, caption, reply_markup }) {
+  const chatId = ctx.chat?.id;
+  const sess = chatId ? getSess(chatId) : null;
+  if (sess?.lastMessageId) return false; // evita llenar el chat
+
   try {
     if (animationId) {
-      await ctx.replyWithAnimation(animationId, { caption, parse_mode: "HTML", reply_markup });
+      const msg = await ctx.replyWithAnimation(animationId, { caption, parse_mode: "HTML", reply_markup });
+      if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
       return true;
     }
   } catch {}
   try {
     if (animationUrl && animationUrl.startsWith("http")) {
-      await ctx.replyWithAnimation(animationUrl, { caption, parse_mode: "HTML", reply_markup });
+      const msg = await ctx.replyWithAnimation(animationUrl, { caption, parse_mode: "HTML", reply_markup });
+      if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
       return true;
     }
   } catch {}
@@ -571,7 +554,7 @@ async function trySendAnimation(ctx, { animationId, animationUrl, caption, reply
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
-    [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
+    [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("🧠 Ayuda", "MENU_AYUDA")],
     [Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")],
   ]);
 }
@@ -765,10 +748,10 @@ async function showMenu(ctx) {
   if (sentGif) return;
 
   if (logo && logo.startsWith("http")) {
-    await ctx.replyWithPhoto(logo, { caption, parse_mode: "HTML", reply_markup: mainMenuKeyboard().reply_markup });
+    await safeEditOrSend(ctx, { photo: logo, caption, extra: mainMenuKeyboard() });
     return;
   }
-  await ctx.reply(caption, { parse_mode: "HTML", reply_markup: mainMenuKeyboard().reply_markup });
+  await safeEditOrSend(ctx, { text: caption, extra: mainMenuKeyboard() });
 }
 
 async function showCategories(ctx) {
@@ -853,13 +836,7 @@ async function showPayment(ctx) {
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
     extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
   } else {
-    const h = String(cfg.NegocioHorario || "").trim();
-    const base = String(cfg.TextoRetiroLocal || "").trim();
-
-    extraText =
-      `\n\n🏪 ${base}` +
-      (h ? `\n🕒 Podés retirarlo hasta: <b>${h}</b>` : "") +
-      `\n📲 Si necesitás otro horario, comunicate para coordinar.`;
+    extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
   }
 
   await safeEditOrSend(ctx, {
@@ -902,7 +879,108 @@ async function showCart(ctx) {
   await safeEditOrSend(ctx, { text: lines.join("\n"), extra: kb });
 }
 
-/* ===================== SHARE BOT (EMAIL DESDE CONFIG) ===================== */
+/* ===================== SELL0S + AYUDA (CAROUSEL, NO SPAM) ===================== */
+function helpKeyboard() {
+  return Markup.inlineKeyboard([
+    [Markup.button.callback("🧾 Cómo comprar", "HELP_COMPRAR"), Markup.button.callback("🚚 Envíos / Retiro", "HELP_ENVIO")],
+    [Markup.button.callback("💳 Pagos", "HELP_PAGO"), Markup.button.callback("🎟️ Sellos", "HELP_SELLOS")],
+    [Markup.button.callback("📞 Hablar con el local", "HELP_CONTACTO")],
+    ...backMenuRows(),
+  ]);
+}
+
+async function showHelp(ctx, section = "HOME") {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  setScreen(sess, "HELP", { section });
+
+  const gifId = pickRandom(splitPipes(cfg.GifAyudaID || cfg.GifAyudaFileId || ""));
+  const gifUrl = pickRandom(splitPipes(cfg.GifAyudaURL || ""));
+
+  const nombre = cfg.NegocioNombre || "Todo Queso";
+  const tel = String(cfg.NegocioTelefono || "").trim();
+  const hora = String(cfg.NegocioHorario || "").trim();
+  const dire = String(cfg.NegocioDireccion || "").trim();
+
+  let text = "";
+  if (section === "HOME") {
+    text =
+      `🧠 <b>Ayuda</b>\n\n` +
+      `Soy tu asistente de <b>${nombre}</b>.\nElegí un tema y te guío paso a paso 👇`;
+  } else if (section === "COMPRAR") {
+    text =
+      `🧾 <b>Cómo comprar</b>\n\n` +
+      `1) Entrá a <b>Catálogo</b>.\n` +
+      `2) Elegí categoría y “✅ Quiero éste”.\n` +
+      `3) Indicá cantidad (gramos o unidades).\n` +
+      `4) Tocá <b>Finalizar compra</b>.\n` +
+      `5) Elegí entrega, completá tus datos y confirmá.\n\n` +
+      `El vendedor recibe tu pedido y te avisa cuando esté listo.`;
+  } else if (section === "ENVIO") {
+    text =
+      `🚚 <b>Envíos / Retiro</b>\n\n` +
+      `• <b>Envío a domicilio</b>: cargás dirección + horario preferido.\n` +
+      `• <b>Envío express</b>: igual que envío, pero con prioridad.\n` +
+      `• <b>Retiro</b>: podés pasar en el horario del local.\n\n` +
+      `${hora ? `🕒 Horario: ${hora}\n` : ""}${dire ? `📍 Dirección: ${dire}\n` : ""}`.trim();
+  } else if (section === "PAGO") {
+    text =
+      `💳 <b>Pagos</b>\n\n` +
+      `• <b>Transferencia</b>: te mostramos alias/CBU y enviás comprobante.\n` +
+      `• <b>Efectivo</b>: pagás al recibir o retirar (según corresponda).\n\n` +
+      `Cuando el vendedor confirma, el pedido pasa a <b>confirmado</b>.`;
+  } else if (section === "SELLOS") {
+    text =
+      `🎟️ <b>Sellos</b>\n\n` +
+      `Los sellos se acreditan automáticamente cuando el vendedor confirma tu pago.\n` +
+      `Si pagás por transferencia, recordá enviar el comprobante.`;
+  } else if (section === "CONTACTO") {
+    const telDigits = tel.replace(/[^\d]/g, "");
+    const wa = telDigits ? `https://wa.me/${telDigits}` : "";
+    text =
+      `📞 <b>Hablar con el local</b>\n\n` +
+      `${tel ? `📲 Tel/WhatsApp: <code>${tel}</code>\n` : ""}` +
+      `${dire ? `📍 ${dire}\n` : ""}` +
+      `${hora ? `🕒 ${hora}\n` : ""}` +
+      (wa ? `\nSi querés, tocá “WhatsApp” para escribirnos.` : "");
+    const kb = Markup.inlineKeyboard([
+      ...(wa ? [[Markup.button.url("📲 WhatsApp", wa)]] : []),
+      ...backMenuRows(),
+    ]);
+    await safeEditOrSend(ctx, { text, extra: kb });
+    return;
+  }
+
+  const sentGif = await trySendAnimation(ctx, {
+    animationId: gifId,
+    animationUrl: gifUrl,
+    caption: text,
+    reply_markup: helpKeyboard().reply_markup,
+  });
+  if (sentGif) return;
+
+  await safeEditOrSend(ctx, { text, extra: helpKeyboard() });
+}
+
+async function showSellos(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  setScreen(sess, "SELLOS");
+
+  const { sellos, total } = await getClienteSellos(ctx.chat.id);
+  const moneda = cfg.Moneda || "ARS";
+
+  const t =
+    `🎟️ <b>Mis sellos</b>\n\n` +
+    `• Sellos acumulados: <b>${sellos}</b>\n` +
+    `• Total comprado: <b>${money(total, moneda)}</b>\n\n` +
+    `✅ Los sellos se acreditan cuando el vendedor confirma el pago.\n` +
+    `📌 Si pagás por transferencia, enviá el comprobante por WhatsApp.`;
+
+  await safeEditOrSend(ctx, { text: t, extra: Markup.inlineKeyboard(backMenuRows()) });
+}
+
+/* ===================== SHARE BOT ===================== */
 async function showShareBot(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
@@ -986,10 +1064,7 @@ async function showCheckoutTicketPreview(ctx) {
     ...backMenuRows(),
   ]);
 
-  await safeEditOrSend(ctx, {
-    text: `🧾 <b>Revisá tu pedido</b>\n\n${t}\n\n👉 Si todo está correcto, confirmá para enviarlo al vendedor.`,
-    extra: kb,
-  });
+  await safeEditOrSend(ctx, { text: `🔎 <b>Revisá tu pedido</b>\n\n${t}\n\n👉 Si todo está correcto, confirmá para enviarlo al vendedor.`, extra: kb });
 }
 
 /* ===================== ORDER / VENDOR CONFIRM ===================== */
@@ -1103,6 +1178,7 @@ async function finalizeOrderCreate(ctx) {
     const kbVend = Markup.inlineKeyboard([
       [Markup.button.callback("✅ Confirmar pago", `V_CONFIRM_${orderId}`)],
       [Markup.button.callback("❌ Rechazar", `V_REJECT_${orderId}`)],
+      [Markup.button.callback("🏠 Menú", "GO_MENU")],
     ]);
     await bot.telegram.sendMessage(vendedor, ticketVendedor, { parse_mode: "HTML", reply_markup: kbVend.reply_markup });
   }
@@ -1143,9 +1219,12 @@ async function finalizeOrderCreate(ctx) {
   await safeEditOrSend(ctx, { text: `${ticketCliente}\n\n${extra.join("\n")}`, extra: Markup.inlineKeyboard(kbClienteRows) });
 
   scheduleExpire(orderId, expMs, async () => {
-    const row = await setPedidoEstado(orderId, "VENCIDO");
-    if (!row) return;
+    const ok = await setPedidoEstado(orderId, "VENCIDO");
+    if (!ok) return;
+    const found = await findPedidoRow(orderId);
+    if (!found) return;
     const hdr = await loadPedidosHeaderMap();
+    const row = found.row;
     const chatIdCliente = Number(row[hdr["chatidcliente"] ?? 3]);
     if (Number.isFinite(chatIdCliente)) {
       await bot.telegram.sendMessage(chatIdCliente, `⏳ Tu pedido <b>${orderId}</b> venció y fue cancelado automáticamente.`, {
@@ -1220,34 +1299,15 @@ bot.action("GO_BACK", async (ctx) => {
 /* MENÚ */
 bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_COMPARTIR", async (ctx) => { await ctx.answerCbQuery(); await showShareBot(ctx); });
+bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx); });
+bot.action("MENU_AYUDA", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx, "HOME"); });
 
-bot.action("MENU_SELLOS", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  setScreen(sess, "SELLOS");
-  await safeEditOrSend(ctx, {
-    text:
-      `🎟️ <b>Sellos</b>\n\n` +
-      `Los sellos se acreditan automáticamente cuando el vendedor confirma tu pago.\n\n` +
-      `📌 Si pagás por transferencia, recordá enviar el comprobante.`,
-    extra: Markup.inlineKeyboard(backMenuRows()),
-  });
-});
-
-bot.action("MENU_AYUDA", async (ctx) => {
-  await ctx.answerCbQuery();
-  const sess = getSess(ctx.chat.id);
-  setScreen(sess, "HELP");
-  await safeEditOrSend(ctx, {
-    text:
-      `ℹ️ <b>Ayuda</b>\n\n` +
-      `1️⃣ Entrá a <b>Catálogo</b> y elegí productos\n` +
-      `2️⃣ Indicá <b>Entrega</b> y <b>Pago</b>\n` +
-      `3️⃣ Si es transferencia, enviá el <b>comprobante</b>\n\n` +
-      `📲 Ante cualquier duda, escribinos.`,
-    extra: Markup.inlineKeyboard(backMenuRows()),
-  });
-});
+/* HELP subactions */
+bot.action("HELP_COMPRAR", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx, "COMPRAR"); });
+bot.action("HELP_ENVIO", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx, "ENVIO"); });
+bot.action("HELP_PAGO", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx, "PAGO"); });
+bot.action("HELP_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx, "SELLOS"); });
+bot.action("HELP_CONTACTO", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx, "CONTACTO"); });
 
 /* CATEGORÍAS */
 bot.action(/^CAT_(.+)$/i, async (ctx) => {
@@ -1398,15 +1458,15 @@ bot.action("CANCEL_FLOW", async (ctx) => {
 bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
   const orderId = ctx.match[1];
-  const row = await setPedidoEstado(orderId, "CANCELADO");
-  if (!row) {
+  const ok = await setPedidoEstado(orderId, "CANCELADO");
+  if (!ok) {
     await safeEditOrSend(ctx, { text: "No pude cancelar ese pedido.", extra: mainMenuKeyboard() });
     return;
   }
   await safeEditOrSend(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
 });
 
-/* ===================== VENDOR CONFIRM ===================== */
+/* ===================== VENDOR CONFIRM (FIX) ===================== */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
   try {
     await ctx.answerCbQuery("Confirmado ✅");
@@ -1414,7 +1474,10 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
     const orderId = ctx.match[1];
 
     const found = await findPedidoRow(orderId);
-    if (!found) return;
+    if (!found) {
+      try { await ctx.editMessageText("⚠️ No encontré ese pedido en la planilla.", { parse_mode: "HTML" }); } catch {}
+      return;
+    }
 
     const hdr = await loadPedidosHeaderMap();
     const row = found.row;
@@ -1457,14 +1520,14 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
 
     const msgConfirm =
       String(cfg.TextoConfirmacionPedido || "").trim() ||
-      "✅ Transferencia recibida. Pedido confirmado y en preparación. Te avisamos cuando esté listo.";
+      "✅ Transferencia recibida. Pedido confirmado y en preparación.";
 
     const extraEntrega =
       entregaTipo === "RETIRO"
-        ? `🏪 Retiro en local. Te avisamos cuando esté listo para retirar. ${String(cfg.NegocioHorario || "").trim()}`
+        ? `🏪 Retiro en local. ${String(cfg.NegocioHorario || "").trim()}`.trim()
         : entregaTipo === "EXPRESS"
-        ? `⚡ Envío express en preparación. Te avisamos cuando esté listo para salir.`
-        : `🚚 Envío a domicilio en preparación. Te avisamos cuando esté listo para salir.`;
+        ? `⚡ Envío express en preparación.`
+        : `🚚 Envío a domicilio en preparación.`;
 
     const sellosLine =
       sellosGanados > 0
@@ -1487,6 +1550,7 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
       `──────────────────`,
       msgConfirm,
       extraEntrega,
+      `\n📌 Te avisamos cuando esté listo para retirar o salga a reparto.`,
     ].filter(Boolean).join("\n");
 
     if (Number.isFinite(chatIdCliente)) {
@@ -1499,29 +1563,39 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
     const kbVendDone = Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]);
 
     try {
-      await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> confirmado.\n📲 El comprador fue notificado.`, {
+      await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> confirmado.\n✅ Aviso enviado al comprador.`, {
         parse_mode: "HTML",
         reply_markup: kbVendDone.reply_markup,
       });
     } catch {
-      await bot.telegram.sendMessage(ctx.chat.id, `✅ Pedido <b>${orderId}</b> confirmado.\n📲 El comprador fue notificado.`, {
+      await bot.telegram.sendMessage(ctx.chat.id, `✅ Pedido <b>${orderId}</b> confirmado.\n✅ Aviso enviado al comprador.`, {
         parse_mode: "HTML",
         reply_markup: kbVendDone.reply_markup,
       });
     }
-  } catch {
+  } catch (e) {
     try { await ctx.answerCbQuery("Error al confirmar ❌"); } catch {}
-    try { await bot.telegram.sendMessage(ctx.chat.id, "⚠️ Error al confirmar.", { reply_markup: Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]).reply_markup }); } catch {}
+    try {
+      await bot.telegram.sendMessage(
+        ctx.chat.id,
+        `⚠️ Error al confirmar.\n\n${String(e?.message || e)}`.slice(0, 3800),
+        { reply_markup: Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]).reply_markup }
+      );
+    } catch {}
   }
 });
 
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
   await ctx.answerCbQuery("Rechazado ❌");
   const orderId = ctx.match[1];
-  const row = await setPedidoEstado(orderId, "RECHAZADO");
-  if (!row) return;
+  const ok = await setPedidoEstado(orderId, "RECHAZADO");
+  if (!ok) return;
+
+  const found = await findPedidoRow(orderId);
+  if (!found) return;
 
   const hdr = await loadPedidosHeaderMap();
+  const row = found.row;
   const chatIdCliente = Number(row[hdr["chatidcliente"] ?? 3]);
 
   if (Number.isFinite(chatIdCliente)) {
@@ -1574,10 +1648,18 @@ bot.on("text", async (ctx) => {
     const tel = text.replace(/[^\d+]/g, "").slice(0, 25);
     sess.checkout.telefono = tel;
     const isRetiro = !!(w.payload && w.payload.retiro);
+
     if (isRetiro) {
-      await showPayment(ctx);
+      // ✅ Retiro: pedimos horario estimado o coordinación (usamos Notas, sin tocar Config)
+      sess.waiting = { type: "PICKUP_TIME", payload: {} };
+      const hasta = String(cfg.NegocioHorario || "").trim();
+      const msg = hasta
+        ? `🏪 <b>Retiro en el local</b>\n\nPodés retirar dentro del horario del local: <b>${hasta}</b>.\n\n¿A qué <b>hora</b> estimás pasar? (ej: <code>17:00</code>)\nO escribí <code>COORDINAR</code>.`
+        : `🏪 <b>Retiro en el local</b>\n\n¿A qué <b>hora</b> estimás pasar? (ej: <code>17:00</code>)\nO escribí <code>COORDINAR</code>.`;
+      await safeEditOrSend(ctx, { text: msg, extra: Markup.inlineKeyboard(backMenuRows()) });
       return;
     }
+
     sess.waiting = { type: "ADDR", payload: {} };
     await safeEditOrSend(ctx, { text: `📍 Dirección completa:`, extra: Markup.inlineKeyboard(backMenuRows()) });
     return;
@@ -1585,21 +1667,30 @@ bot.on("text", async (ctx) => {
 
   if (w.type === "ADDR") {
     sess.checkout.direccion = text.slice(0, 140);
-    sess.waiting = { type: "NOTES", payload: {} };
 
-    const entrega = String(sess.checkout.entregaTipo || "").toUpperCase();
-    const ask =
-      (entrega === "ENVIO" || entrega === "EXPRESS")
-        ? `🕒 <b>Horario preferido</b> para la entrega (y si querés, agregá notas).\nEj: <code>Entre 14 y 16</code>\n\nO escribí <code>NO</code> si no tenés preferencia.`
-        : `📝 Notas (o escribí <code>NO</code>):`;
-
-    await safeEditOrSend(ctx, { text: ask, extra: Markup.inlineKeyboard(backMenuRows()) });
+    // ✅ ENVIO/EXPRESS: pedimos horario preferido (guardamos en Notas)
+    sess.waiting = { type: "DELIVERY_TIME", payload: {} };
+    const entrega = sess.checkout.entregaTipo || "";
+    const label = entrega === "EXPRESS" ? "⚡ Envío express" : "🚚 Envío a domicilio";
+    await safeEditOrSend(ctx, {
+      text: `${label}\n\n¿En qué <b>horario</b> preferís la entrega?\nEj: <code>17:00</code> o <code>17 a 19</code>\nO escribí <code>CUANTO ANTES</code>.`,
+      extra: Markup.inlineKeyboard(backMenuRows()),
+    });
     return;
   }
 
-  if (w.type === "NOTES") {
+  if (w.type === "DELIVERY_TIME") {
     const t = text.toLowerCase();
-    sess.checkout.notas = (t === "no" || t === "n" || t === "0") ? "" : text.slice(0, 140);
+    const horario = (t === "cuanto antes" || t === "lo antes posible") ? "CUANTO ANTES" : text.slice(0, 60);
+    // Guardamos horario en Notas sin agregar columnas ni config
+    sess.checkout.notas = horario ? `Horario: ${horario}` : "";
+    await showPayment(ctx);
+    return;
+  }
+
+  if (w.type === "PICKUP_TIME") {
+    const val = text.slice(0, 60);
+    sess.checkout.notas = val ? `Retiro: ${val}` : "";
     await showPayment(ctx);
     return;
   }
