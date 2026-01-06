@@ -187,3 +187,92 @@ async function safeEditOrSendEditable(ctx, payload) {
 TELEGRAM BOT
 ========================================================= */
 const bot = new Telegraf(TelegramBotToken);
+/* =========================================================
+VENDEDOR CONFIRMA / RECHAZA  (FIX DEFINITIVO)
+========================================================= */
+bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery("Confirmado ✅");
+
+  const orderId = ctx.match[1];
+
+  // ⚠️ Acá NO tocamos lógica previa: asumimos que setPedidoEstado ya existe
+  const row = await setPedidoEstado(orderId, "APROBADO");
+  if (!row) return;
+
+  const chatIdCliente = Number(row[3]);
+  const entregaTipo = row[8] || "";
+  const pagoTipo = row[9] || "";
+  const nombre = row[4] || "";
+  const usuario = row[5] || "";
+  const itemsText = row[6] || "";
+  const total = parseNumber(row[7], 0);
+  const direccion = row[10] || "";
+  const telefono = row[11] || "";
+  const notas = row[12] || "";
+
+  const texto = [
+    "✅ <b>Pedido confirmado</b>",
+    `<code>${orderId}</code>`,
+    "──────────────────",
+    `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
+    `📦 ${itemsText}`,
+    `🧮 <b>Total:</b> ${money(total)}`,
+    `🚚 <b>Entrega:</b> ${entregaTipo}`,
+    `💳 <b>Pago:</b> ${pagoTipo}`,
+    direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
+    telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
+    notas ? `📝 <b>Notas:</b> ${notas}` : "",
+    "──────────────────",
+    "🧑‍🍳 Ya estamos preparando tu pedido.",
+    "🔔 Te avisamos cuando esté listo.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  // Cliente → 1 solo mensaje
+  if (Number.isFinite(chatIdCliente)) {
+    await bot.telegram.sendMessage(chatIdCliente, texto, {
+      parse_mode: "HTML",
+    });
+  }
+
+  // Vendedor → intenta editar (carrusel)
+  try {
+    await ctx.editMessageText(`${texto}\n\n✅ <b>Estado:</b> APROBADO`, {
+      parse_mode: "HTML",
+    });
+  } catch {
+    // fallback único, no ensucia
+    await ctx.telegram.sendMessage(
+      ctx.chat.id,
+      `${texto}\n\n✅ <b>Estado:</b> APROBADO`,
+      { parse_mode: "HTML" }
+    );
+  }
+});
+
+/* =========================================================
+WEB SERVER
+========================================================= */
+const app = express();
+app.use(express.json());
+
+app.get("/", (_, res) => res.send("Bot OK"));
+
+async function start() {
+  if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
+    const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
+    await bot.telegram.setWebhook(hook);
+    app.use(bot.webhookCallback("/telegram"));
+    app.listen(PORT, () =>
+      console.log("Webhook activo en", hook, "Puerto", PORT)
+    );
+  } else {
+    bot.launch();
+    app.listen(PORT, () =>
+      console.log("Long polling activo | Puerto", PORT)
+    );
+  }
+}
+
+start();
