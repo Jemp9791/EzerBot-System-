@@ -4,14 +4,9 @@ import { google } from "googleapis";
 
 /* =========================================================
    ENV (NO CAMBIAR NOMBRES)
-   - TelegramBotToken (Render Env)
-   - GOOGLE_SHEET_ID
-   - GOOGLE_SERVICE_ACCOUNT_B64
-   - PUBLIC_URL (opcional)
-   - PORT (Render)
 ========================================================= */
 const TelegramBotToken =
-  process.env.TelegramBotToken || process.env.TELEGRAM_BOT_TOKEN; // fallback sin romper
+  process.env.TelegramBotToken || process.env.TELEGRAM_BOT_TOKEN;
 const GOOGLE_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 const GOOGLE_SERVICE_ACCOUNT_B64 = process.env.GOOGLE_SERVICE_ACCOUNT_B64;
 const PUBLIC_URL = process.env.PUBLIC_URL || "";
@@ -19,8 +14,7 @@ const PORT = process.env.PORT || 10000;
 
 if (!TelegramBotToken) throw new Error("Falta TelegramBotToken");
 if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64)
-  throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
+if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
 /* =========================================================
    GOOGLE AUTH
@@ -88,10 +82,20 @@ async function ensureSheet(sheetName, headers) {
       requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
     });
     await setSheetValues(`${sheetName}!A1`, [headers]);
+    return;
+  }
+
+  const firstRow = await getSheetValues(`${sheetName}!A1:Z1`);
+  if (!firstRow.length || firstRow[0].join("").trim() === "") {
+    await setSheetValues(`${sheetName}!A1`, [headers]);
   } else {
-    const firstRow = await getSheetValues(`${sheetName}!A1:Z1`);
-    if (!firstRow.length || firstRow[0].join("").trim() === "") {
-      await setSheetValues(`${sheetName}!A1`, [headers]);
+    // Asegurar que existan todas las columnas (por nombre), sin romper las existentes:
+    const cur = firstRow[0].map((x) => String(x || "").trim());
+    const set = new Set(cur.map((x) => x.toLowerCase()));
+    const missing = headers.filter((h) => !set.has(String(h).toLowerCase()));
+    if (missing.length) {
+      const merged = [...cur, ...missing];
+      await setSheetValues(`${sheetName}!A1`, [merged]);
     }
   }
 }
@@ -165,21 +169,21 @@ function inferUnit(raw) {
   const u = String(raw || "").trim().toLowerCase();
   if (!u) return "u";
   if (u.includes("gr") || u === "g" || u.includes("gram")) return "g";
-  if (u.includes("kg") || u.includes("kilo")) return "g"; // pedimos gramos igual
+  if (u.includes("kg") || u.includes("kilo")) return "g";
   if (u.includes("unidad") || u === "u" || u.includes("unid")) return "u";
   if (u.includes("pack")) return "u";
   return "u";
 }
 
 /* =========================================================
-   CACHE (B) - evita demoras / “no responde”
+   CACHE (B)
 ========================================================= */
 const CACHE = {
   cfg: { value: null, ts: 0, inflight: null },
   cat: { value: null, ts: 0, inflight: null },
 };
-const CFG_TTL_MS = 10_000; // 10s
-const CAT_TTL_MS = 20_000; // 20s
+const CFG_TTL_MS = 10_000;
+const CAT_TTL_MS = 20_000;
 
 async function loadConfigRaw() {
   const rows = await getSheetValues(`Config!A:B`);
@@ -254,7 +258,7 @@ function categoriesFromItems(items) {
 }
 
 /* =========================================================
-   STATE (chat limpio + flujo) + NAV (A)
+   STATE (chat limpio + flujo)
 ========================================================= */
 const SESS = new Map(); // chatId -> state
 const ORDER_TIMERS = new Map(); // orderId -> timeout
@@ -268,7 +272,11 @@ function getSess(chatId) {
       productsInView: [],
       cart: [],
       refBy: null,
-      lastMessageId: null,
+
+      // ✅ separados: mensaje editable vs utilidades (GIF)
+      lastEditableMessageId: null, // catálogo/carrito/checkout (se edita)
+      utilityMessageId: null,      // menú/sellos/ayuda/compartir (caption se edita si es GIF)
+      utilityIsAnimation: false,
 
       checkout: {
         entregaTipo: null,
@@ -282,9 +290,8 @@ function getSess(chatId) {
       waiting: null,
       jumpProdCode: null,
 
-      // (A) Back / menú consistente
-      lastScreen: "MENU", // MENU | CATS | PROD | CART | DELIVERY | PAY | TICKET | SELLOS | HELP | SHARE
-      lastScreenData: {}, // e.g. {cat}
+      lastScreen: "MENU",
+      lastScreenData: {},
     });
   }
   return SESS.get(chatId);
@@ -296,7 +303,7 @@ function setScreen(sess, screen, data = {}) {
 }
 
 /* =========================================================
-   SHEETS MODELO
+   SHEETS MODELO (ROBUSTO POR HEADERS)
 ========================================================= */
 const CLIENTES_SHEET = "Clientes";
 const PEDIDOS_SHEET = "Pedidos";
@@ -335,141 +342,180 @@ async function ensureBaseSheets() {
   await ensureSheet(PEDIDOS_SHEET, PEDIDOS_HEADERS);
 }
 
+// map headers -> idx
+function headerIndexMap(headerRow) {
+  const m = {};
+  headerRow.forEach((h, i) => {
+    const k = String(h || "").trim().toLowerCase();
+    if (k) m[k] = i;
+  });
+  return m;
+}
+
+async function readTable(sheetName) {
+  const rows = await getSheetValues(`${sheetName}!A1:Z`);
+  const header = rows[0] || [];
+  const data = rows.slice(1) || [];
+  const hmap = headerIndexMap(header);
+  return { header, hmap, data };
+}
+
+function getCell(row, hmap, colName, def = "") {
+  const idx = hmap[String(colName || "").toLowerCase()];
+  if (idx === undefined) return def;
+  return row[idx] !== undefined ? row[idx] : def;
+}
+
+function setCell(row, hmap, colName, value) {
+  const idx = hmap[String(colName || "").toLowerCase()];
+  if (idx === undefined) return row;
+  const r = [...row];
+  // expand row if shorter
+  while (r.length <= idx) r.push("");
+  r[idx] = value;
+  return r;
+}
+
+async function writeRow(sheetName, rowNumber1based, rowArray) {
+  await setSheetValues(`${sheetName}!A${rowNumber1based}:Z${rowNumber1based}`, [rowArray]);
+}
+
 async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
-  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
-  const idx = rows.findIndex((r) => String(r[0] || "") === String(chatId));
+  const { header, hmap, data } = await readTable(CLIENTES_SHEET);
+
+  const idxRow = data.findIndex((r) => String(getCell(r, hmap, "ChatId", "")) === String(chatId));
   const now = new Date().toISOString();
 
-  if (idx === -1) {
-    await appendRow(CLIENTES_SHEET, [
-      String(chatId),
-      nombre || "",
-      usuario || "",
-      addSellos,
-      addTotal,
-      now,
-      refBy || "",
-      0,
-    ]);
-    return { sellos: addSellos, total: addTotal };
+  if (idxRow === -1) {
+    const newRow = new Array(header.length).fill("");
+    let r = newRow;
+    r = setCell(r, hmap, "ChatId", String(chatId));
+    r = setCell(r, hmap, "Nombre", nombre || "");
+    r = setCell(r, hmap, "Usuario", usuario || "");
+    r = setCell(r, hmap, "Sellos", Number(addSellos) || 0);
+    r = setCell(r, hmap, "TotalComprado", Number(addTotal) || 0);
+    r = setCell(r, hmap, "UltimaCompraISO", now);
+    r = setCell(r, hmap, "ReferidoPor", refBy || "");
+    r = setCell(r, hmap, "ReferidosGanados", 0);
+    await appendRow(CLIENTES_SHEET, r);
+    return { sellos: Number(addSellos) || 0, total: Number(addTotal) || 0 };
   }
 
-  const row = rows[idx];
-  const currentSellos = parseNumber(row[3], 0);
-  const currentTotal = parseNumber(row[4], 0);
-  const currentRefGanados = parseNumber(row[7], 0);
+  const row = data[idxRow];
+  const currentSellos = parseNumber(getCell(row, hmap, "Sellos", 0), 0);
+  const currentTotal = parseNumber(getCell(row, hmap, "TotalComprado", 0), 0);
+  const currentRefGanados = parseNumber(getCell(row, hmap, "ReferidosGanados", 0), 0);
+  const currentRefBy = String(getCell(row, hmap, "ReferidoPor", "") || "");
 
-  const newSellos = currentSellos + addSellos;
-  const newTotal = currentTotal + addTotal;
+  const newSellos = currentSellos + (Number(addSellos) || 0);
+  const newTotal = currentTotal + (Number(addTotal) || 0);
 
-  const rowNumber = idx + 2;
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
-    String(chatId),
-    nombre || row[1] || "",
-    usuario || row[2] || "",
-    newSellos,
-    newTotal,
-    now,
-    row[6] || refBy || "",
-    currentRefGanados,
-  ]]);
+  let newRow = [...row];
+  newRow = setCell(newRow, hmap, "ChatId", String(chatId));
+  newRow = setCell(newRow, hmap, "Nombre", nombre || getCell(row, hmap, "Nombre", ""));
+  newRow = setCell(newRow, hmap, "Usuario", usuario || getCell(row, hmap, "Usuario", ""));
+  newRow = setCell(newRow, hmap, "Sellos", newSellos);
+  newRow = setCell(newRow, hmap, "TotalComprado", newTotal);
+  newRow = setCell(newRow, hmap, "UltimaCompraISO", now);
+  newRow = setCell(newRow, hmap, "ReferidoPor", currentRefBy || refBy || "");
+  newRow = setCell(newRow, hmap, "ReferidosGanados", currentRefGanados);
+
+  const rowNumber = idxRow + 2; // header=1
+  await writeRow(CLIENTES_SHEET, rowNumber, newRow);
 
   return { sellos: newSellos, total: newTotal };
 }
 
 async function addSelloReferido(chatIdReferente) {
-  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
-  const idx = rows.findIndex((r) => String(r[0] || "") === String(chatIdReferente));
-  if (idx === -1) return;
+  const { header, hmap, data } = await readTable(CLIENTES_SHEET);
+  const idxRow = data.findIndex((r) => String(getCell(r, hmap, "ChatId", "")) === String(chatIdReferente));
+  if (idxRow === -1) return;
 
-  const row = rows[idx];
-  const currentSellos = parseNumber(row[3], 0);
-  const currentRefGanados = parseNumber(row[7], 0);
-  const rowNumber = idx + 2;
+  const row = data[idxRow];
+  const currentSellos = parseNumber(getCell(row, hmap, "Sellos", 0), 0);
+  const currentRefGanados = parseNumber(getCell(row, hmap, "ReferidosGanados", 0), 0);
 
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
-    row[0] || "",
-    row[1] || "",
-    row[2] || "",
-    currentSellos + 1,
-    row[4] || 0,
-    new Date().toISOString(),
-    row[6] || "",
-    currentRefGanados + 1,
-  ]]);
+  let newRow = [...row];
+  newRow = setCell(newRow, hmap, "Sellos", currentSellos + 1);
+  newRow = setCell(newRow, hmap, "ReferidosGanados", currentRefGanados + 1);
+  newRow = setCell(newRow, hmap, "UltimaCompraISO", new Date().toISOString());
+
+  const rowNumber = idxRow + 2;
+  await writeRow(CLIENTES_SHEET, rowNumber, newRow);
+}
+
+async function readPedidos() {
+  return await readTable(PEDIDOS_SHEET);
 }
 
 async function findPedidoRow(orderId) {
-  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:O`);
-  const idx = rows.findIndex((r) => String(r[0] || "") === String(orderId));
-  if (idx === -1) return null;
-  return { idx, row: rows[idx], rowNumber: idx + 2 };
+  const { hmap, data } = await readPedidos();
+  const idxRow = data.findIndex((r) => String(getCell(r, hmap, "PedidoId", "")) === String(orderId));
+  if (idxRow === -1) return null;
+  return { idx: idxRow, row: data[idxRow], rowNumber: idxRow + 2, hmap };
 }
 
 async function setPedidoEstado(orderId, newEstado) {
   const found = await findPedidoRow(orderId);
   if (!found) return null;
-  const { row, rowNumber } = found;
-  row[13] = newEstado;
-  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:O${rowNumber}`, [row]);
-  return row;
+  const { row, rowNumber, hmap } = found;
+
+  let newRow = [...row];
+  newRow = setCell(newRow, hmap, "Estado", newEstado);
+
+  await writeRow(PEDIDOS_SHEET, rowNumber, newRow);
+  return newRow;
 }
 
 async function expireOldPending() {
-  const rows = await getSheetValues(`${PEDIDOS_SHEET}!A2:O`);
+  const { hmap, data } = await readPedidos();
   const now = Date.now();
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i];
-    const expIso = r[2];
-    const estado = String(r[13] || "").toUpperCase();
+
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    const expIso = String(getCell(r, hmap, "ExpiraISO", "") || "");
+    const estado = String(getCell(r, hmap, "Estado", "") || "").toUpperCase();
     if (!expIso || estado !== "PENDIENTE") continue;
+
     const exp = Date.parse(expIso);
     if (Number.isFinite(exp) && exp <= now) {
-      const rowNumber = i + 2;
-      r[13] = "VENCIDO";
-      await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:O${rowNumber}`, [r]);
+      let newRow = [...r];
+      newRow = setCell(newRow, hmap, "Estado", "VENCIDO");
+      await writeRow(PEDIDOS_SHEET, i + 2, newRow);
     }
   }
 }
 
 /* =========================================================
-   UI HELPERS (editar mensaje) -> SOLO para catálogo/compra
+   UI HELPERS
+   - editable: catálogo/checkout
+   - utility: menú/sellos/ayuda/compartir (GIF hojear = edit caption)
 ========================================================= */
-async function safeEditOrSend(ctx, payload) {
+async function safeEditOrSendEditable(ctx, payload) {
   const chatId = ctx.chat?.id;
   const sess = chatId ? getSess(chatId) : null;
-  const canEdit = !!(sess?.lastMessageId);
+  const msgId = sess?.lastEditableMessageId;
 
   try {
-    if (canEdit) {
-      if (payload.animation) throw new Error("forceSend"); // no edit animations
+    if (msgId) {
       if (payload.photo) {
         await ctx.telegram.editMessageMedia(
           chatId,
-          sess.lastMessageId,
+          msgId,
           undefined,
-          {
-            type: "photo",
-            media: payload.photo,
-            caption: payload.caption || "",
-            parse_mode: "HTML",
-          },
+          { type: "photo", media: payload.photo, caption: payload.caption || "", parse_mode: "HTML" },
           payload.extra || {}
         );
         return;
-      } else {
-        await ctx.telegram.editMessageText(
-          chatId,
-          sess.lastMessageId,
-          undefined,
-          payload.text || " ",
-          { parse_mode: "HTML", ...(payload.extra || {}) }
-        );
-        return;
       }
+      await ctx.telegram.editMessageText(chatId, msgId, undefined, payload.text || " ", {
+        parse_mode: "HTML",
+        ...(payload.extra || {}),
+      });
+      return;
     }
   } catch {
-    // fallback send new
+    // fallback send
   }
 
   let msg;
@@ -480,17 +526,90 @@ async function safeEditOrSend(ctx, payload) {
       ...(payload.extra || {}),
     });
   } else {
-    msg = await ctx.reply(payload.text || " ", {
+    msg = await ctx.reply(payload.text || " ", { parse_mode: "HTML", ...(payload.extra || {}) });
+  }
+
+  if (sess && msg?.message_id) sess.lastEditableMessageId = msg.message_id;
+}
+
+async function safeEditOrSendUtility(ctx, payload) {
+  const chatId = ctx.chat?.id;
+  const sess = chatId ? getSess(chatId) : null;
+
+  const msgId = sess?.utilityMessageId;
+  const isAnim = !!sess?.utilityIsAnimation;
+
+  // Si ya existe un mensaje de utilidades:
+  if (msgId) {
+    try {
+      if (isAnim) {
+        // ✅ animation no se puede cambiar, pero sí la caption
+        await ctx.telegram.editMessageCaption(chatId, msgId, undefined, payload.caption || payload.text || " ", {
+          parse_mode: "HTML",
+          ...(payload.extra || {}),
+        });
+        return;
+      }
+
+      // no era animación: editable como texto o foto
+      if (payload.photo) {
+        await ctx.telegram.editMessageMedia(
+          chatId,
+          msgId,
+          undefined,
+          { type: "photo", media: payload.photo, caption: payload.caption || "", parse_mode: "HTML" },
+          payload.extra || {}
+        );
+        return;
+      }
+
+      await ctx.telegram.editMessageText(chatId, msgId, undefined, payload.text || " ", {
+        parse_mode: "HTML",
+        ...(payload.extra || {}),
+      });
+      return;
+    } catch {
+      // si falla, mandamos uno nuevo
+    }
+  }
+
+  // Crear nuevo mensaje de utilidades
+  let msg;
+  if (payload.animation) {
+    msg = await ctx.replyWithAnimation(payload.animation, {
+      caption: payload.caption || "",
+      parse_mode: "HTML",
+      reply_markup: (payload.extra?.reply_markup) || undefined,
+    });
+    if (sess && msg?.message_id) {
+      sess.utilityMessageId = msg.message_id;
+      sess.utilityIsAnimation = true;
+    }
+    return;
+  }
+
+  if (payload.photo) {
+    msg = await ctx.replyWithPhoto(payload.photo, {
+      caption: payload.caption || "",
       parse_mode: "HTML",
       ...(payload.extra || {}),
     });
+    if (sess && msg?.message_id) {
+      sess.utilityMessageId = msg.message_id;
+      sess.utilityIsAnimation = false;
+    }
+    return;
   }
 
-  if (sess && msg?.message_id) sess.lastMessageId = msg.message_id;
+  msg = await ctx.reply(payload.text || " ", { parse_mode: "HTML", ...(payload.extra || {}) });
+  if (sess && msg?.message_id) {
+    sess.utilityMessageId = msg.message_id;
+    sess.utilityIsAnimation = false;
+  }
 }
 
 /* =========================================================
-   KEYBOARDS (A) Menú + Volver + Menú
+   KEYBOARDS
 ========================================================= */
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
@@ -531,13 +650,17 @@ function productCaption(cfg, p, index, total) {
   return lines.join("\n");
 }
 
-function productKeyboard(p) {
-  return Markup.inlineKeyboard([
+function productKeyboard(sess, p) {
+  const rows = [
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
     [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
-    [Markup.button.callback("🛒 Ver carrito", "VIEW_CART")],
-    ...backMenuRows(),
-  ]);
+  ];
+
+  // ✅ Ver carrito solo si hay algo
+  if (sess.cart && sess.cart.length) rows.push([Markup.button.callback("🛒 Ver carrito", "VIEW_CART")]);
+
+  rows.push(...backMenuRows());
+  return Markup.inlineKeyboard(rows);
 }
 
 /* =========================================================
@@ -630,10 +753,21 @@ function sellosTextLevels(cfg) {
 }
 
 /* =========================================================
-   FLOW SCREENS (C + GIFs por file_id desde Config)
-   - GIFs (start/ayuda/compartir): QUEDAN FIJOS en el chat (no editar)
-   - Catálogo + compra: se edita con safeEditOrSend (chat limpio)
+   FLOW SCREENS + GIFs (file_id)
+   ✅ Utilidades (menu/sellos/help/share) => safeEditOrSendUtility (hojea)
+   ✅ Catálogo/compra => safeEditOrSendEditable (chat limpio)
 ========================================================= */
+function pickGifFromCfg(cfg, keys) {
+  // permite pipe en Config
+  for (const k of keys) {
+    const v = String(cfg[k] || "").trim();
+    const arr = splitPipes(v);
+    const pickOne = pickRandom(arr);
+    if (pickOne) return pickOne;
+  }
+  return "";
+}
+
 async function showMenu(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
@@ -645,9 +779,10 @@ async function showMenu(ctx) {
   const estado = cfg.Estado || "";
   const desc = String(cfg.Descripcion || "").trim();
 
-  // ✅ GIF por file_id (Telegram) desde Config
-  const gifId = pickRandom(splitPipes(cfg.GifBienvenidaID || cfg.GifBienvenidaFileId || ""));
-  const gifUrl = pickRandom(splitPipes(cfg.GifBienvenidaURL || "")); // opcional fallback
+  // ✅ GIF file_id: (prioridad) Config -> si no, nada
+  // (Podés poner en Config: GifBienvenidaID = file_id | file_id2)
+  const gifId = pickGifFromCfg(cfg, ["GifBienvenidaID", "GifBienvenidaFileId", "GifBienvenida"]);
+  const gifUrl = pickRandom(splitPipes(cfg.GifBienvenidaURL || ""));
   const logo = String(cfg.LogoURL || "").trim();
 
   const header = [];
@@ -658,35 +793,23 @@ async function showMenu(ctx) {
 
   const caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
 
-  // FIJO (no editar): primero file_id, luego URL
+  // ✅ utilidades: HOJEA (si es GIF, edita caption)
   if (gifId) {
-    await ctx.replyWithAnimation(gifId, {
-      caption,
-      parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard().reply_markup,
-    });
+    await safeEditOrSendUtility(ctx, { animation: gifId, caption, extra: { reply_markup: mainMenuKeyboard().reply_markup } });
     return;
   }
 
   if (gifUrl && gifUrl.startsWith("http")) {
-    await ctx.replyWithAnimation(gifUrl, {
-      caption,
-      parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard().reply_markup,
-    });
+    await safeEditOrSendUtility(ctx, { animation: gifUrl, caption, extra: { reply_markup: mainMenuKeyboard().reply_markup } });
     return;
   }
 
   if (logo && logo.startsWith("http")) {
-    await ctx.replyWithPhoto(logo, {
-      caption,
-      parse_mode: "HTML",
-      reply_markup: mainMenuKeyboard().reply_markup,
-    });
+    await safeEditOrSendUtility(ctx, { photo: logo, caption, extra: mainMenuKeyboard() });
     return;
   }
 
-  await ctx.reply(caption, { parse_mode: "HTML", reply_markup: mainMenuKeyboard().reply_markup });
+  await safeEditOrSendUtility(ctx, { text: caption, extra: mainMenuKeyboard() });
 }
 
 async function showCategories(ctx) {
@@ -697,7 +820,7 @@ async function showCategories(ctx) {
   const cats = categoriesFromItems(items);
 
   if (!cats.length) {
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>.",
       extra: Markup.inlineKeyboard(backMenuRows()),
     });
@@ -714,7 +837,7 @@ async function showCategories(ctx) {
 
   buttons.push(...backMenuRows());
 
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: `🧀 <b>Catálogo</b>\n\nElegí una <b>categoría</b> 👇`,
     extra: Markup.inlineKeyboard(buttons),
   });
@@ -729,7 +852,7 @@ async function showProductCarousel(ctx, cat) {
 
   if (!prods.length) {
     setScreen(sess, "CATS");
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: `No hay productos en <b>${cat}</b>.`,
       extra: Markup.inlineKeyboard(backMenuRows()),
     });
@@ -747,8 +870,8 @@ async function showProductCarousel(ctx, cat) {
   const caption = productCaption(cfg, p, 0, prods.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
 
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+  if (photo) await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+  else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
 }
 
 async function showSellos(ctx, showLevels = false) {
@@ -756,11 +879,12 @@ async function showSellos(ctx, showLevels = false) {
   const sess = getSess(ctx.chat.id);
   setScreen(sess, "SELLOS", { showLevels });
 
-  const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
-  const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
-  const sellos = me ? parseNumber(me[3], 0) : 0;
+  const { hmap, data } = await readTable(CLIENTES_SHEET);
+  const me = data.find((r) => String(getCell(r, hmap, "ChatId", "")) === String(ctx.chat.id));
+  const sellos = me ? parseNumber(getCell(me, hmap, "Sellos", 0), 0) : 0;
 
   const cardUrl = String(cfg.CARD_URL || cfg.CardURL || cfg.SelloURL || "").trim();
+
   const caption = showLevels
     ? `${sellosTextShort(cfg, sellos)}\n\n${sellosTextLevels(cfg)}`
     : sellosTextShort(cfg, sellos);
@@ -771,10 +895,11 @@ async function showSellos(ctx, showLevels = false) {
     ...backMenuRows(),
   ]);
 
+  // ✅ HOJEAR: utilidades (si hay cardURL, mandamos foto editable; si no, texto)
   if (cardUrl && cardUrl.startsWith("http")) {
-    await safeEditOrSend(ctx, { photo: cardUrl, caption, extra: kb });
+    await safeEditOrSendUtility(ctx, { photo: cardUrl, caption, extra: kb });
   } else {
-    await safeEditOrSend(ctx, { text: caption, extra: kb });
+    await safeEditOrSendUtility(ctx, { text: caption, extra: kb });
   }
 }
 
@@ -783,7 +908,7 @@ async function showHelp(ctx) {
   const sess = getSess(ctx.chat.id);
   setScreen(sess, "HELP");
 
-  const gifId = pickRandom(splitPipes(cfg.GifAyudaID || cfg.GifAyudaFileId || ""));
+  const gifId = pickGifFromCfg(cfg, ["GifAyudaID", "GifAyudaFileId", "GifAyuda"]);
   const gifUrl = pickRandom(splitPipes(cfg.GifAyudaURL || ""));
 
   const nombre = cfg.NegocioNombre || "Todo Queso";
@@ -800,22 +925,15 @@ async function showHelp(ctx) {
     ...backMenuRows(),
   ]);
 
-  // FIJO: no editar (para evitar fallos)
   if (gifId) {
-    await ctx.replyWithAnimation(gifId, {
-      caption: text,
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
-  } else if (gifUrl && gifUrl.startsWith("http")) {
-    await ctx.replyWithAnimation(gifUrl, {
-      caption: text,
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
-  } else {
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
+    await safeEditOrSendUtility(ctx, { animation: gifId, caption: text, extra: { reply_markup: kb.reply_markup } });
+    return;
   }
+  if (gifUrl && gifUrl.startsWith("http")) {
+    await safeEditOrSendUtility(ctx, { animation: gifUrl, caption: text, extra: { reply_markup: kb.reply_markup } });
+    return;
+  }
+  await safeEditOrSendUtility(ctx, { text, extra: kb });
 }
 
 async function showShareBot(ctx) {
@@ -823,7 +941,7 @@ async function showShareBot(ctx) {
   const sess = getSess(ctx.chat.id);
   setScreen(sess, "SHARE");
 
-  const gifId = pickRandom(splitPipes(cfg.GifCompartirID || cfg.GifCompartirFileId || ""));
+  const gifId = pickGifFromCfg(cfg, ["GifCompartirID", "GifCompartirFileId", "GifCompartir"]);
   const gifUrl = pickRandom(splitPipes(cfg.GifCompartirURL || ""));
   const botLink = String(cfg.BotLink || "").trim();
   const textShare =
@@ -831,7 +949,7 @@ async function showShareBot(ctx) {
     `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y pedí en 1 minuto.`;
 
   if (!botLink) {
-    await ctx.reply("Falta <b>BotLink</b> en Config para compartir.", { parse_mode: "HTML" });
+    await safeEditOrSendUtility(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: mainMenuKeyboard() });
     return;
   }
 
@@ -843,22 +961,15 @@ async function showShareBot(ctx) {
     ...backMenuRows(),
   ]);
 
-  // FIJO: no editar
   if (gifId) {
-    await ctx.replyWithAnimation(gifId, {
-      caption,
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
-  } else if (gifUrl && gifUrl.startsWith("http")) {
-    await ctx.replyWithAnimation(gifUrl, {
-      caption,
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
-  } else {
-    await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb.reply_markup });
+    await safeEditOrSendUtility(ctx, { animation: gifId, caption, extra: { reply_markup: kb.reply_markup } });
+    return;
   }
+  if (gifUrl && gifUrl.startsWith("http")) {
+    await safeEditOrSendUtility(ctx, { animation: gifUrl, caption, extra: { reply_markup: kb.reply_markup } });
+    return;
+  }
+  await safeEditOrSendUtility(ctx, { text: caption, extra: kb });
 }
 
 /* =========================================================
@@ -874,7 +985,7 @@ function qtyPromptText(cfg, p) {
 function computeSubtotal(p, qtyType, value) {
   if (qtyType === "g") {
     const grams = Math.max(1, parseNumber(value, 0));
-    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price; // si no hay precio/kg, asumimos price es por kg
+    const perKg = p.pricePerKg > 0 ? p.pricePerKg : p.price;
     const subtotal = roundARS((grams / 1000) * perKg);
     return { grams, qty: 0, subtotal };
   }
@@ -883,7 +994,6 @@ function computeSubtotal(p, qtyType, value) {
   return { grams: 0, qty, subtotal };
 }
 
-// ✅ (C) CORREGIDO: sumar bien por producto sin inflar
 function addToCart(sess, p, qtyType, value) {
   const calc = computeSubtotal(p, qtyType, value);
   const existing = sess.cart.find((x) => x.code === p.code && x.qtyType === qtyType);
@@ -942,7 +1052,7 @@ async function showCheckoutTicketPreview(ctx) {
     ...backMenuRows(),
   ]);
 
-  await safeEditOrSend(ctx, { text: t, extra: kb });
+  await safeEditOrSendEditable(ctx, { text: t, extra: kb });
 }
 
 /* =========================================================
@@ -978,7 +1088,7 @@ async function showCart(ctx) {
   setScreen(sess, "CART");
 
   if (!sess.cart.length) {
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\nVolvé al catálogo para elegir productos.`,
       extra: Markup.inlineKeyboard([
         [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
@@ -1006,7 +1116,7 @@ async function showCart(ctx) {
     ...backMenuRows(),
   ]);
 
-  await safeEditOrSend(ctx, { text: lines.join("\n"), extra: kb });
+  await safeEditOrSendEditable(ctx, { text: lines.join("\n"), extra: kb });
 }
 
 async function showDelivery(ctx) {
@@ -1014,7 +1124,7 @@ async function showDelivery(ctx) {
   const sess = getSess(ctx.chat.id);
   setScreen(sess, "DELIVERY");
 
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: `🚚 <b>Entrega</b>\n\nElegí cómo querés recibir tu pedido 👇`,
     extra: deliveryKeyboard(cfg),
   });
@@ -1036,7 +1146,7 @@ async function showPayment(ctx) {
     extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
   }
 
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: `💳 <b>Pago</b>\n\nElegí cómo vas a pagar 👇${extraText}`,
     extra: payKeyboard(cfg),
   });
@@ -1087,7 +1197,7 @@ async function finalizeOrderCreate(ctx) {
   const sess = getSess(ctx.chat.id);
 
   if (!sess.cart.length) {
-    await safeEditOrSend(ctx, { text: "Tu carrito está vacío.", extra: mainMenuKeyboard() });
+    await safeEditOrSendEditable(ctx, { text: "Tu carrito está vacío.", extra: mainMenuKeyboard() });
     return;
   }
 
@@ -1096,11 +1206,11 @@ async function finalizeOrderCreate(ctx) {
 
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
-  // ✅ TOTAL CORRECTO (cart + envío una sola vez)
+  // ✅ TOTAL CORRECTO
   let total = cartTotal(sess.cart);
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total = roundARS(total + costoEnvio);
 
-  // sellos por compra
+  // ✅ SELL0S
   const usaSellos = parseYes(cfg.UsaSellos || "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
@@ -1112,7 +1222,7 @@ async function finalizeOrderCreate(ctx) {
   const direccion = sess.checkout.direccion || "";
   const notas = sess.checkout.notas || "";
 
-  // persist cliente (sumar sellos ahora)
+  // persist cliente
   await upsertCliente({
     chatId: ctx.chat.id,
     nombre,
@@ -1122,7 +1232,7 @@ async function finalizeOrderCreate(ctx) {
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
 
-  // referido bonus al referente por compra
+  // bonus share al referente
   const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
   if (sess.refBy) {
     for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
@@ -1131,7 +1241,7 @@ async function finalizeOrderCreate(ctx) {
   // pedido
   const orderId = buildOrderId();
   const now = new Date();
-  const expMs = 60 * 60 * 1000; // 1 hora
+  const expMs = 60 * 60 * 1000;
   const expIso = new Date(now.getTime() + expMs).toISOString();
 
   const itemsText = sess.cart.map((it) => `${it.name} (${fmtQty(it)})`).join(" | ");
@@ -1154,7 +1264,7 @@ async function finalizeOrderCreate(ctx) {
     sess.refBy ? String(sess.refBy) : "",
   ]);
 
-  // avisar vendedor por Telegram (Config: VendedorChatId)
+  // avisar vendedor
   const vendedorIdReal = String(cfg.VendedorChatId || "").trim();
   const vendedor = vendedorIdReal ? Number(vendedorIdReal) : null;
 
@@ -1183,7 +1293,7 @@ async function finalizeOrderCreate(ctx) {
     });
   }
 
-  // cliente: ticket + transferencia + 1h
+  // cliente: ticket + transferencia
   const ticketCliente = ticketPOS(cfg, {
     orderId,
     items: sess.cart,
@@ -1201,8 +1311,10 @@ async function finalizeOrderCreate(ctx) {
   const waOrder = getWhatsappOrderLink(cfg, orderId);
 
   const extra = [];
+  extra.push(`🎟️ Sellos ganados en esta compra: <b>${sellosGanados}</b>`);
   extra.push(`⏳ Este pedido queda <b>pendiente</b> hasta que el vendedor confirme el pago.`);
   extra.push(`🕐 Si no se confirma en <b>1 hora</b>, se cancela automáticamente.`);
+
   if (String(pagoTipo).toUpperCase().includes("TRANSF")) {
     extra.push("");
     extra.push(buildTransferDataText(cfg));
@@ -1215,15 +1327,17 @@ async function finalizeOrderCreate(ctx) {
   kbClienteRows.push([Markup.button.callback("❌ Cancelar pedido", `CANCEL_${orderId}`)]);
   kbClienteRows.push(...backMenuRows());
 
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: `${ticketCliente}\n\n${extra.join("\n")}`,
     extra: Markup.inlineKeyboard(kbClienteRows),
   });
 
-  // programar vencimiento
   scheduleExpire(orderId, expMs, async () => {
     const row = await setPedidoEstado(orderId, "VENCIDO");
     if (!row) return;
+
+    // row está en formato A..Z, pero al enviar vencimiento solo necesitamos chat id:
+    // Como ahora usamos append fijo, el chatId está en la col 4 (index 3)
     const chatIdCliente = Number(row[3]);
     if (Number.isFinite(chatIdCliente)) {
       await bot.telegram.sendMessage(
@@ -1241,7 +1355,7 @@ async function finalizeOrderCreate(ctx) {
 }
 
 /* =========================================================
-   HELP CONTACT (manda mensaje al vendedor)
+   HELP CONTACT
 ========================================================= */
 async function forwardToVendedor(cfg, fromCtx, text) {
   const vendedorId = String(cfg.VendedorChatId || "").trim();
@@ -1301,8 +1415,8 @@ bot.start(async (ctx) => {
         const p2 = sess2.productsInView[idx];
         const caption = productCaption(cfg, p2, idx, sess2.productsInView.length);
         const photo = p2.img && p2.img.startsWith("http") ? p2.img : undefined;
-        if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p2) });
-        else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p2) });
+        if (photo) await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess2, p2) });
+        else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess2, p2) });
       }
     }
   }
@@ -1316,13 +1430,11 @@ bot.action("GO_BACK", async (ctx) => {
   const sess = getSess(ctx.chat.id);
   const s = sess.lastScreen;
 
-  // “Volver” va a la pantalla lógica anterior del flujo
   if (s === "PROD") {
     await showCategories(ctx);
     return;
   }
   if (s === "CART") {
-    // si venías de producto, volvemos a producto; si no, a categorías
     const cat = sess.category || sess.lastScreenData?.cat;
     if (cat && sess.productsInView?.length) {
       const cfg = await loadConfig();
@@ -1331,8 +1443,8 @@ bot.action("GO_BACK", async (ctx) => {
       const caption = productCaption(cfg, p, idx, sess.productsInView.length);
       const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
       setScreen(sess, "PROD", { cat });
-      if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-      else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+      if (photo) await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+      else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
       return;
     }
     await showCategories(ctx);
@@ -1383,8 +1495,8 @@ bot.action("PROD_NEXT", async (ctx) => {
 
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+  if (photo) await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+  else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
 });
 
 bot.action("PROD_PREV", async (ctx) => {
@@ -1398,14 +1510,14 @@ bot.action("PROD_PREV", async (ctx) => {
 
   const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
   const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
-  if (photo) await safeEditOrSend(ctx, { photo, caption, extra: productKeyboard(p) });
-  else await safeEditOrSend(ctx, { text: caption, extra: productKeyboard(p) });
+  if (photo) await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+  else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
 });
 
 /* VER CARRITO */
 bot.action("VIEW_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
 
-/* QUIERO ESTE -> PREGUNTAR CANTIDAD */
+/* QUIERO ESTE -> CANTIDAD */
 bot.action(/^WANT_(.+)$/i, async (ctx) => {
   await ctx.answerCbQuery();
   const cfg = await loadConfig();
@@ -1418,7 +1530,7 @@ bot.action(/^WANT_(.+)$/i, async (ctx) => {
   const qtyType = p.unit === "g" ? "g" : "u";
   sess.waiting = { type: "QTY", payload: { code, qtyType } };
 
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: qtyPromptText(cfg, p),
     extra: Markup.inlineKeyboard(backMenuRows()),
   });
@@ -1434,7 +1546,7 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
   const p = items.find((x) => x.code === productCode);
   const botLink = String(cfg.BotLink || "").trim();
   if (!p || !botLink) {
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: "No pude preparar el link de compartir (falta BotLink o producto).",
       extra: Markup.inlineKeyboard(backMenuRows()),
     });
@@ -1451,7 +1563,7 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
   const text = `🧀 ${cfg.NegocioNombre || "Todo Queso"}\n\nPromo: ${p.name} — ${priceTxt}\nTocá el link para ver y comprar 👇`;
   const links = buildShareLinks({ botLink: deepLink, text });
 
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: `🔗 <b>Compartir producto</b>\n\n${p.name}\n\nElegí dónde compartir 👇`,
     extra: shareKeyboard(links),
   });
@@ -1465,10 +1577,7 @@ bot.action("DELIVERY_ENVIO", async (ctx) => {
   const sess = getSess(ctx.chat.id);
   sess.checkout.entregaTipo = "ENVIO";
   sess.waiting = { type: "NAME", payload: {} };
-  await safeEditOrSend(ctx, {
-    text: `🚚 <b>Envío a domicilio</b>\n\nDecime tu <b>nombre</b> (solo texto):`,
-    extra: Markup.inlineKeyboard(backMenuRows()),
-  });
+  await safeEditOrSendEditable(ctx, { text: `🚚 <b>Envío a domicilio</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard(backMenuRows()) });
 });
 
 bot.action("DELIVERY_EXPRESS", async (ctx) => {
@@ -1476,10 +1585,7 @@ bot.action("DELIVERY_EXPRESS", async (ctx) => {
   const sess = getSess(ctx.chat.id);
   sess.checkout.entregaTipo = "EXPRESS";
   sess.waiting = { type: "NAME", payload: {} };
-  await safeEditOrSend(ctx, {
-    text: `⚡ <b>Envío express</b>\n\nDecime tu <b>nombre</b> (solo texto):`,
-    extra: Markup.inlineKeyboard(backMenuRows()),
-  });
+  await safeEditOrSendEditable(ctx, { text: `⚡ <b>Envío express</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard(backMenuRows()) });
 });
 
 bot.action("DELIVERY_RETIRO", async (ctx) => {
@@ -1487,10 +1593,7 @@ bot.action("DELIVERY_RETIRO", async (ctx) => {
   const sess = getSess(ctx.chat.id);
   sess.checkout.entregaTipo = "RETIRO";
   sess.waiting = { type: "NAME", payload: { retiro: true } };
-  await safeEditOrSend(ctx, {
-    text: `🏪 <b>Retiro en el local</b>\n\nDecime tu <b>nombre</b> (solo texto):`,
-    extra: Markup.inlineKeyboard(backMenuRows()),
-  });
+  await safeEditOrSendEditable(ctx, { text: `🏪 <b>Retiro en el local</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard(backMenuRows()) });
 });
 
 bot.action(/^PAY_(.+)$/i, async (ctx) => {
@@ -1519,7 +1622,7 @@ bot.action("CANCEL_FLOW", async (ctx) => {
   sess.cart = [];
   sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
   sess.waiting = null;
-  await safeEditOrSend(ctx, { text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`, extra: mainMenuKeyboard() });
+  await safeEditOrSendEditable(ctx, { text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`, extra: mainMenuKeyboard() });
 });
 
 bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
@@ -1527,10 +1630,10 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   const orderId = ctx.match[1];
   const row = await setPedidoEstado(orderId, "CANCELADO");
   if (!row) {
-    await safeEditOrSend(ctx, { text: "No pude cancelar ese pedido (no lo encontré).", extra: mainMenuKeyboard() });
+    await safeEditOrSendEditable(ctx, { text: "No pude cancelar ese pedido (no lo encontré).", extra: mainMenuKeyboard() });
     return;
   }
-  await safeEditOrSend(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
+  await safeEditOrSendEditable(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
 });
 
 /* VENDEDOR CONFIRMA/RECHAZA */
@@ -1594,10 +1697,11 @@ bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
   if (!row) return;
   const chatIdCliente = Number(row[3]);
   if (Number.isFinite(chatIdCliente)) {
-    await bot.telegram.sendMessage(chatIdCliente, `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`, {
-      parse_mode: "HTML",
-      reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
-    });
+    await bot.telegram.sendMessage(
+      chatIdCliente,
+      `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`,
+      { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
+    );
   }
   await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
 });
@@ -1607,7 +1711,7 @@ bot.action("HELP_CONTACT", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
   sess.waiting = { type: "HELP_MSG", payload: {} };
-  await safeEditOrSend(ctx, {
+  await safeEditOrSendEditable(ctx, {
     text: `📝 Escribime tu mensaje y se lo paso al vendedor (1 solo mensaje).`,
     extra: Markup.inlineKeyboard(backMenuRows()),
   });
@@ -1638,8 +1742,8 @@ bot.on("text", async (ctx) => {
 
   if (w.type === "HELP_MSG") {
     const ok = await forwardToVendedor(cfg, ctx, text);
-    if (ok) await safeEditOrSend(ctx, { text: `✅ Listo. Ya le mandé tu mensaje al vendedor.`, extra: mainMenuKeyboard() });
-    else await safeEditOrSend(ctx, { text: `Falta <b>VendedorChatId</b> en Config para enviar el mensaje.`, extra: mainMenuKeyboard() });
+    if (ok) await safeEditOrSendEditable(ctx, { text: `✅ Listo. Ya le mandé tu mensaje al vendedor.`, extra: mainMenuKeyboard() });
+    else await safeEditOrSendEditable(ctx, { text: `Falta <b>VendedorChatId</b> en Config para enviar el mensaje.`, extra: mainMenuKeyboard() });
     return;
   }
 
@@ -1647,14 +1751,14 @@ bot.on("text", async (ctx) => {
     const { code, qtyType } = w.payload || {};
     const p = sess.productsInView.find((x) => x.code === code);
     if (!p) {
-      await safeEditOrSend(ctx, { text: "No encontré el producto. Volvé al catálogo.", extra: mainMenuKeyboard() });
+      await safeEditOrSendEditable(ctx, { text: "No encontré el producto. Volvé al catálogo.", extra: mainMenuKeyboard() });
       return;
     }
 
     const n = parseNumber(text, 0);
     if (!n || n <= 0) {
       sess.waiting = { type: "QTY", payload: { code, qtyType } };
-      await safeEditOrSend(ctx, {
+      await safeEditOrSendEditable(ctx, {
         text: `⚠️ Pasame un número válido.\n\n${qtyPromptText(cfg, p)}`,
         extra: Markup.inlineKeyboard(backMenuRows()),
       });
@@ -1669,7 +1773,7 @@ bot.on("text", async (ctx) => {
   if (w.type === "NAME") {
     sess.checkout.nombre = text.slice(0, 60);
     sess.waiting = { type: "PHONE", payload: w.payload || {} };
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: `📞 Perfecto, ${sess.checkout.nombre}.\n\nAhora tu <b>teléfono</b> (solo números):`,
       extra: Markup.inlineKeyboard(backMenuRows()),
     });
@@ -1682,12 +1786,12 @@ bot.on("text", async (ctx) => {
     const isRetiro = !!(w.payload && w.payload.retiro);
 
     if (isRetiro) {
-      await safeEditOrSend(ctx, { text: `✅ Listo.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
+      await safeEditOrSendEditable(ctx, { text: `✅ Listo.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
       return;
     }
 
     sess.waiting = { type: "ADDR", payload: {} };
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: `📍 Ahora la <b>dirección</b> completa (calle + altura + localidad):`,
       extra: Markup.inlineKeyboard(backMenuRows()),
     });
@@ -1697,7 +1801,7 @@ bot.on("text", async (ctx) => {
   if (w.type === "ADDR") {
     sess.checkout.direccion = text.slice(0, 140);
     sess.waiting = { type: "NOTES", payload: {} };
-    await safeEditOrSend(ctx, {
+    await safeEditOrSendEditable(ctx, {
       text: `📝 ¿Alguna nota? (timbre / piso / entre calles). Si no, escribí <code>NO</code>.`,
       extra: Markup.inlineKeyboard(backMenuRows()),
     });
@@ -1707,7 +1811,7 @@ bot.on("text", async (ctx) => {
   if (w.type === "NOTES") {
     const t = text.toLowerCase();
     sess.checkout.notas = (t === "no" || t === "n" || t === "0") ? "" : text.slice(0, 140);
-    await safeEditOrSend(ctx, { text: `✅ Datos listos.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
+    await safeEditOrSendEditable(ctx, { text: `✅ Datos listos.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
     return;
   }
 });
@@ -1724,7 +1828,6 @@ async function start() {
   await ensureBaseSheets();
   await expireOldPending();
 
-  // (B) limpiar pendientes cada 5 minutos (no en cada click)
   setInterval(() => {
     expireOldPending().catch(() => {});
   }, 5 * 60 * 1000);
@@ -1732,7 +1835,7 @@ async function start() {
   if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
     const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
     await bot.telegram.setWebhook(hook);
-    app.use(bot.webhookCallback("/telegram")); // POST /telegram
+    app.use(bot.webhookCallback("/telegram"));
     app.listen(PORT, () => console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`));
   } else {
     bot.launch();
