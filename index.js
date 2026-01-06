@@ -769,3 +769,235 @@ const bot = new Telegraf(TelegramBotToken);
 /* =======================
 ✅ DESDE ACÁ SIGUE EN PARTE 2/2
 ======================= */
+/* =========================================================
+MENÚ / PANTALLAS PRINCIPALES
+========================================================= */
+async function showMenu(ctx) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+  setScreen(sess, "MENU");
+
+  const nombre = cfg.NegocioNombre || "Tu Negocio";
+  const dire = cfg.NegocioDireccion || "";
+  const hora = cfg.NegocioHorario || "";
+  const estado = cfg.Estado || "";
+  const desc = String(cfg.Descripcion || "").trim();
+
+  const gifId = pickGifFromCfg(cfg, ["GifBienvenidaID", "GifBienvenidaFileId", "GifBienvenida"]);
+  const gifUrl = pickRandom(splitPipes(cfg.GifBienvenidaURL || ""));
+  const logo = String(cfg.LogoURL || "").trim();
+
+  const header = [];
+  header.push(`🏠 <b>${nombre}</b>`);
+  if (estado) header.push(`🟢 <b>${estado}</b>`);
+  if (dire) header.push(`📍 ${dire}`);
+  if (hora) header.push(`🕒 ${hora}`);
+
+  const caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
+
+  if (gifId) {
+    await safeEditOrSendUtility(ctx, {
+      animation: gifId,
+      caption,
+      extra: { reply_markup: mainMenuKeyboard().reply_markup },
+    });
+    return;
+  }
+
+  if (gifUrl && gifUrl.startsWith("http")) {
+    await safeEditOrSendUtility(ctx, {
+      animation: gifUrl,
+      caption,
+      extra: { reply_markup: mainMenuKeyboard().reply_markup },
+    });
+    return;
+  }
+
+  if (logo && logo.startsWith("http")) {
+    await safeEditOrSendUtility(ctx, {
+      photo: logo,
+      caption,
+      extra: mainMenuKeyboard(),
+    });
+    return;
+  }
+
+  await safeEditOrSendUtility(ctx, { text: caption, extra: mainMenuKeyboard() });
+}
+
+/* =========================================================
+CATEGORÍAS
+========================================================= */
+async function showCategories(ctx) {
+  const sess = getSess(ctx.chat.id);
+  setScreen(sess, "CATS");
+
+  const { items } = await loadCatalog();
+  const cats = categoriesFromItems(items);
+
+  if (!cats.length) {
+    await safeEditOrSendEditable(ctx, {
+      text: "🧀 Catálogo vacío. Cargá productos en la hoja <b>Catalogo</b>.",
+      extra: Markup.inlineKeyboard(backMenuRows()),
+    });
+    return;
+  }
+
+  const buttons = [];
+  for (let i = 0; i < cats.length; i += 2) {
+    const row = [];
+    row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
+    if (cats[i + 1])
+      row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
+    buttons.push(row);
+  }
+  buttons.push(...backMenuRows());
+
+  await safeEditOrSendEditable(ctx, {
+    text: `🧀 <b>Catálogo</b>\n\nElegí una <b>categoría</b> 👇`,
+    extra: Markup.inlineKeyboard(buttons),
+  });
+}
+
+/* =========================================================
+PRODUCTOS (CARRUSEL)
+========================================================= */
+async function showProductCarousel(ctx, cat) {
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  const { items } = await loadCatalog();
+  const prods = items.filter((p) => (p.cat || "General") === cat);
+
+  if (!prods.length) {
+    await safeEditOrSendEditable(ctx, {
+      text: `No hay productos en <b>${cat}</b>.`,
+      extra: Markup.inlineKeyboard(backMenuRows()),
+    });
+    return;
+  }
+
+  sess.productsInView = prods;
+  sess.productIndex = 0;
+  sess.category = cat;
+  setScreen(sess, "PROD", { cat });
+
+  const p = prods[0];
+  const caption = productCaption(cfg, p, 0, prods.length);
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
+  if (photo)
+    await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+  else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
+}
+
+/* =========================================================
+BOT ACTIONS BÁSICAS
+========================================================= */
+bot.start(async (ctx) => {
+  await ensureBaseSheets();
+  await expireOldPending();
+  await showMenu(ctx);
+});
+
+bot.action("GO_MENU", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showMenu(ctx);
+});
+
+bot.action("MENU_CATALOGO", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showCategories(ctx);
+});
+
+bot.action("MENU_SELLOS", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, false);
+});
+
+bot.action("MENU_AYUDA", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showHelp(ctx);
+});
+
+bot.action("MENU_COMPARTIR", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showShareBot(ctx);
+});
+
+bot.action(/^CAT_(.+)$/i, async (ctx) => {
+  await ctx.answerCbQuery();
+  await showProductCarousel(ctx, decodeURIComponent(ctx.match[1]));
+});
+
+/* =========================================================
+PRODUCTO SIG / ANT
+========================================================= */
+bot.action("PROD_NEXT", async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  sess.productIndex = (sess.productIndex + 1) % sess.productsInView.length;
+  const p = sess.productsInView[sess.productIndex];
+
+  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
+  if (photo)
+    await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+  else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
+});
+
+bot.action("PROD_PREV", async (ctx) => {
+  await ctx.answerCbQuery();
+  const cfg = await loadConfig();
+  const sess = getSess(ctx.chat.id);
+
+  sess.productIndex =
+    (sess.productIndex - 1 + sess.productsInView.length) % sess.productsInView.length;
+  const p = sess.productsInView[sess.productIndex];
+
+  const caption = productCaption(cfg, p, sess.productIndex, sess.productsInView.length);
+  const photo = p.img && p.img.startsWith("http") ? p.img : undefined;
+
+  if (photo)
+    await safeEditOrSendEditable(ctx, { photo, caption, extra: productKeyboard(sess, p) });
+  else await safeEditOrSendEditable(ctx, { text: caption, extra: productKeyboard(sess, p) });
+});
+
+/* =========================================================
+WEB SERVER (Render)
+========================================================= */
+const app = express();
+app.use(express.json());
+
+app.get("/", (req, res) => res.status(200).send("EzerBot OK ✅"));
+
+async function start() {
+  await ensureBaseSheets();
+  await expireOldPending();
+
+  setInterval(() => {
+    expireOldPending().catch(() => {});
+  }, 5 * 60 * 1000);
+
+  if (PUBLIC_URL && PUBLIC_URL.startsWith("http")) {
+    const hook = `${PUBLIC_URL.replace(/\/$/, "")}/telegram`;
+    await bot.telegram.setWebhook(hook);
+    app.use(bot.webhookCallback("/telegram"));
+    app.listen(PORT, () =>
+      console.log(`✅ Webhook activo: ${hook} | Puerto ${PORT}`)
+    );
+  } else {
+    bot.launch();
+    app.listen(PORT, () =>
+      console.log(`✅ Long-polling activo | Puerto ${PORT}`)
+    );
+  }
+}
+
+start().catch((e) => {
+  console.error("FATAL:", e?.message || e);
+  process.exit(1);
+});
