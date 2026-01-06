@@ -14,7 +14,8 @@ const PORT = process.env.PORT || 10000;
 
 if (!TelegramBotToken) throw new Error("Falta TelegramBotToken");
 if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
+if (!GOOGLE_SERVICE_ACCOUNT_B64)
+  throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
 /* =========================================================
    GOOGLE AUTH
@@ -25,7 +26,9 @@ function decodeServiceAccountB64(b64) {
   try {
     obj = JSON.parse(raw);
   } catch {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON válido.");
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON válido."
+    );
   }
   return obj;
 }
@@ -79,7 +82,9 @@ async function ensureSheet(sheetName, headers) {
   if (!existing.includes(sheetName)) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: GOOGLE_SHEET_ID,
-      requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
+      },
     });
     await setSheetValues(`${sheetName}!A1`, [headers]);
     return;
@@ -89,7 +94,6 @@ async function ensureSheet(sheetName, headers) {
   if (!firstRow.length || firstRow[0].join("").trim() === "") {
     await setSheetValues(`${sheetName}!A1`, [headers]);
   } else {
-    // Asegurar que existan todas las columnas (por nombre), sin romper las existentes:
     const cur = firstRow[0].map((x) => String(x || "").trim());
     const set = new Set(cur.map((x) => x.toLowerCase()));
     const missing = headers.filter((h) => !set.has(String(h).toLowerCase()));
@@ -151,7 +155,10 @@ function roundARS(n) {
 function normalizeHeaders(headerRow) {
   const map = {};
   headerRow.forEach((h, i) => {
-    const key = String(h || "").trim().toLowerCase().replace(/\s+/g, "");
+    const key = String(h || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "");
     if (key) map[key] = i;
   });
   return map;
@@ -160,7 +167,8 @@ function normalizeHeaders(headerRow) {
 function pick(row, hmap, keys, def = "") {
   for (const k of keys) {
     const idx = hmap[k];
-    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "") return row[idx];
+    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "")
+      return row[idx];
   }
   return def;
 }
@@ -176,7 +184,7 @@ function inferUnit(raw) {
 }
 
 /* =========================================================
-   CACHE (B)
+   CACHE
 ========================================================= */
 const CACHE = {
   cfg: { value: null, ts: 0, inflight: null },
@@ -194,17 +202,28 @@ async function loadCatalogRaw() {
   if (!rows.length) return { items: [], headers: {} };
   const headerRow = rows[0];
   const hmap = normalizeHeaders(headerRow);
-  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
+  const data = rows
+    .slice(1)
+    .filter((r) => r.some((c) => String(c || "").trim() !== ""));
 
   const items = data.map((r, i) => {
-    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
+    const code =
+      String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() ||
+      `P${i + 1}`;
     const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
     const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
-    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0), 0);
+    const pricePerKg = parseNumber(
+      pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0),
+      0
+    );
     const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
     const unit = inferUnit(unitRaw);
-    const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
-    const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
+    const cat =
+      String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() ||
+      "General";
+    const img = String(
+      pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")
+    ).trim();
     const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
     const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
     return { code, name, price, pricePerKg, unit, cat, img, desc, isCombo };
@@ -258,7 +277,7 @@ function categoriesFromItems(items) {
 }
 
 /* =========================================================
-   STATE (chat limpio + flujo)
+   STATE
 ========================================================= */
 const SESS = new Map(); // chatId -> state
 const ORDER_TIMERS = new Map(); // orderId -> timeout
@@ -273,9 +292,8 @@ function getSess(chatId) {
       cart: [],
       refBy: null,
 
-      // ✅ separados: mensaje editable vs utilidades (GIF)
       lastEditableMessageId: null, // catálogo/carrito/checkout (se edita)
-      utilityMessageId: null,      // menú/sellos/ayuda/compartir (caption se edita si es GIF)
+      utilityMessageId: null, // menú/sellos/ayuda/compartir
       utilityIsAnimation: false,
 
       checkout: {
@@ -342,7 +360,6 @@ async function ensureBaseSheets() {
   await ensureSheet(PEDIDOS_SHEET, PEDIDOS_HEADERS);
 }
 
-// map headers -> idx
 function headerIndexMap(headerRow) {
   const m = {};
   headerRow.forEach((h, i) => {
@@ -370,20 +387,30 @@ function setCell(row, hmap, colName, value) {
   const idx = hmap[String(colName || "").toLowerCase()];
   if (idx === undefined) return row;
   const r = [...row];
-  // expand row if shorter
   while (r.length <= idx) r.push("");
   r[idx] = value;
   return r;
 }
 
 async function writeRow(sheetName, rowNumber1based, rowArray) {
-  await setSheetValues(`${sheetName}!A${rowNumber1based}:Z${rowNumber1based}`, [rowArray]);
+  await setSheetValues(`${sheetName}!A${rowNumber1based}:Z${rowNumber1based}`, [
+    rowArray,
+  ]);
 }
 
-async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
+async function upsertCliente({
+  chatId,
+  nombre,
+  usuario,
+  addSellos = 0,
+  addTotal = 0,
+  refBy = "",
+}) {
   const { header, hmap, data } = await readTable(CLIENTES_SHEET);
 
-  const idxRow = data.findIndex((r) => String(getCell(r, hmap, "ChatId", "")) === String(chatId));
+  const idxRow = data.findIndex(
+    (r) => String(getCell(r, hmap, "ChatId", "")) === String(chatId)
+  );
   const now = new Date().toISOString();
 
   if (idxRow === -1) {
@@ -404,7 +431,10 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
   const row = data[idxRow];
   const currentSellos = parseNumber(getCell(row, hmap, "Sellos", 0), 0);
   const currentTotal = parseNumber(getCell(row, hmap, "TotalComprado", 0), 0);
-  const currentRefGanados = parseNumber(getCell(row, hmap, "ReferidosGanados", 0), 0);
+  const currentRefGanados = parseNumber(
+    getCell(row, hmap, "ReferidosGanados", 0),
+    0
+  );
   const currentRefBy = String(getCell(row, hmap, "ReferidoPor", "") || "");
 
   const newSellos = currentSellos + (Number(addSellos) || 0);
@@ -412,28 +442,43 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
 
   let newRow = [...row];
   newRow = setCell(newRow, hmap, "ChatId", String(chatId));
-  newRow = setCell(newRow, hmap, "Nombre", nombre || getCell(row, hmap, "Nombre", ""));
-  newRow = setCell(newRow, hmap, "Usuario", usuario || getCell(row, hmap, "Usuario", ""));
+  newRow = setCell(
+    newRow,
+    hmap,
+    "Nombre",
+    nombre || getCell(row, hmap, "Nombre", "")
+  );
+  newRow = setCell(
+    newRow,
+    hmap,
+    "Usuario",
+    usuario || getCell(row, hmap, "Usuario", "")
+  );
   newRow = setCell(newRow, hmap, "Sellos", newSellos);
   newRow = setCell(newRow, hmap, "TotalComprado", newTotal);
   newRow = setCell(newRow, hmap, "UltimaCompraISO", now);
   newRow = setCell(newRow, hmap, "ReferidoPor", currentRefBy || refBy || "");
   newRow = setCell(newRow, hmap, "ReferidosGanados", currentRefGanados);
 
-  const rowNumber = idxRow + 2; // header=1
+  const rowNumber = idxRow + 2;
   await writeRow(CLIENTES_SHEET, rowNumber, newRow);
 
   return { sellos: newSellos, total: newTotal };
 }
 
 async function addSelloReferido(chatIdReferente) {
-  const { header, hmap, data } = await readTable(CLIENTES_SHEET);
-  const idxRow = data.findIndex((r) => String(getCell(r, hmap, "ChatId", "")) === String(chatIdReferente));
+  const { hmap, data } = await readTable(CLIENTES_SHEET);
+  const idxRow = data.findIndex(
+    (r) => String(getCell(r, hmap, "ChatId", "")) === String(chatIdReferente)
+  );
   if (idxRow === -1) return;
 
   const row = data[idxRow];
   const currentSellos = parseNumber(getCell(row, hmap, "Sellos", 0), 0);
-  const currentRefGanados = parseNumber(getCell(row, hmap, "ReferidosGanados", 0), 0);
+  const currentRefGanados = parseNumber(
+    getCell(row, hmap, "ReferidosGanados", 0),
+    0
+  );
 
   let newRow = [...row];
   newRow = setCell(newRow, hmap, "Sellos", currentSellos + 1);
@@ -450,7 +495,9 @@ async function readPedidos() {
 
 async function findPedidoRow(orderId) {
   const { hmap, data } = await readPedidos();
-  const idxRow = data.findIndex((r) => String(getCell(r, hmap, "PedidoId", "")) === String(orderId));
+  const idxRow = data.findIndex(
+    (r) => String(getCell(r, hmap, "PedidoId", "")) === String(orderId)
+  );
   if (idxRow === -1) return null;
   return { idx: idxRow, row: data[idxRow], rowNumber: idxRow + 2, hmap };
 }
@@ -488,8 +535,6 @@ async function expireOldPending() {
 
 /* =========================================================
    UI HELPERS
-   - editable: catálogo/checkout
-   - utility: menú/sellos/ayuda/compartir (GIF hojear = edit caption)
 ========================================================= */
 async function safeEditOrSendEditable(ctx, payload) {
   const chatId = ctx.chat?.id;
@@ -503,7 +548,12 @@ async function safeEditOrSendEditable(ctx, payload) {
           chatId,
           msgId,
           undefined,
-          { type: "photo", media: payload.photo, caption: payload.caption || "", parse_mode: "HTML" },
+          {
+            type: "photo",
+            media: payload.photo,
+            caption: payload.caption || "",
+            parse_mode: "HTML",
+          },
           payload.extra || {}
         );
         return;
@@ -514,9 +564,7 @@ async function safeEditOrSendEditable(ctx, payload) {
       });
       return;
     }
-  } catch {
-    // fallback send
-  }
+  } catch {}
 
   let msg;
   if (payload.photo) {
@@ -526,7 +574,10 @@ async function safeEditOrSendEditable(ctx, payload) {
       ...(payload.extra || {}),
     });
   } else {
-    msg = await ctx.reply(payload.text || " ", { parse_mode: "HTML", ...(payload.extra || {}) });
+    msg = await ctx.reply(payload.text || " ", {
+      parse_mode: "HTML",
+      ...(payload.extra || {}),
+    });
   }
 
   if (sess && msg?.message_id) sess.lastEditableMessageId = msg.message_id;
@@ -539,11 +590,9 @@ async function safeEditOrSendUtility(ctx, payload) {
   const msgId = sess?.utilityMessageId;
   const isAnim = !!sess?.utilityIsAnimation;
 
-  // Si ya existe un mensaje de utilidades:
   if (msgId) {
     try {
       if (isAnim) {
-        // ✅ animation no se puede cambiar, pero sí la caption
         await ctx.telegram.editMessageCaption(chatId, msgId, undefined, payload.caption || payload.text || " ", {
           parse_mode: "HTML",
           ...(payload.extra || {}),
@@ -551,13 +600,17 @@ async function safeEditOrSendUtility(ctx, payload) {
         return;
       }
 
-      // no era animación: editable como texto o foto
       if (payload.photo) {
         await ctx.telegram.editMessageMedia(
           chatId,
           msgId,
           undefined,
-          { type: "photo", media: payload.photo, caption: payload.caption || "", parse_mode: "HTML" },
+          {
+            type: "photo",
+            media: payload.photo,
+            caption: payload.caption || "",
+            parse_mode: "HTML",
+          },
           payload.extra || {}
         );
         return;
@@ -568,18 +621,15 @@ async function safeEditOrSendUtility(ctx, payload) {
         ...(payload.extra || {}),
       });
       return;
-    } catch {
-      // si falla, mandamos uno nuevo
-    }
+    } catch {}
   }
 
-  // Crear nuevo mensaje de utilidades
   let msg;
   if (payload.animation) {
     msg = await ctx.replyWithAnimation(payload.animation, {
       caption: payload.caption || "",
       parse_mode: "HTML",
-      reply_markup: (payload.extra?.reply_markup) || undefined,
+      reply_markup: payload.extra?.reply_markup || undefined,
     });
     if (sess && msg?.message_id) {
       sess.utilityMessageId = msg.message_id;
@@ -614,7 +664,10 @@ async function safeEditOrSendUtility(ctx, payload) {
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
-    [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
+    [
+      Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"),
+      Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA"),
+    ],
     [Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")],
   ]);
 }
@@ -624,10 +677,7 @@ function goMenuRow() {
 }
 
 function backMenuRows() {
-  return [
-    [Markup.button.callback("⬅️ Volver", "GO_BACK")],
-    goMenuRow(),
-  ];
+  return [[Markup.button.callback("⬅️ Volver", "GO_BACK")], goMenuRow()];
 }
 
 /* =========================================================
@@ -640,7 +690,8 @@ function productCaption(cfg, p, index, total) {
   lines.push(`<b>${p.name}</b>`);
 
   if (showPrice) {
-    if (p.unit === "g" && p.pricePerKg > 0) lines.push(`💰 <b>${money(p.pricePerKg, moneda)}</b> / kg`);
+    if (p.unit === "g" && p.pricePerKg > 0)
+      lines.push(`💰 <b>${money(p.pricePerKg, moneda)}</b> / kg`);
     else lines.push(`💰 <b>${money(p.price, moneda)}</b>`);
   }
 
@@ -653,11 +704,14 @@ function productCaption(cfg, p, index, total) {
 function productKeyboard(sess, p) {
   const rows = [
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
-    [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    [
+      Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`),
+      Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`),
+    ],
   ];
 
-  // ✅ Ver carrito solo si hay algo
-  if (sess.cart && sess.cart.length) rows.push([Markup.button.callback("🛒 Ver carrito", "VIEW_CART")]);
+  if (sess.cart && sess.cart.length)
+    rows.push([Markup.button.callback("🛒 Ver carrito", "VIEW_CART")]);
 
   rows.push(...backMenuRows());
   return Markup.inlineKeyboard(rows);
@@ -675,7 +729,10 @@ function fmtQty(it) {
   return `${it.qty} u`;
 }
 
-function ticketPOS(cfg, { orderId, items, total, entregaTipo, pagoTipo, nombre, telefono, direccion, notas, estado, costoEnvio = 0 }) {
+function ticketPOS(
+  cfg,
+  { orderId, items, total, entregaTipo, pagoTipo, nombre, telefono, direccion, notas, estado, costoEnvio = 0 }
+) {
   const moneda = cfg.Moneda || "ARS";
   const lines = [];
   lines.push(`🧾 <b>TICKET</b>`);
@@ -726,7 +783,10 @@ function shareKeyboard(links) {
 function sellosTextShort(cfg, sellos) {
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const moneda = cfg.Moneda || "ARS";
-  const tip = `✨ Tip: si alguien entra por tu link y compra, ganás <b>${parseNumber(cfg.BonusSellosShare || "1", 1)}</b> sello(s).`;
+  const tip = `✨ Tip: si alguien entra por tu link y compra, ganás <b>${parseNumber(
+    cfg.BonusSellosShare || "1",
+    1
+  )}</b> sello(s).`;
   return [
     `🎟️ <b>Sellos</b>`,
     `Tenés <b>${sellos}</b> sellos acumulados.`,
@@ -753,12 +813,9 @@ function sellosTextLevels(cfg) {
 }
 
 /* =========================================================
-   FLOW SCREENS + GIFs (file_id)
-   ✅ Utilidades (menu/sellos/help/share) => safeEditOrSendUtility (hojea)
-   ✅ Catálogo/compra => safeEditOrSendEditable (chat limpio)
+   FLOW SCREENS + GIFs
 ========================================================= */
 function pickGifFromCfg(cfg, keys) {
-  // permite pipe en Config
   for (const k of keys) {
     const v = String(cfg[k] || "").trim();
     const arr = splitPipes(v);
@@ -779,8 +836,6 @@ async function showMenu(ctx) {
   const estado = cfg.Estado || "";
   const desc = String(cfg.Descripcion || "").trim();
 
-  // ✅ GIF file_id: (prioridad) Config -> si no, nada
-  // (Podés poner en Config: GifBienvenidaID = file_id | file_id2)
   const gifId = pickGifFromCfg(cfg, ["GifBienvenidaID", "GifBienvenidaFileId", "GifBienvenida"]);
   const gifUrl = pickRandom(splitPipes(cfg.GifBienvenidaURL || ""));
   const logo = String(cfg.LogoURL || "").trim();
@@ -793,14 +848,21 @@ async function showMenu(ctx) {
 
   const caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
 
-  // ✅ utilidades: HOJEA (si es GIF, edita caption)
   if (gifId) {
-    await safeEditOrSendUtility(ctx, { animation: gifId, caption, extra: { reply_markup: mainMenuKeyboard().reply_markup } });
+    await safeEditOrSendUtility(ctx, {
+      animation: gifId,
+      caption,
+      extra: { reply_markup: mainMenuKeyboard().reply_markup },
+    });
     return;
   }
 
   if (gifUrl && gifUrl.startsWith("http")) {
-    await safeEditOrSendUtility(ctx, { animation: gifUrl, caption, extra: { reply_markup: mainMenuKeyboard().reply_markup } });
+    await safeEditOrSendUtility(ctx, {
+      animation: gifUrl,
+      caption,
+      extra: { reply_markup: mainMenuKeyboard().reply_markup },
+    });
     return;
   }
 
@@ -831,7 +893,8 @@ async function showCategories(ctx) {
   for (let i = 0; i < cats.length; i += 2) {
     const row = [];
     row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
-    if (cats[i + 1]) row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
+    if (cats[i + 1])
+      row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
     buttons.push(row);
   }
 
@@ -895,7 +958,6 @@ async function showSellos(ctx, showLevels = false) {
     ...backMenuRows(),
   ]);
 
-  // ✅ HOJEAR: utilidades (si hay cardURL, mandamos foto editable; si no, texto)
   if (cardUrl && cardUrl.startsWith("http")) {
     await safeEditOrSendUtility(ctx, { photo: cardUrl, caption, extra: kb });
   } else {
@@ -920,17 +982,22 @@ async function showHelp(ctx) {
     `• Si pagás por transferencia: enviás comprobante por WhatsApp y el vendedor confirma.`,
   ].join("\n");
 
-  const kb = Markup.inlineKeyboard([
-    [Markup.button.callback("✉️ Hablar con vendedor", "HELP_CONTACT")],
-    ...backMenuRows(),
-  ]);
+  const kb = Markup.inlineKeyboard([[Markup.button.callback("✉️ Hablar con vendedor", "HELP_CONTACT")], ...backMenuRows()]);
 
   if (gifId) {
-    await safeEditOrSendUtility(ctx, { animation: gifId, caption: text, extra: { reply_markup: kb.reply_markup } });
+    await safeEditOrSendUtility(ctx, {
+      animation: gifId,
+      caption: text,
+      extra: { reply_markup: kb.reply_markup },
+    });
     return;
   }
   if (gifUrl && gifUrl.startsWith("http")) {
-    await safeEditOrSendUtility(ctx, { animation: gifUrl, caption: text, extra: { reply_markup: kb.reply_markup } });
+    await safeEditOrSendUtility(ctx, {
+      animation: gifUrl,
+      caption: text,
+      extra: { reply_markup: kb.reply_markup },
+    });
     return;
   }
   await safeEditOrSendUtility(ctx, { text, extra: kb });
@@ -944,9 +1011,18 @@ async function showShareBot(ctx) {
   const gifId = pickGifFromCfg(cfg, ["GifCompartirID", "GifCompartirFileId", "GifCompartir"]);
   const gifUrl = pickRandom(splitPipes(cfg.GifCompartirURL || ""));
   const botLink = String(cfg.BotLink || "").trim();
-  const textShare =
+
+  const emailSistema = String(
+    cfg.EmailSistema || cfg.MailSistema || cfg.EmailSoporte || cfg.Email || ""
+  ).trim();
+
+  let textShare =
     String(cfg.TextoCompartirBot || "").trim() ||
-    `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y pedí en 1 minuto.`;
+    `🧀 Comprá en ${cfg.NegocioNombre || "Todo Queso"} desde este bot: elegí productos, cantidad y forma de entrega en 1 minuto.`;
+
+  if (emailSistema && !textShare.toLowerCase().includes(emailSistema.toLowerCase())) {
+    textShare += `\n\n📩 Consultas: ${emailSistema}`;
+  }
 
   if (!botLink) {
     await safeEditOrSendUtility(ctx, { text: "Falta <b>BotLink</b> en Config para compartir.", extra: mainMenuKeyboard() });
@@ -1090,10 +1166,7 @@ async function showCart(ctx) {
   if (!sess.cart.length) {
     await safeEditOrSendEditable(ctx, {
       text: `🛒 <b>Carrito</b>\n\nTu carrito está vacío.\nVolvé al catálogo para elegir productos.`,
-      extra: Markup.inlineKeyboard([
-        [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
-        ...backMenuRows(),
-      ]),
+      extra: Markup.inlineKeyboard([[Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")], ...backMenuRows()]),
     });
     return;
   }
@@ -1110,7 +1183,8 @@ async function showCart(ctx) {
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
   const kb = Markup.inlineKeyboard([
-    [Markup.button.callback("🚚 Elegir entrega", "CHK_DELIVERY")],
+    // ✅ CAMBIO: mostrar "Finalizar compra" (mantiene el flujo y entra a entrega)
+    [Markup.button.callback("✅ Finalizar compra", "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
     [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
     ...backMenuRows(),
@@ -1141,7 +1215,9 @@ async function showPayment(ctx) {
 
   let extraText = "";
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
-    extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
+    extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(
+      cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || ""
+    ).trim()}`;
   } else {
     extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
   }
@@ -1206,23 +1282,19 @@ async function finalizeOrderCreate(ctx) {
 
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
-  // ✅ TOTAL CORRECTO
   let total = cartTotal(sess.cart);
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total = roundARS(total + costoEnvio);
 
-  // ✅ SELL0S
   const usaSellos = parseYes(cfg.UsaSellos || "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
 
-  // datos cliente
   const nombre = sess.checkout.nombre || `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
   const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
   const telefono = sess.checkout.telefono || "";
   const direccion = sess.checkout.direccion || "";
   const notas = sess.checkout.notas || "";
 
-  // persist cliente
   await upsertCliente({
     chatId: ctx.chat.id,
     nombre,
@@ -1232,13 +1304,11 @@ async function finalizeOrderCreate(ctx) {
     refBy: sess.refBy ? String(sess.refBy) : "",
   });
 
-  // bonus share al referente
   const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
   if (sess.refBy) {
     for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
   }
 
-  // pedido
   const orderId = buildOrderId();
   const now = new Date();
   const expMs = 60 * 60 * 1000;
@@ -1264,7 +1334,6 @@ async function finalizeOrderCreate(ctx) {
     sess.refBy ? String(sess.refBy) : "",
   ]);
 
-  // avisar vendedor
   const vendedorIdReal = String(cfg.VendedorChatId || "").trim();
   const vendedor = vendedorIdReal ? Number(vendedorIdReal) : null;
 
@@ -1293,7 +1362,6 @@ async function finalizeOrderCreate(ctx) {
     });
   }
 
-  // cliente: ticket + transferencia
   const ticketCliente = ticketPOS(cfg, {
     orderId,
     items: sess.cart,
@@ -1336,19 +1404,15 @@ async function finalizeOrderCreate(ctx) {
     const row = await setPedidoEstado(orderId, "VENCIDO");
     if (!row) return;
 
-    // row está en formato A..Z, pero al enviar vencimiento solo necesitamos chat id:
-    // Como ahora usamos append fijo, el chatId está en la col 4 (index 3)
     const chatIdCliente = Number(row[3]);
     if (Number.isFinite(chatIdCliente)) {
-      await bot.telegram.sendMessage(
-        chatIdCliente,
-        `⏳ Tu pedido <b>${orderId}</b> venció por falta de confirmación y fue cancelado automáticamente.`,
-        { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
-      );
+      await bot.telegram.sendMessage(chatIdCliente, `⏳ Tu pedido <b>${orderId}</b> venció y fue cancelado automáticamente.`, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
+      });
     }
   });
 
-  // limpiar estado compra
   sess.cart = [];
   sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
   sess.waiting = null;
@@ -1398,7 +1462,6 @@ bot.start(async (ctx) => {
 
   await showMenu(ctx);
 
-  // salto a producto si viene por link
   if (sess.jumpProdCode) {
     const code = sess.jumpProdCode;
     sess.jumpProdCode = null;
@@ -1423,7 +1486,7 @@ bot.start(async (ctx) => {
 });
 
 /* =========================================================
-   (A) VOLVER UNIVERSAL
+   VOLVER UNIVERSAL
 ========================================================= */
 bot.action("GO_BACK", async (ctx) => {
   await ctx.answerCbQuery();
@@ -1467,14 +1530,35 @@ bot.action("GO_BACK", async (ctx) => {
 });
 
 /* MENÚ */
-bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
+bot.action("GO_MENU", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showMenu(ctx);
+});
 
-bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
-bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
-bot.action("SELLOS_LEVELS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, true); });
-bot.action("SELLOS_BACK", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
-bot.action("MENU_AYUDA", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx); });
-bot.action("MENU_COMPARTIR", async (ctx) => { await ctx.answerCbQuery(); await showShareBot(ctx); });
+bot.action("MENU_CATALOGO", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showCategories(ctx);
+});
+bot.action("MENU_SELLOS", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, false);
+});
+bot.action("SELLOS_LEVELS", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, true);
+});
+bot.action("SELLOS_BACK", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, false);
+});
+bot.action("MENU_AYUDA", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showHelp(ctx);
+});
+bot.action("MENU_COMPARTIR", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showShareBot(ctx);
+});
 
 /* CATEGORÍAS */
 bot.action(/^CAT_(.+)$/i, async (ctx) => {
@@ -1515,7 +1599,10 @@ bot.action("PROD_PREV", async (ctx) => {
 });
 
 /* VER CARRITO */
-bot.action("VIEW_CART", async (ctx) => { await ctx.answerCbQuery(); await showCart(ctx); });
+bot.action("VIEW_CART", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showCart(ctx);
+});
 
 /* QUIERO ESTE -> CANTIDAD */
 bot.action(/^WANT_(.+)$/i, async (ctx) => {
@@ -1570,14 +1657,20 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
 });
 
 /* CART / CHECKOUT */
-bot.action("CHK_DELIVERY", async (ctx) => { await ctx.answerCbQuery(); await showDelivery(ctx); });
+bot.action("CHK_DELIVERY", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showDelivery(ctx);
+});
 
 bot.action("DELIVERY_ENVIO", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
   sess.checkout.entregaTipo = "ENVIO";
   sess.waiting = { type: "NAME", payload: {} };
-  await safeEditOrSendEditable(ctx, { text: `🚚 <b>Envío a domicilio</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard(backMenuRows()) });
+  await safeEditOrSendEditable(ctx, {
+    text: `🚚 <b>Envío a domicilio</b>\n\nDecime tu <b>nombre</b> (solo texto):`,
+    extra: Markup.inlineKeyboard(backMenuRows()),
+  });
 });
 
 bot.action("DELIVERY_EXPRESS", async (ctx) => {
@@ -1585,7 +1678,10 @@ bot.action("DELIVERY_EXPRESS", async (ctx) => {
   const sess = getSess(ctx.chat.id);
   sess.checkout.entregaTipo = "EXPRESS";
   sess.waiting = { type: "NAME", payload: {} };
-  await safeEditOrSendEditable(ctx, { text: `⚡ <b>Envío express</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard(backMenuRows()) });
+  await safeEditOrSendEditable(ctx, {
+    text: `⚡ <b>Envío express</b>\n\nDecime tu <b>nombre</b> (solo texto):`,
+    extra: Markup.inlineKeyboard(backMenuRows()),
+  });
 });
 
 bot.action("DELIVERY_RETIRO", async (ctx) => {
@@ -1593,7 +1689,10 @@ bot.action("DELIVERY_RETIRO", async (ctx) => {
   const sess = getSess(ctx.chat.id);
   sess.checkout.entregaTipo = "RETIRO";
   sess.waiting = { type: "NAME", payload: { retiro: true } };
-  await safeEditOrSendEditable(ctx, { text: `🏪 <b>Retiro en el local</b>\n\nDecime tu <b>nombre</b> (solo texto):`, extra: Markup.inlineKeyboard(backMenuRows()) });
+  await safeEditOrSendEditable(ctx, {
+    text: `🏪 <b>Retiro en el local</b>\n\nDecime tu <b>nombre</b> (solo texto):`,
+    extra: Markup.inlineKeyboard(backMenuRows()),
+  });
 });
 
 bot.action(/^PAY_(.+)$/i, async (ctx) => {
@@ -1622,7 +1721,10 @@ bot.action("CANCEL_FLOW", async (ctx) => {
   sess.cart = [];
   sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
   sess.waiting = null;
-  await safeEditOrSendEditable(ctx, { text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`, extra: mainMenuKeyboard() });
+  await safeEditOrSendEditable(ctx, {
+    text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`,
+    extra: mainMenuKeyboard(),
+  });
 });
 
 bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
@@ -1638,72 +1740,110 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
 
 /* VENDEDOR CONFIRMA/RECHAZA */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
-  await ctx.answerCbQuery("Confirmado ✅");
-  const cfg = await loadConfig();
-  const orderId = ctx.match[1];
-  const row = await setPedidoEstado(orderId, "APROBADO");
-  if (!row) return;
+  try {
+    await ctx.answerCbQuery("Confirmado ✅");
+    const cfg = await loadConfig();
+    const orderId = ctx.match[1];
+    const row = await setPedidoEstado(orderId, "APROBADO");
+    if (!row) return;
 
-  const chatIdCliente = Number(row[3]);
-  const entregaTipo = row[8] || "";
-  const pagoTipo = row[9] || "";
-  const nombre = row[4] || "";
-  const usuario = row[5] || "";
-  const itemsText = row[6] || "";
-  const total = parseNumber(row[7], 0);
-  const direccion = row[10] || "";
-  const telefono = row[11] || "";
-  const notas = row[12] || "";
+    const chatIdCliente = Number(row[3]);
+    const entregaTipo = row[8] || "";
+    const pagoTipo = row[9] || "";
+    const nombre = row[4] || "";
+    const usuario = row[5] || "";
+    const itemsText = row[6] || "";
+    const total = parseNumber(row[7], 0);
+    const direccion = row[10] || "";
+    const telefono = row[11] || "";
+    const notas = row[12] || "";
 
-  const msgConfirm = String(cfg.TextoConfirmacionPedido || "").trim() || "✅ Pago confirmado. Ya estamos preparando tu pedido.";
-  const extraEntrega =
-    entregaTipo === "RETIRO"
-      ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
-      : entregaTipo === "EXPRESS"
-      ? `⚡ Envío express: lo enviamos lo antes posible.`
-      : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
+    const msgConfirm =
+      String(cfg.TextoConfirmacionPedido || "").trim() ||
+      "✅ Transferencia recibida. Pedido confirmado y en preparación.";
 
-  const t = [
-    `✅ <b>Pedido confirmado</b>`,
-    `<code>${orderId}</code>`,
-    `──────────────────`,
-    `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
-    `📦 ${itemsText}`,
-    `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
-    `🚚 <b>Entrega:</b> ${entregaTipo}`,
-    `💳 <b>Pago:</b> ${pagoTipo}`,
-    direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
-    telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
-    notas ? `📝 <b>Notas:</b> ${notas}` : "",
-    `──────────────────`,
-    msgConfirm,
-    extraEntrega,
-  ].filter(Boolean).join("\n");
+    const extraEntrega =
+      entregaTipo === "RETIRO"
+        ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
+        : entregaTipo === "EXPRESS"
+        ? `⚡ Envío express: lo enviamos lo antes posible.`
+        : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(
+            cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || ""
+          ).trim()}`;
 
-  if (Number.isFinite(chatIdCliente)) {
-    await bot.telegram.sendMessage(chatIdCliente, t, {
-      parse_mode: "HTML",
-      reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
-    });
+    const t = [
+      `✅ <b>Pedido confirmado</b>`,
+      `<code>${orderId}</code>`,
+      `──────────────────`,
+      `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
+      `📦 ${itemsText}`,
+      `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
+      `🚚 <b>Entrega:</b> ${entregaTipo}`,
+      `💳 <b>Pago:</b> ${pagoTipo}`,
+      direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
+      telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
+      notas ? `📝 <b>Notas:</b> ${notas}` : "",
+      `──────────────────`,
+      msgConfirm,
+      extraEntrega,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    if (Number.isFinite(chatIdCliente)) {
+      await bot.telegram.sendMessage(chatIdCliente, t, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
+      });
+    }
+
+    // ✅ NO EDITAR EL TEXTO LARGO (evita error). Solo quitar botones y mandar confirmación al vendedor.
+    try {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    } catch {}
+
+    await bot.telegram.sendMessage(
+      ctx.chat.id,
+      `✅ <b>Listo.</b>\n\nPedido <code>${orderId}</code> confirmado.\nSe envió el mensaje al comprador.`,
+      { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
+    );
+  } catch {
+    try {
+      await ctx.answerCbQuery("⚠️ Error al confirmar.", { show_alert: false });
+    } catch {}
   }
-
-  await ctx.editMessageText(`${t}\n\n✅ <b>Estado:</b> APROBADO`, { parse_mode: "HTML" });
 });
 
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
-  await ctx.answerCbQuery("Rechazado ❌");
-  const orderId = ctx.match[1];
-  const row = await setPedidoEstado(orderId, "RECHAZADO");
-  if (!row) return;
-  const chatIdCliente = Number(row[3]);
-  if (Number.isFinite(chatIdCliente)) {
+  try {
+    await ctx.answerCbQuery("Rechazado ❌");
+    const orderId = ctx.match[1];
+    const row = await setPedidoEstado(orderId, "RECHAZADO");
+    if (!row) return;
+
+    const chatIdCliente = Number(row[3]);
+    if (Number.isFinite(chatIdCliente)) {
+      await bot.telegram.sendMessage(
+        chatIdCliente,
+        `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`,
+        { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
+      );
+    }
+
+    try {
+      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
+    } catch {}
+
     await bot.telegram.sendMessage(
-      chatIdCliente,
-      `❌ El pedido <b>${orderId}</b> fue rechazado.\nSi querés, podés hacer uno nuevo desde el menú.`,
+      ctx.chat.id,
+      `❌ <b>Listo.</b>\n\nPedido <code>${orderId}</code> rechazado.\nSe avisó al comprador.`,
       { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
     );
+  } catch {
+    try {
+      await ctx.answerCbQuery("⚠️ Error al rechazar.", { show_alert: false });
+    } catch {}
   }
-  await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
 });
 
 /* HELP CONTACT */
@@ -1810,7 +1950,7 @@ bot.on("text", async (ctx) => {
 
   if (w.type === "NOTES") {
     const t = text.toLowerCase();
-    sess.checkout.notas = (t === "no" || t === "n" || t === "0") ? "" : text.slice(0, 140);
+    sess.checkout.notas = t === "no" || t === "n" || t === "0" ? "" : text.slice(0, 140);
     await safeEditOrSendEditable(ctx, { text: `✅ Datos listos.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
     return;
   }
