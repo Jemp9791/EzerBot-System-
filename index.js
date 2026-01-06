@@ -1844,3 +1844,10 @@ start().catch((e) => {
   console.error("FATAL:", e?.message || e);
   process.exit(1);
 });
+
+// === DEBUG TEMPORAL: capturar file_id correcto de GIFs (animation) ===
+bot.on("animation", async (ctx) => {
+  const fid = ctx.message?.animation?.file_id;
+  const fuid = ctx.message?.animation?.file_unique_id;
+  await ctx.reply(`✅ GIF detectado\nfile_id:\n${fid}\n\nfile_unique_id:\n${fuid}`);
+});
