@@ -406,28 +406,60 @@ async function findPedidoRow(orderId) {
   return { idx, row: rows[idx], rowNumber: idx + 2 };
 }
 
+/* ✅✅ CAMBIO: setPedidoEstado ahora actualiza SOLO la celda de Estado (no toda la fila) */
 async function setPedidoEstado(orderId, newEstado) {
   const found = await findPedidoRow(orderId);
   if (!found) return null;
+
   const { row, rowNumber } = found;
   const hdr = await loadPedidosHeaderMap();
   const estadoIdx = hdr["estado"] ?? 13;
+
+  // 0->A, 25->Z, 26->AA...
+  const colLetter = (n) => {
+    let s = "";
+    let x = n + 1;
+    while (x > 0) {
+      const m = (x - 1) % 26;
+      s = String.fromCharCode(65 + m) + s;
+      x = Math.floor((x - 1) / 26);
+    }
+    return s;
+  };
+
+  const col = colLetter(estadoIdx);
+  await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [[newEstado]]);
+
   row[estadoIdx] = newEstado;
-  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:Z${rowNumber}`, [row]);
   return row;
 }
 
+/* ✅✅ CAMBIO: setPedidoField ahora actualiza SOLO la celda (no toda la fila) */
 async function setPedidoField(orderId, key, value) {
   const found = await findPedidoRow(orderId);
   if (!found) return null;
+
   const { row, rowNumber } = found;
 
   const hdr = await loadPedidosHeaderMap();
   const idx = hdr[normalizeHdrKey(key)];
   if (idx === undefined) return null;
 
+  const colLetter = (n) => {
+    let s = "";
+    let x = n + 1;
+    while (x > 0) {
+      const m = (x - 1) % 26;
+      s = String.fromCharCode(65 + m) + s;
+      x = Math.floor((x - 1) / 26);
+    }
+    return s;
+  };
+
+  const col = colLetter(idx);
+  await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [[value]]);
+
   row[idx] = value;
-  await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:Z${rowNumber}`, [row]);
   return row;
 }
 
@@ -446,8 +478,21 @@ async function expireOldPending() {
     const exp = Date.parse(expIso);
     if (Number.isFinite(exp) && exp <= now) {
       const rowNumber = i + 2;
+
+      const colLetter = (n) => {
+        let s = "";
+        let x = n + 1;
+        while (x > 0) {
+          const m = (x - 1) % 26;
+          s = String.fromCharCode(65 + m) + s;
+          x = Math.floor((x - 1) / 26);
+        }
+        return s;
+      };
+      const col = colLetter(estadoIdx);
+
+      await setSheetValues(`${PEDIDOS_SHEET}!${col}${rowNumber}`, [["VENCIDO"]]);
       r[estadoIdx] = "VENCIDO";
-      await setSheetValues(`${PEDIDOS_SHEET}!A${rowNumber}:Z${rowNumber}`, [r]);
     }
   }
 }
@@ -808,7 +853,6 @@ async function showPayment(ctx) {
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
     extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
   } else {
-    // ✅ MEJORA RETIRO (sin Config nueva): usa NegocioHorario que ya existe
     const h = String(cfg.NegocioHorario || "").trim();
     const base = String(cfg.TextoRetiroLocal || "").trim();
 
@@ -942,7 +986,6 @@ async function showCheckoutTicketPreview(ctx) {
     ...backMenuRows(),
   ]);
 
-  // ✅ Texto más claro (sin tocar el flujo)
   await safeEditOrSend(ctx, {
     text: `🧾 <b>Revisá tu pedido</b>\n\n${t}\n\n👉 Si todo está correcto, confirmá para enviarlo al vendedor.`,
     extra: kb,
@@ -1178,7 +1221,6 @@ bot.action("GO_BACK", async (ctx) => {
 bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
 bot.action("MENU_COMPARTIR", async (ctx) => { await ctx.answerCbQuery(); await showShareBot(ctx); });
 
-/* ✅ FIX: BOTONES QUE NO RESPONDÍAN */
 bot.action("MENU_SELLOS", async (ctx) => {
   await ctx.answerCbQuery();
   const sess = getSess(ctx.chat.id);
@@ -1364,7 +1406,7 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   await safeEditOrSend(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
 });
 
-/* ===================== VENDOR CONFIRM (FIX) ===================== */
+/* ===================== VENDOR CONFIRM ===================== */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
   try {
     await ctx.answerCbQuery("Confirmado ✅");
@@ -1413,7 +1455,6 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
       await setPedidoField(orderId, "SellosAcreditados", "SI");
     }
 
-    // ✅ Texto pedido por vos (sin Config nueva): confirmación + “te avisamos cuando esté listo”
     const msgConfirm =
       String(cfg.TextoConfirmacionPedido || "").trim() ||
       "✅ Transferencia recibida. Pedido confirmado y en preparación. Te avisamos cuando esté listo.";
@@ -1457,7 +1498,6 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
 
     const kbVendDone = Markup.inlineKeyboard([[Markup.button.callback("🏠 Menú", "GO_MENU")]]);
 
-    // ✅ FIX: si no puede editar, manda nuevo mensaje y no falla (evita “Error al confirmar” falso)
     try {
       await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> confirmado.\n📲 El comprador fue notificado.`, {
         parse_mode: "HTML",
@@ -1547,7 +1587,6 @@ bot.on("text", async (ctx) => {
     sess.checkout.direccion = text.slice(0, 140);
     sess.waiting = { type: "NOTES", payload: {} };
 
-    // ✅ Pide horario preferido SOLO si es envío/express (guardado en "Notas", sin campos nuevos)
     const entrega = String(sess.checkout.entregaTipo || "").toUpperCase();
     const ask =
       (entrega === "ENVIO" || entrega === "EXPRESS")
