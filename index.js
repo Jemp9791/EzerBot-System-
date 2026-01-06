@@ -19,7 +19,8 @@ const PORT = process.env.PORT || 10000;
 
 if (!TelegramBotToken) throw new Error("Falta TelegramBotToken");
 if (!GOOGLE_SHEET_ID) throw new Error("Falta GOOGLE_SHEET_ID");
-if (!GOOGLE_SERVICE_ACCOUNT_B64) throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
+if (!GOOGLE_SERVICE_ACCOUNT_B64)
+  throw new Error("Falta GOOGLE_SERVICE_ACCOUNT_B64");
 
 /* =========================================================
    GOOGLE AUTH
@@ -30,7 +31,9 @@ function decodeServiceAccountB64(b64) {
   try {
     obj = JSON.parse(raw);
   } catch {
-    throw new Error("GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON válido.");
+    throw new Error(
+      "GOOGLE_SERVICE_ACCOUNT_B64 decodifica pero NO es JSON válido."
+    );
   }
   return obj;
 }
@@ -85,7 +88,9 @@ async function ensureSheet(sheetName, headers) {
   if (!existing.includes(sheetName)) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: GOOGLE_SHEET_ID,
-      requestBody: { requests: [{ addSheet: { properties: { title: sheetName } } }] },
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
+      },
     });
     await setSheetValues(`${sheetName}!A1`, [headers]);
     return;
@@ -101,7 +106,9 @@ async function ensureSheet(sheetName, headers) {
 
   // si faltan columnas de headers, las agregamos al final (no tocamos las existentes)
   const currentLower = new Set(current.map((h) => h.toLowerCase()));
-  const missing = headers.filter((h) => !currentLower.has(String(h).toLowerCase()));
+  const missing = headers.filter(
+    (h) => !currentLower.has(String(h).toLowerCase())
+  );
   if (missing.length) {
     const merged = [...current, ...missing];
     await setSheetValues(`${sheetName}!A1`, [merged]);
@@ -172,7 +179,10 @@ function roundARS(n) {
 function normalizeHeaders(headerRow) {
   const map = {};
   headerRow.forEach((h, i) => {
-    const key = String(h || "").trim().toLowerCase().replace(/\s+/g, "");
+    const key = String(h || "")
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, "");
     if (key) map[key] = i;
   });
   return map;
@@ -181,7 +191,8 @@ function normalizeHeaders(headerRow) {
 function pick(row, hmap, keys, def = "") {
   for (const k of keys) {
     const idx = hmap[k];
-    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "") return row[idx];
+    if (idx !== undefined && row[idx] !== undefined && row[idx] !== "")
+      return row[idx];
   }
   return def;
 }
@@ -218,16 +229,25 @@ async function loadCatalogRaw() {
   if (!rows.length) return { items: [], headers: {} };
   const headerRow = rows[0];
   const hmap = normalizeHeaders(headerRow);
-  const data = rows.slice(1).filter((r) => r.some((c) => String(c || "").trim() !== ""));
+  const data = rows
+    .slice(1)
+    .filter((r) => r.some((c) => String(c || "").trim() !== ""));
 
   const items = data.map((r, i) => {
-    const code = String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() || `P${i + 1}`;
+    const code =
+      String(pick(r, hmap, ["codigo", "codigoproducto", "id", "sku"], "")).trim() ||
+      `P${i + 1}`;
     const name = String(pick(r, hmap, ["nombre", "producto", "name"], "Producto")).trim();
     const price = parseNumber(pick(r, hmap, ["precio", "price"], 0), 0);
-    const pricePerKg = parseNumber(pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0), 0);
+    const pricePerKg = parseNumber(
+      pick(r, hmap, ["precioporkg", "preciokg", "precio_kg"], 0),
+      0
+    );
     const unitRaw = pick(r, hmap, ["unidad", "unit", "tipo", "medida"], "");
     const unit = inferUnit(unitRaw);
-    const cat = String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() || "General";
+    const cat =
+      String(pick(r, hmap, ["categoria", "categoría", "rubro"], "General")).trim() ||
+      "General";
     const img = String(pick(r, hmap, ["imagenurl", "imagen", "foto", "urlimagen"], "")).trim();
     const desc = String(pick(r, hmap, ["descripcion", "descripción", "detalle"], "")).trim();
     const isCombo = String(pick(r, hmap, ["combo", "escombo"], "")).trim();
@@ -372,7 +392,8 @@ function normalizeHdrKey(h) {
 
 async function loadPedidosHeaderMap() {
   const now = Date.now();
-  if (CACHE.pedidosHdr.value && now - CACHE.pedidosHdr.ts < HDR_TTL_MS) return CACHE.pedidosHdr.value;
+  if (CACHE.pedidosHdr.value && now - CACHE.pedidosHdr.ts < HDR_TTL_MS)
+    return CACHE.pedidosHdr.value;
   if (CACHE.pedidosHdr.inflight) return CACHE.pedidosHdr.inflight;
 
   CACHE.pedidosHdr.inflight = (async () => {
@@ -395,7 +416,14 @@ async function loadPedidosHeaderMap() {
   return CACHE.pedidosHdr.inflight;
 }
 
-async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal = 0, refBy = "" }) {
+async function upsertCliente({
+  chatId,
+  nombre,
+  usuario,
+  addSellos = 0,
+  addTotal = 0,
+  refBy = "",
+}) {
   const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
   const idx = rows.findIndex((r) => String(r[0] || "") === String(chatId));
   const now = new Date().toISOString();
@@ -423,23 +451,27 @@ async function upsertCliente({ chatId, nombre, usuario, addSellos = 0, addTotal 
   const newTotal = currentTotal + addTotal;
 
   const rowNumber = idx + 2;
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
-    String(chatId),
-    nombre || row[1] || "",
-    usuario || row[2] || "",
-    newSellos,
-    newTotal,
-    now,
-    row[6] || refBy || "",
-    currentRefGanados,
-  ]]);
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [
+    [
+      String(chatId),
+      nombre || row[1] || "",
+      usuario || row[2] || "",
+      newSellos,
+      newTotal,
+      now,
+      row[6] || refBy || "",
+      currentRefGanados,
+    ],
+  ]);
 
   return { sellos: newSellos, total: newTotal, isNew: false };
 }
 
 async function addSelloReferido(chatIdReferente) {
   const rows = await getSheetValues(`${CLIENTES_SHEET}!A2:H`);
-  const idx = rows.findIndex((r) => String(r[0] || "") === String(chatIdReferente));
+  const idx = rows.findIndex(
+    (r) => String(r[0] || "") === String(chatIdReferente)
+  );
   if (idx === -1) return;
 
   const row = rows[idx];
@@ -447,16 +479,18 @@ async function addSelloReferido(chatIdReferente) {
   const currentRefGanados = parseNumber(row[7], 0);
   const rowNumber = idx + 2;
 
-  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [[
-    row[0] || "",
-    row[1] || "",
-    row[2] || "",
-    currentSellos + 1,
-    row[4] || 0,
-    new Date().toISOString(),
-    row[6] || "",
-    currentRefGanados + 1,
-  ]]);
+  await setSheetValues(`${CLIENTES_SHEET}!A${rowNumber}:H${rowNumber}`, [
+    [
+      row[0] || "",
+      row[1] || "",
+      row[2] || "",
+      currentSellos + 1,
+      row[4] || 0,
+      new Date().toISOString(),
+      row[6] || "",
+      currentRefGanados + 1,
+    ],
+  ]);
 }
 
 async function findPedidoRow(orderId) {
@@ -577,7 +611,10 @@ async function safeEditOrSend(ctx, payload) {
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [Markup.button.callback("🧀 Catálogo", "MENU_CATALOGO")],
-    [Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"), Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA")],
+    [
+      Markup.button.callback("🎟️ Sellos", "MENU_SELLOS"),
+      Markup.button.callback("ℹ️ Ayuda", "MENU_AYUDA"),
+    ],
     [Markup.button.callback("📣 Compartir", "MENU_COMPARTIR")],
   ]);
 }
@@ -587,10 +624,7 @@ function goMenuRow() {
 }
 
 function backMenuRows() {
-  return [
-    [Markup.button.callback("⬅️ Volver", "GO_BACK")],
-    goMenuRow(),
-  ];
+  return [[Markup.button.callback("⬅️ Volver", "GO_BACK")], goMenuRow()];
 }
 
 /* =========================================================
@@ -603,7 +637,8 @@ function productCaption(cfg, p, index, total) {
   lines.push(`<b>${p.name}</b>`);
 
   if (showPrice) {
-    if (p.unit === "g" && p.pricePerKg > 0) lines.push(`💰 <b>${money(p.pricePerKg, moneda)}</b> / kg`);
+    if (p.unit === "g" && p.pricePerKg > 0)
+      lines.push(`💰 <b>${money(p.pricePerKg, moneda)}</b> / kg`);
     else lines.push(`💰 <b>${money(p.price, moneda)}</b>`);
   }
 
@@ -613,11 +648,14 @@ function productCaption(cfg, p, index, total) {
   return lines.join("\n");
 }
 
-// ✅ Ajustado: NO mostrar botón "Ver carrito" en la ficha de producto
 function productKeyboard(p) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
-    [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
+    [
+      Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`),
+      Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`),
+    ],
+    // ✅ NO mostramos "Ver carrito" en producto
     ...backMenuRows(),
   ]);
 }
@@ -634,7 +672,22 @@ function fmtQty(it) {
   return `${it.qty} u`;
 }
 
-function ticketPOS(cfg, { orderId, items, total, entregaTipo, pagoTipo, nombre, telefono, direccion, notas, estado, costoEnvio = 0 }) {
+function ticketPOS(
+  cfg,
+  {
+    orderId,
+    items,
+    total,
+    entregaTipo,
+    pagoTipo,
+    nombre,
+    telefono,
+    direccion,
+    notas,
+    estado,
+    costoEnvio = 0,
+  }
+) {
   const moneda = cfg.Moneda || "ARS";
   const lines = [];
   lines.push(`🧾 <b>TICKET</b>`);
@@ -685,7 +738,10 @@ function shareKeyboard(links) {
 function sellosTextShort(cfg, sellos) {
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const moneda = cfg.Moneda || "ARS";
-  const tip = `✨ Tip: si alguien entra por tu link y compra, ganás <b>${parseNumber(cfg.BonusSellosShare || "1", 1)}</b> sello(s).`;
+  const tip = `✨ Tip: si alguien entra por tu link y compra, ganás <b>${parseNumber(
+    cfg.BonusSellosShare || "1",
+    1
+  )}</b> sello(s).`;
   return [
     `🎟️ <b>Sellos</b>`,
     `Tenés <b>${sellos}</b> sellos acumulados.`,
@@ -756,7 +812,6 @@ async function showMenu(ctx) {
   if (dire) header.push(`📍 ${dire}`);
   if (hora) header.push(`🕒 ${hora}`);
 
-  // ⚠️ Telegram caption max ~1024. Si te pasás, falla el envío del GIF.
   let caption = `${header.join("\n")}\n\n${desc}\n\nElegí una opción 👇`;
   if (caption.length > 1000) caption = caption.slice(0, 980) + "…";
 
@@ -800,7 +855,8 @@ async function showCategories(ctx) {
   for (let i = 0; i < cats.length; i += 2) {
     const row = [];
     row.push(Markup.button.callback(`📁 ${cats[i]}`, `CAT_${encodeURIComponent(cats[i])}`));
-    if (cats[i + 1]) row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
+    if (cats[i + 1])
+      row.push(Markup.button.callback(`📁 ${cats[i + 1]}`, `CAT_${encodeURIComponent(cats[i + 1])}`));
     buttons.push(row);
   }
 
@@ -852,7 +908,6 @@ async function showSellos(ctx, showLevels = false) {
   const me = rows.find((r) => String(r[0] || "") === String(ctx.chat.id));
   const sellos = me ? parseNumber(me[3], 0) : 0;
 
-  // ✅ ampliamos posibles keys de tarjeta
   const cardUrl = String(
     cfg.CARD_URL ||
       cfg.CardURL ||
@@ -1063,6 +1118,7 @@ function payKeyboard(cfg) {
   return Markup.inlineKeyboard(rows);
 }
 
+// ✅ showCart con botón "Finalizar compra" (NO "Elegir entrega")
 async function showCart(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
@@ -1090,11 +1146,8 @@ async function showCart(ctx) {
   lines.push(`──────────────────`);
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
-  // ✅ Ajustado: si ya eligió entrega y pago, mostrar "Finalizar compra" en lugar de "Elegir entrega"
-  const readyToFinalize = !!(sess.checkout?.entregaTipo && sess.checkout?.pagoTipo);
-
   const kb = Markup.inlineKeyboard([
-    [Markup.button.callback(readyToFinalize ? "✅ Finalizar compra" : "🚚 Elegir entrega", readyToFinalize ? "FINALIZE_ORDER" : "CHK_DELIVERY")],
+    [Markup.button.callback("✅ Finalizar compra", "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
     [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
     ...backMenuRows(),
@@ -1125,7 +1178,10 @@ async function showPayment(ctx) {
 
   let extraText = "";
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") {
-    extraText = `\n\n🚚 Costo de envío: <b>${money(costoEnvio, moneda)}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
+    extraText = `\n\n🚚 Costo de envío: <b>${money(
+      costoEnvio,
+      moneda
+    )}</b>\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
   } else {
     extraText = `\n\n🏪 ${String(cfg.TextoRetiroLocal || "").trim()}`;
   }
@@ -1142,7 +1198,9 @@ async function showPayment(ctx) {
 function buildOrderId() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  return `TQ-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(
+    d.getHours()
+  )}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
 }
 
 function buildTransferDataText(cfg) {
@@ -1165,7 +1223,9 @@ function getWhatsappOrderLink(cfg, orderId) {
   const waBase = link || (tel ? `https://wa.me/${tel}` : "");
   if (!waBase) return "";
 
-  const text = encodeURIComponent(`Hola! Te envío el comprobante de transferencia del pedido ${orderId}.`);
+  const text = encodeURIComponent(
+    `Hola! Te envío el comprobante de transferencia del pedido ${orderId}.`
+  );
   if (waBase.includes("?text=")) return waBase;
   return waBase.includes("?") ? `${waBase}&text=${text}` : `${waBase}?text=${text}`;
 }
@@ -1190,14 +1250,17 @@ async function finalizeOrderCreate(ctx) {
   const costoEnvio = parseNumber(cfg.CostoEnvio || "0", 0);
 
   let total = cartTotal(sess.cart);
-  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total = roundARS(total + costoEnvio);
+  if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS")
+    total = roundARS(total + costoEnvio);
 
   // ✅ Calculamos sellos pero NO acreditamos acá (se acredita al confirmar)
   const usaSellos = parseYes(cfg.UsaSellos ?? "SI");
   const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
   const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
 
-  const nombre = sess.checkout.nombre || `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
+  const nombre =
+    sess.checkout.nombre ||
+    `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
   const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
   const telefono = sess.checkout.telefono || "";
   const direccion = sess.checkout.direccion || "";
@@ -1227,7 +1290,7 @@ async function finalizeOrderCreate(ctx) {
     "PENDIENTE",
     sess.refBy ? String(sess.refBy) : "",
     sellosGanados,
-    "NO", // SellosAcreditados
+    "NO",
   ]);
 
   const vendedorIdReal = String(cfg.VendedorChatId || "").trim();
@@ -1277,7 +1340,8 @@ async function finalizeOrderCreate(ctx) {
   const extra = [];
   extra.push(`⏳ Este pedido queda <b>pendiente</b> hasta que el vendedor confirme el pago.`);
   extra.push(`🕐 Si no se confirma en <b>1 hora</b>, se cancela automáticamente.`);
-  if (sellosGanados > 0) extra.push(`🎟️ Al confirmarse el pago, se acreditan <b>${sellosGanados}</b> sello(s).`);
+  if (sellosGanados > 0)
+    extra.push(`🎟️ Al confirmarse el pago, se acreditan <b>${sellosGanados}</b> sello(s).`);
 
   if (String(pagoTipo).toUpperCase().includes("TRANSF")) {
     extra.push("");
@@ -1413,14 +1477,35 @@ bot.action("GO_BACK", async (ctx) => {
 });
 
 /* MENÚ */
-bot.action("GO_MENU", async (ctx) => { await ctx.answerCbQuery(); await showMenu(ctx); });
+bot.action("GO_MENU", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showMenu(ctx);
+});
 
-bot.action("MENU_CATALOGO", async (ctx) => { await ctx.answerCbQuery(); await showCategories(ctx); });
-bot.action("MENU_SELLOS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
-bot.action("SELLOS_LEVELS", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, true); });
-bot.action("SELLOS_BACK", async (ctx) => { await ctx.answerCbQuery(); await showSellos(ctx, false); });
-bot.action("MENU_AYUDA", async (ctx) => { await ctx.answerCbQuery(); await showHelp(ctx); });
-bot.action("MENU_COMPARTIR", async (ctx) => { await ctx.answerCbQuery(); await showShareBot(ctx); });
+bot.action("MENU_CATALOGO", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showCategories(ctx);
+});
+bot.action("MENU_SELLOS", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, false);
+});
+bot.action("SELLOS_LEVELS", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, true);
+});
+bot.action("SELLOS_BACK", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showSellos(ctx, false);
+});
+bot.action("MENU_AYUDA", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showHelp(ctx);
+});
+bot.action("MENU_COMPARTIR", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showShareBot(ctx);
+});
 
 /* CATEGORÍAS */
 bot.action(/^CAT_(.+)$/i, async (ctx) => {
@@ -1502,7 +1587,8 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
     : `${botLink}${botLink.includes("?") ? "&" : "?"}start=ref_${ref}__prod_${encodeURIComponent(p.code)}`;
 
   const moneda = cfg.Moneda || "ARS";
-  const priceTxt = p.unit === "g" && p.pricePerKg > 0 ? `${money(p.pricePerKg, moneda)} / kg` : money(p.price, moneda);
+  const priceTxt =
+    p.unit === "g" && p.pricePerKg > 0 ? `${money(p.pricePerKg, moneda)} / kg` : money(p.price, moneda);
   const text = `🧀 ${cfg.NegocioNombre || "Todo Queso"}\n\nPromo: ${p.name} — ${priceTxt}\nTocá el link para ver y comprar 👇`;
   const links = buildShareLinks({ botLink: deepLink, text });
 
@@ -1513,7 +1599,10 @@ bot.action(/^SHARE_PROD_(.+)$/i, async (ctx) => {
 });
 
 /* CART / CHECKOUT */
-bot.action("CHK_DELIVERY", async (ctx) => { await ctx.answerCbQuery(); await showDelivery(ctx); });
+bot.action("CHK_DELIVERY", async (ctx) => {
+  await ctx.answerCbQuery();
+  await showDelivery(ctx);
+});
 
 bot.action("DELIVERY_ENVIO", async (ctx) => {
   await ctx.answerCbQuery();
@@ -1574,7 +1663,10 @@ bot.action("CANCEL_FLOW", async (ctx) => {
   sess.cart = [];
   sess.checkout = { entregaTipo: null, pagoTipo: null, nombre: "", telefono: "", direccion: "", notas: "" };
   sess.waiting = null;
-  await safeEditOrSend(ctx, { text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`, extra: mainMenuKeyboard() });
+  await safeEditOrSend(ctx, {
+    text: `❌ Compra cancelada.\n\nSi querés, volvés al catálogo cuando quieras.`,
+    extra: mainMenuKeyboard(),
+  });
 });
 
 bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
@@ -1582,110 +1674,141 @@ bot.action(/^CANCEL_(TQ-.+)$/i, async (ctx) => {
   const orderId = ctx.match[1];
   const row = await setPedidoEstado(orderId, "CANCELADO");
   if (!row) {
-    await safeEditOrSend(ctx, { text: "No pude cancelar ese pedido (no lo encontré).", extra: mainMenuKeyboard() });
+    await safeEditOrSend(ctx, {
+      text: "No pude cancelar ese pedido (no lo encontré).",
+      extra: mainMenuKeyboard(),
+    });
     return;
   }
-  await safeEditOrSend(ctx, { text: `❌ Pedido <b>${orderId}</b> cancelado.`, extra: mainMenuKeyboard() });
+  await safeEditOrSend(ctx, {
+    text: `❌ Pedido <b>${orderId}</b> cancelado.`,
+    extra: mainMenuKeyboard(),
+  });
 });
 
 /* =========================================================
    VENDEDOR CONFIRMA/RECHAZA
-   ✅ Acredita sellos y total comprado SOLO al confirmar, 1 vez
-   ✅ Al confirmar: avisa al comprador y limpia botones del vendedor
 ========================================================= */
 bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
-  await ctx.answerCbQuery("Confirmado ✅");
-  const cfg = await loadConfig();
-  const orderId = ctx.match[1];
+  try {
+    await ctx.answerCbQuery("Confirmado ✅");
+    const cfg = await loadConfig();
+    const orderId = ctx.match[1];
 
-  const found = await findPedidoRow(orderId);
-  if (!found) return;
+    const found = await findPedidoRow(orderId);
+    if (!found) return;
 
-  const hdr = await loadPedidosHeaderMap();
-  const row = found.row;
+    const hdr = await loadPedidosHeaderMap();
+    const row = found.row;
 
-  const chatIdCliente = Number(row[hdr["chatidcliente"] ?? 3]);
-  const entregaTipo = row[hdr["entregatipo"] ?? 8] || "";
-  const pagoTipo = row[hdr["pagotipo"] ?? 9] || "";
-  const nombre = row[hdr["nombrecliente"] ?? 4] || "";
-  const usuario = row[hdr["usuariocliente"] ?? 5] || "";
-  const itemsText = row[hdr["items"] ?? 6] || "";
-  const total = parseNumber(row[hdr["total"] ?? 7], 0);
-  const direccion = row[hdr["direccion"] ?? 10] || "";
-  const telefono = row[hdr["telefono"] ?? 11] || "";
-  const notas = row[hdr["notas"] ?? 12] || "";
-  const refBy = row[hdr["refby"] ?? 14] || "";
+    const chatIdCliente = Number(row[hdr["chatidcliente"] ?? 3]);
+    const entregaTipo = row[hdr["entregatipo"] ?? 8] || "";
+    const pagoTipo = row[hdr["pagotipo"] ?? 9] || "";
+    const nombre = row[hdr["nombrecliente"] ?? 4] || "";
+    const usuario = row[hdr["usuariocliente"] ?? 5] || "";
+    const itemsText = row[hdr["items"] ?? 6] || "";
+    const total = parseNumber(row[hdr["total"] ?? 7], 0);
+    const direccion = row[hdr["direccion"] ?? 10] || "";
+    const telefono = row[hdr["telefono"] ?? 11] || "";
+    const notas = row[hdr["notas"] ?? 12] || "";
+    const refBy = row[hdr["refby"] ?? 14] || "";
 
-  const sellosGanados = parseNumber(row[hdr["sellosganados"] ?? 15], 0);
-  const yaAcreditados = parseYes(row[hdr["sellosacreditados"] ?? 16]);
+    const sellosGanados = parseNumber(row[hdr["sellosganados"] ?? 15], 0);
+    const yaAcreditados = parseYes(row[hdr["sellosacreditados"] ?? 16]);
 
-  // ✅ marcar estado aprobado
-  await setPedidoEstado(orderId, "APROBADO");
+    await setPedidoEstado(orderId, "APROBADO");
 
-  // ✅ acreditar sellos y total comprado una sola vez
-  let newSellosTotal = null;
-  if (!yaAcreditados && Number.isFinite(chatIdCliente)) {
-    const resCli = await upsertCliente({
-      chatId: chatIdCliente,
-      nombre,
-      usuario,
-      addSellos: sellosGanados,
-      addTotal: total,
-      refBy: refBy ? String(refBy) : "",
-    });
-    newSellosTotal = resCli.sellos;
+    let newSellosTotal = null;
+    if (!yaAcreditados && Number.isFinite(chatIdCliente)) {
+      const resCli = await upsertCliente({
+        chatId: chatIdCliente,
+        nombre,
+        usuario,
+        addSellos: sellosGanados,
+        addTotal: total,
+        refBy: refBy ? String(refBy) : "",
+      });
+      newSellosTotal = resCli.sellos;
 
-    const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
-    if (refBy) {
-      for (let i = 0; i < bonusShare; i++) await addSelloReferido(refBy);
+      const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
+      if (refBy) {
+        for (let i = 0; i < bonusShare; i++) await addSelloReferido(refBy);
+      }
+
+      await setPedidoField(orderId, "SellosAcreditados", "SI");
     }
 
-    await setPedidoField(orderId, "SellosAcreditados", "SI");
+    const msgConfirm =
+      String(cfg.TextoConfirmacionPedido || "").trim() ||
+      "✅ Transferencia recibida. Tu pedido ya está confirmado y en preparación.";
+
+    const extraEntrega =
+      entregaTipo === "RETIRO"
+        ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
+        : entregaTipo === "EXPRESS"
+        ? `⚡ Envío express: lo enviamos lo antes posible.`
+        : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(
+            cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || ""
+          ).trim()}`;
+
+    const sellosLine =
+      sellosGanados > 0
+        ? `🎟️ <b>Sellos acreditados:</b> +${sellosGanados}${
+            newSellosTotal !== null ? ` (Total: ${newSellosTotal})` : ""
+          }`
+        : "";
+
+    const t = [
+      `✅ <b>Pedido confirmado</b>`,
+      `<code>${orderId}</code>`,
+      `──────────────────`,
+      `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
+      `📦 ${itemsText}`,
+      `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
+      sellosLine,
+      `🚚 <b>Entrega:</b> ${entregaTipo}`,
+      `💳 <b>Pago:</b> ${pagoTipo}`,
+      direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
+      telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
+      notas ? `📝 <b>Notas:</b> ${notas}` : "",
+      `──────────────────`,
+      msgConfirm,
+      `🧑‍🍳 <b>Estado:</b> EN PREPARACIÓN`,
+      extraEntrega,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    if (Number.isFinite(chatIdCliente)) {
+      await bot.telegram.sendMessage(chatIdCliente, t, {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("🏠 Menú", "GO_MENU")],
+          [Markup.button.callback("⬅️ Volver", "GO_BACK")],
+        ]).reply_markup,
+      });
+    }
+
+    await ctx.reply(
+      `✅ <b>Pedido confirmado</b>\n<code>${orderId}</code>\n📩 Se envió la confirmación al comprador.\n🧑‍🍳 Estado: EN PREPARACIÓN`,
+      {
+        parse_mode: "HTML",
+        reply_markup: Markup.inlineKeyboard([
+          [Markup.button.callback("🏠 Menú", "GO_MENU")],
+          [Markup.button.callback("⬅️ Volver", "GO_BACK")],
+        ]).reply_markup,
+      }
+    );
+
+    try {
+      await ctx.editMessageText(`${t}\n\n✅ <b>Estado:</b> APROBADO`, { parse_mode: "HTML" });
+    } catch {}
+  } catch (e) {
+    try {
+      await ctx.reply("⚠️ Error al confirmar.", { parse_mode: "HTML" });
+    } catch {}
+    console.error("V_CONFIRM error:", e);
   }
-
-  const msgConfirm = String(cfg.TextoConfirmacionPedido || "").trim() || "✅ Pago confirmado. Ya estamos preparando tu pedido.";
-  const extraEntrega =
-    entregaTipo === "RETIRO"
-      ? `🏪 Podés retirarlo dentro del horario del local.\n${String(cfg.NegocioHorario || "").trim()}`
-      : entregaTipo === "EXPRESS"
-      ? `⚡ Envío express: lo enviamos lo antes posible.`
-      : `🚚 Envío a domicilio: coordinamos la entrega según el horario.\n${String(cfg.TextoEnvíoDomicilio || cfg.TextoEnvioDomicilio || "").trim()}`;
-
-  const sellosLine =
-    sellosGanados > 0
-      ? `🎟️ <b>Sellos acreditados:</b> +${sellosGanados}${newSellosTotal !== null ? ` (Total: ${newSellosTotal})` : ""}`
-      : "";
-
-  const t = [
-    `✅ <b>Pedido confirmado</b>`,
-    `<code>${orderId}</code>`,
-    `──────────────────`,
-    `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
-    `📦 ${itemsText}`,
-    `🧮 <b>Total:</b> ${money(total, cfg.Moneda || "ARS")}`,
-    sellosLine,
-    `🚚 <b>Entrega:</b> ${entregaTipo}`,
-    `💳 <b>Pago:</b> ${pagoTipo}`,
-    direccion ? `📍 <b>Dirección:</b> ${direccion}` : "",
-    telefono ? `📞 <b>Tel:</b> ${telefono}` : "",
-    notas ? `📝 <b>Notas:</b> ${notas}` : "",
-    `──────────────────`,
-    msgConfirm,
-    extraEntrega,
-  ].filter(Boolean).join("\n");
-
-  if (Number.isFinite(chatIdCliente)) {
-    await bot.telegram.sendMessage(chatIdCliente, t, {
-      parse_mode: "HTML",
-      reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup,
-    });
-  }
-
-  // ✅ limpiar botones al vendedor (y dejar estado final)
-  try { await ctx.editMessageReplyMarkup(undefined); } catch {}
-  try {
-    await ctx.editMessageText(`✅ Pedido <b>${orderId}</b> APROBADO.\n\n${msgConfirm}`, { parse_mode: "HTML" });
-  } catch {}
 });
 
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
@@ -1704,9 +1827,7 @@ bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
       { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
     );
   }
-
-  try { await ctx.editMessageReplyMarkup(undefined); } catch {}
-  try { await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" }); } catch {}
+  await ctx.editMessageText(`❌ Pedido <b>${orderId}</b> RECHAZADO.`, { parse_mode: "HTML" });
 });
 
 /* HELP CONTACT */
@@ -1745,8 +1866,16 @@ bot.on("text", async (ctx) => {
 
   if (w.type === "HELP_MSG") {
     const ok = await forwardToVendedor(cfg, ctx, text);
-    if (ok) await safeEditOrSend(ctx, { text: `✅ Listo. Ya le mandé tu mensaje al vendedor.`, extra: mainMenuKeyboard() });
-    else await safeEditOrSend(ctx, { text: `Falta <b>VendedorChatId</b> en Config para enviar el mensaje.`, extra: mainMenuKeyboard() });
+    if (ok)
+      await safeEditOrSend(ctx, {
+        text: `✅ Listo. Ya le mandé tu mensaje al vendedor.`,
+        extra: mainMenuKeyboard(),
+      });
+    else
+      await safeEditOrSend(ctx, {
+        text: `Falta <b>VendedorChatId</b> en Config para enviar el mensaje.`,
+        extra: mainMenuKeyboard(),
+      });
     return;
   }
 
@@ -1754,7 +1883,10 @@ bot.on("text", async (ctx) => {
     const { code, qtyType } = w.payload || {};
     const p = sess.productsInView.find((x) => x.code === code);
     if (!p) {
-      await safeEditOrSend(ctx, { text: "No encontré el producto. Volvé al catálogo.", extra: mainMenuKeyboard() });
+      await safeEditOrSend(ctx, {
+        text: "No encontré el producto. Volvé al catálogo.",
+        extra: mainMenuKeyboard(),
+      });
       return;
     }
 
@@ -1789,7 +1921,10 @@ bot.on("text", async (ctx) => {
     const isRetiro = !!(w.payload && w.payload.retiro);
 
     if (isRetiro) {
-      await safeEditOrSend(ctx, { text: `✅ Listo.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
+      await safeEditOrSend(ctx, {
+        text: `✅ Listo.\n\nAhora elegí el método de pago 👇`,
+        extra: payKeyboard(cfg),
+      });
       return;
     }
 
@@ -1813,8 +1948,11 @@ bot.on("text", async (ctx) => {
 
   if (w.type === "NOTES") {
     const t = text.toLowerCase();
-    sess.checkout.notas = (t === "no" || t === "n" || t === "0") ? "" : text.slice(0, 140);
-    await safeEditOrSend(ctx, { text: `✅ Datos listos.\n\nAhora elegí el método de pago 👇`, extra: payKeyboard(cfg) });
+    sess.checkout.notas = t === "no" || t === "n" || t === "0" ? "" : text.slice(0, 140);
+    await safeEditOrSend(ctx, {
+      text: `✅ Datos listos.\n\nAhora elegí el método de pago 👇`,
+      extra: payKeyboard(cfg),
+    });
     return;
   }
 });
