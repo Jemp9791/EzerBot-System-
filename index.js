@@ -845,7 +845,7 @@ async function showShareBot(ctx) {
       parse_mode: "HTML",
       reply_markup: kb.reply_markup,
     });
-  } else if (gifUrl && gifUrl.startsWith("http")) {
+  else if (gifUrl && gifUrl.startsWith("http")) {
     await ctx.replyWithAnimation(gifUrl, {
       caption,
       parse_mode: "HTML",
