@@ -799,15 +799,12 @@ async function showHelp(ctx) {
     ...backMenuRows(),
   ]);
 
-  // Se hojea como catálogo 
-
-   await safeEditOrSend(ctx, {
+  await safeEditOrSend(ctx, {
   animation: gifId || gifUrl,
-  text,
+  text: caption,
   extra: kb,
 });
-   else {
-    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
+   
   }
 }
 
