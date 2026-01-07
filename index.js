@@ -799,20 +799,14 @@ async function showHelp(ctx) {
     ...backMenuRows(),
   ]);
 
-  // FIJO: no editar (para evitar fallos)
-  if (gifId) {
-    await ctx.replyWithAnimation(gifId, {
-      caption: text,
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
-  } else if (gifUrl && gifUrl.startsWith("http")) {
-    await ctx.replyWithAnimation(gifUrl, {
-      caption: text,
-      parse_mode: "HTML",
-      reply_markup: kb.reply_markup,
-    });
-  } else {
+  // Se hojear como catálogo 
+
+   await safeEditOrSend(ctx, {
+  animation: gifId || gifUrl,
+  text,
+  extra: kb,
+});
+   else {
     await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb.reply_markup });
   }
 }
