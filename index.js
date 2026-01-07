@@ -1020,7 +1020,7 @@ async function showShareBot(ctx) {
     String(cfg.TextoCompartirBot || "").trim() ||
     `
 
-📧 Contacto: ${cfg.NegocioEmail || ""} 🧀 Comprá en ${cfg.NegocioNombre || "Todo Queso"} desde este bot: elegí productos, cantidad y forma de entrega en 1 minuto.;
+📧 Contacto: ${cfg.NegocioEmail || ""}`🧀 Comprá en ${cfg.NegocioNombre || "Todo Queso"} desde este bot: elegí productos, cantidad y forma de entrega en 1 minuto.`;
 
   if (emailSistema && !textShare.toLowerCase().includes(emailSistema.toLowerCase())) {
     textShare += `\n\n📩 Consultas: ${emailSistema}`;
