@@ -805,8 +805,6 @@ async function showHelp(ctx) {
   extra: kb,
 });     }
    
-}
-
 async function showShareBot(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
