@@ -851,7 +851,7 @@ async function showShareBot(ctx) {
       parse_mode: "HTML",
       reply_markup: kb.reply_markup,
     });
-  } else {
+  else {
     await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb.reply_markup });
   }
 
