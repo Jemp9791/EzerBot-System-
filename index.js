@@ -535,7 +535,6 @@ function productKeyboard(p) {
   return Markup.inlineKeyboard([
     [Markup.button.callback("⬅️", "PROD_PREV"), Markup.button.callback("➡️", "PROD_NEXT")],
     [Markup.button.callback("✅ Quiero éste", `WANT_${p.code}`), Markup.button.callback("🔗 Compartir", `SHARE_PROD_${p.code}`)],
-    [Markup.button.callback("🛒 Ver carrito", "VIEW_CART")],
     ...backMenuRows(),
   ]);
 }
