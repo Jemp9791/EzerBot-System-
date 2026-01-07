@@ -860,7 +860,7 @@ async function showShareBot(ctx) {
   } else {
     await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb.reply_markup });
   }
-}
+
 
 /* =========================================================
    PRODUCT -> QUIERO ESTE -> CANTIDAD
