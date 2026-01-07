@@ -805,7 +805,6 @@ async function showHelp(ctx) {
   extra: kb,
 });     }
    
-  }
 }
 
 async function showShareBot(ctx) {
