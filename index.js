@@ -839,7 +839,7 @@ async function showShareBot(ctx) {
        } 
 
   // FIJO: no editar
-  if (gifId) {
+
     await ctx.replyWithAnimation(gifId, {
       caption,
       parse_mode: "HTML",
