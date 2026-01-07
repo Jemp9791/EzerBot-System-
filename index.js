@@ -801,9 +801,9 @@ async function showHelp(ctx) {
 
   await safeEditOrSend(ctx, {
   animation: gifId || gifUrl,
-  text: caption,
+  text,            // ✅ CORRECTO
   extra: kb,
-});
+});     }
    
   }
 }
