@@ -799,7 +799,7 @@ async function showHelp(ctx) {
     ...backMenuRows(),
   ]);
 
-  // Se hojear como catálogo 
+  // Se hojea como catálogo 
 
    await safeEditOrSend(ctx, {
   animation: gifId || gifUrl,
@@ -819,6 +819,7 @@ async function showShareBot(ctx) {
   const gifId = pickRandom(splitPipes(cfg.GifCompartirID || cfg.GifCompartirFileId || ""));
   const gifUrl = pickRandom(splitPipes(cfg.GifCompartirURL || ""));
   const botLink = String(cfg.BotLink || "").trim();
+
   const textShare =
     String(cfg.TextoCompartirBot || "").trim() ||
     `🧀 Mirá el bot de ${cfg.NegocioNombre || "Todo Queso"} y pedí en 1 minuto.`;
@@ -829,12 +830,19 @@ async function showShareBot(ctx) {
   }
 
   const links = buildShareLinks({ botLink, text: textShare });
-  const caption = [`📣 <b>Compartir</b>\n`, `Elegí dónde compartir 👇`].join("\n");
+  const caption = `📣 <b>Compartir</b>\n\nElegí dónde compartir 👇`;
 
   const kb = Markup.inlineKeyboard([
     [Markup.button.url("📲 WhatsApp", links.wa), Markup.button.url("✈️ Telegram", links.tg)],
     ...backMenuRows(),
   ]);
+
+  await safeEditOrSend(ctx, {
+    animation: gifId || gifUrl,
+    text: caption,
+    extra: kb,
+  });
+       } 
 
   // FIJO: no editar
   if (gifId) {
