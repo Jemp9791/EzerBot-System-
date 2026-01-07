@@ -1000,7 +1000,7 @@ async function showCart(ctx) {
   lines.push(`🧮 <b>Total:</b> ${money(cartTotal(sess.cart), moneda)}`);
 
   const kb = Markup.inlineKeyboard([
-    [Markup.button.callback("🚚 Elegir entrega", "CHK_DELIVERY")],
+    [Markup.button.callback("✅ Finalizar compra", "CHK_DELIVERY")],
     [Markup.button.callback("🧀 Seguir comprando", "MENU_CATALOGO")],
     [Markup.button.callback("🗑️ Vaciar carrito", "CART_CLEAR")],
     ...backMenuRows(),
