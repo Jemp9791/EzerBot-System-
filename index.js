@@ -910,7 +910,6 @@ function addToCart(sess, p, qtyType, value) {
     });
   }
 }
-
 async function showCheckoutTicketPreview(ctx) {
   const cfg = await loadConfig();
   const sess = getSess(ctx.chat.id);
@@ -1101,33 +1100,7 @@ async function finalizeOrderCreate(ctx) {
   let total = cartTotal(sess.cart);
   if (entregaTipo === "ENVIO" || entregaTipo === "EXPRESS") total = roundARS(total + costoEnvio);
 
-  // sellos por compra
-  const usaSellos = parseYes(cfg.UsaSellos || "SI");
-  const montoPorSello = parseNumber(cfg.MontoPorSello || "10000", 10000);
-  const sellosGanados = usaSellos ? Math.floor(total / montoPorSello) : 0;
-
-  // datos cliente
-  const nombre = sess.checkout.nombre || `${ctx.from.first_name || ""} ${ctx.from.last_name || ""}`.trim();
-  const usuario = ctx.from.username ? `@${ctx.from.username}` : "";
-  const telefono = sess.checkout.telefono || "";
-  const direccion = sess.checkout.direccion || "";
-  const notas = sess.checkout.notas || "";
-
-  // persist cliente (sumar sellos ahora)
-  await upsertCliente({
-    chatId: ctx.chat.id,
-    nombre,
-    usuario,
-    addSellos: sellosGanados,
-    addTotal: total,
-    refBy: sess.refBy ? String(sess.refBy) : "",
-  });
-
-  // referido bonus al referente por compra
-  const bonusShare = parseNumber(cfg.BonusSellosShare || "1", 1);
-  if (sess.refBy) {
-    for (let i = 0; i < bonusShare; i++) await addSelloReferido(sess.refBy);
-  }
+  
 
   // pedido
   const orderId = buildOrderId();
