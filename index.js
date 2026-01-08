@@ -1819,11 +1819,6 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
       `✅ <b>Listo.</b>\n\nPedido <code>${orderId}</code> confirmado.\nSe envió el mensaje al comprador.`,
       { parse_mode: "HTML", reply_markup: Markup.inlineKeyboard(backMenuRows()).reply_markup }
     );
-  } catch {
-    try {
-      await ctx.answerCbQuery("⚠️ Error al confirmar.", { show_alert: false });
-    } catch {}
-  }
 });
 
 bot.action(/^V_REJECT_(TQ-.+)$/i, async (ctx) => {
