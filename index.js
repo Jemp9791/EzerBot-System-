@@ -1785,7 +1785,7 @@ bot.action(/^V_CONFIRM_(TQ-.+)$/i, async (ctx) => {
 
     const t = [
       `✅ <b>Pedido confirmado</b>`,
-      <code>${row.id}</code> 
+      `<code>${row.id}</code>`,
       `──────────────────`,
       `👤 ${nombre} ${usuario ? `(${usuario})` : ""}`,
       `📦 ${itemsText}`,
