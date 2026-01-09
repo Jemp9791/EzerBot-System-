@@ -19,7 +19,7 @@ bot.onText(/\/start/, (msg) => {
   });
 });
 
-bot.onText(/\/catalogo/, (msg) => catalogHandlers(bot, msg));
+bot.onText(/\/catalogo/, (msg) => catalogHandler(bot, msg));
 bot.onText(/\/carrito/, (msg) => carritoHandler(bot, msg));
 bot.onText(/\/checkout/, (msg) => checkoutHandler(bot, msg));
 
