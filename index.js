@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
-const catalogHandler = require('./src/handlers/catalogHandler');
+const catalogHandlers = require('./src/handlers/catalogHandlers');
 const carritoHandler = require('./src/handlers/carritoHandler');
 const checkoutHandler = require('./src/handlers/checkoutHandler');
 const adminConfirmHandler = require('./src/handlers/adminConfirmHandler');
@@ -19,7 +19,7 @@ bot.onText(/\/start/, (msg) => {
   });
 });
 
-bot.onText(/\/catalogo/, (msg) => catalogHandler(bot, msg));
+bot.onText(/\/catalogo/, (msg) => catalogHandlers(bot, msg));
 bot.onText(/\/carrito/, (msg) => carritoHandler(bot, msg));
 bot.onText(/\/checkout/, (msg) => checkoutHandler(bot, msg));
 
