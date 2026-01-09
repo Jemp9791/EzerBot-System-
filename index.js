@@ -11,7 +11,7 @@ const bot = new TelegramBot(token, { polling: true });
 
 // Comandos
 bot.onText(/\/start/, (msg) => {
-  bot.sendMessage(msg.chat.id, '¡Bienvenido a EZERBOT!', {
+  bot.sendMessage(msg.chat.id, '¡Bienvenido a "TODO QUESO 🧀"!', {
     reply_markup: {
       keyboard: [['Menú']],
       resize_keyboard: true
