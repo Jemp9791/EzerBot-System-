@@ -1,22 +1,52 @@
 
-// src/modules/handlers/compartirHandler.js
+const ConfigService = require('../modules/config/configService');
+const config = new ConfigService();
 
-module.exports = function compartirHandler(req, res) {
-  try {
-    const { recurso, destinatario } = req.body;
+async function compartirHandler(ctx) {
+  const userId = ctx.from.id;
 
-    if (!recurso || !destinatario) {
-      return res.status(400).json({ error: "Faltan datos para compartir" });
+  // Modo compartir catálogo
+  const textoCatalogo = await config.getValue('TextoCompartirCatalogo');
+  const gifCatalogo = await config.getValue('GifCompartirCatalogo');
+
+  // Link con referral
+  const referralLink = `https://t.me/${ctx.botInfo.username}?start=ref_${userId}`;
+
+  // Modo compartir bot/sistema
+  const textoSistema = await config.getValue('TextoCompartirSistema');
+  const gifSistema = await config.getValue('GifCompartirSistema');
+  const email = await config.getValue('EmailSistema');
+
+  await ctx.reply(
+    '¿Qué querés compartir?',
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '📣 Compartir Catálogo', callback_data: 'share_catalogo' }],
+          [{ text: '🤖 Compartir el Bot / Sistema', callback_data: 'share_sistema' }]
+        ]
+      }
+    }
+  );
+
+  // Handlers internos
+  ctx.telegram.on('callback_query', async (query) => {
+    if (query.data === 'share_catalogo') {
+      await ctx.replyWithAnimation(gifCatalogo, {
+        caption: `${textoCatalogo}\n\n🔗 ${referralLink}`,
+        parse_mode: 'Markdown'
+      });
     }
 
-    // Aquí iría la lógica de compartir el recurso
-    // Por ejemplo, guardar en base de datos o enviar notificación
-    console.log(`Compartiendo ${recurso} con ${destinatario}`);
+    if (query.data === 'share_sistema') {
+      await ctx.replyWithAnimation(gifSistema, {
+        caption: `${textoSistema}\n\n📩 Contacto: ${email}`,
+        parse_mode: 'Markdown'
+      });
+    }
+  });
+}
 
-    return res.status(200).json({ mensaje: "Recurso compartido con éxito" });
-  } catch (error) {
-    console.error("Error en compartirHandler:", error);
-    return res.status(500).json({ error: "Error interno del servidor" });
-  }
-};
-
+module.exports = compartirHandler;
+Mostrar texto citado
+                                             
