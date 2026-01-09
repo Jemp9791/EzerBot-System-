@@ -1,7 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
-const catalogHandlers = require('./src/handlers/catalogHandlers.js');
+const catalogHandler = require('./src/handlers/catalogHandler.js');
 const carritoHandler = require('./src/handlers/carritoHandlerjs');
 const checkoutHandler = require('./src/handlers/checkoutHandlerjs');
 const adminConfirmHandler = require('./src/handlers/adminConfirmHandlerjs');
