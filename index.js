@@ -1,10 +1,10 @@
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
-const catalogHandlers = require('./src/handlers/catalogHandlers');
-const carritoHandler = require('./src/handlers/carritoHandler');
-const checkoutHandler = require('./src/handlers/checkoutHandler');
-const adminConfirmHandler = require('./src/handlers/adminConfirmHandler');
+const catalogHandlers = require('./src/handlers/catalogHandlers.js');
+const carritoHandler = require('./src/handlers/carritoHandlerjs');
+const checkoutHandler = require('./src/handlers/checkoutHandlerjs');
+const adminConfirmHandler = require('./src/handlers/adminConfirmHandlerjs');
 
 const token = process.env.TelegramBotToken;
 const bot = new TelegramBot(token, { polling: true });
