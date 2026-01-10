@@ -1,8 +1,19 @@
-module.exports = async (ctx) => {
-  await ctx.reply(
-    '📤 *Compartir Todo Queso*\n\n' +
-    'Recomendá el negocio compartiendo este link:\n' +
-    'https://t.me/Todo_Queso_bot',
-    { parse_mode: 'Markdown' }
-  );
+// src/handlers/startHandler.js
+
+const copy = require("../modules/copy/copyService");
+
+async function showWelcome(phone) {
+  const text = await copy.welcome();
+
+  return {
+    to: phone,
+    type: "text",
+    text: {
+      body: text,
+    },
+  };
+}
+
+module.exports = {
+  showWelcome,
 };
