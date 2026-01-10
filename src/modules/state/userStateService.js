@@ -34,11 +34,13 @@ function addToCart(phone, item) {
 function clearCart(phone) {
   const state = getState(phone);
   state.cart = [];
+  state.lastInteraction = Date.now();
 }
 
 function setPaymentMethod(phone, method) {
   const state = getState(phone);
   state.paymentMethod = method;
+  state.lastInteraction = Date.now();
 }
 
 module.exports = {
@@ -47,4 +49,4 @@ module.exports = {
   addToCart,
   clearCart,
   setPaymentMethod,
-};
+}; 
