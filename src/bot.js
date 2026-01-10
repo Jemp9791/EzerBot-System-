@@ -1,35 +1,21 @@
 const { Telegraf } = require('telegraf');
 
 const startHandler = require('./handlers/startHandler');
-const categoriesHandler = require('./handlers/categoriesHandler');
-const categoryCarouselHandler = require('./handlers/categoryCarouselHandler');
-const navigationHandler = require('./handlers/navigationHandler');
 const helpHandler = require('./handlers/helpHandler');
+const catalogHandler = require('./handlers/catalogHandler');
+const compartirHandler = require('./handlers/compartirHandler');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// /start
+// START
 bot.start(startHandler);
 
-// /catalogo
-bot.command('catalogo', categoriesHandler);
+// BOTONES DEL TECLADO
+bot.hears('🆘 Ayuda', helpHandler);
+bot.hears('📦 Catálogo', catalogHandler);
+bot.hears('🎟 Sellos', (ctx) => ctx.reply('🎟 Sistema de sellos en construcción'));
+bot.hears('📤 Compartir', compartirHandler);
 
-// ayuda
-bot.hears('Ayuda', helpHandler);
-
-// callbacks
-bot.on('callback_query', async (ctx) => {
-  const data = ctx.callbackQuery.data;
-
-  if (data.startsWith('categoria_')) {
-    return categoryCarouselHandler(ctx);
-  }
-
-  if (data.startsWith('next_') || data.startsWith('prev_')) {
-    return navigationHandler(ctx);
-  }
+bot.launch().then(() => {
+  console.log('🤖 EzerBot iniciado correctamente');
 });
-
-bot.launch();
-
-console.log('🤖 EzerBot iniciado correctamente');
