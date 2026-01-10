@@ -1,51 +1,43 @@
+// src/handlers/compartirHandler.js
 
-const ConfigService = require('../modules/config/configService');
-const config = new ConfigService();
+const referralService = require("../modules/referrals/referralService");
+const config = require("../modules/config/configService");
 
-async function compartirHandler(ctx) {
-  const userId = ctx.from.id;
+async function compartirCatalogo(phone) {
+  const link = await referralService.generarLinkReferido(phone);
+  const gif = await config.get("GifCompartirCatalogo");
 
-  // Modo compartir catálogo
-  const textoCatalogo = await config.getValue('TextoCompartirCatalogo');
-  const gifCatalogo = await config.getValue('GifCompartirCatalogo');
-
-  // Link con referral
-  const referralLink = `https://t.me/${ctx.botInfo.username}?start=ref_${userId}`;
-
-  // Modo compartir bot/sistema
-  const textoSistema = await config.getValue('TextoCompartirSistema');
-  const gifSistema = await config.getValue('GifCompartirSistema');
-  const email = await config.getValue('EmailSistema');
-
-  await ctx.reply(
-    '¿Qué querés compartir?',
-    {
-      reply_markup: {
-        inline_keyboard: [
-          [{ text: '📣 Compartir Catálogo', callback_data: 'share_catalogo' }],
-          [{ text: '🤖 Compartir el Bot / Sistema', callback_data: 'share_sistema' }]
-        ]
-      }
-    }
-  );
-
-  // Handlers internos
-  ctx.telegram.on('callback_query', async (query) => {
-    if (query.data === 'share_catalogo') {
-      await ctx.replyWithAnimation(gifCatalogo, {
-        caption: `${textoCatalogo}\n\n🔗 ${referralLink}`,
-        parse_mode: 'Markdown'
-      });
-    }
-
-    if (query.data === 'share_sistema') {
-      await ctx.replyWithAnimation(gifSistema, {
-        caption: `${textoSistema}\n\n📩 Contacto: ${email}`,
-        parse_mode: 'Markdown'
-      });
-    }
-  });
+  return {
+    to: phone,
+    type: "image",
+    image: {
+      link: gif,
+      caption:
+        `📣 *Compartí el catálogo y ganá sellos* 🏷️\n\n` +
+        `Si alguien compra desde tu link, sumás un sello 🙌\n\n` +
+        `👉 ${link}`,
+    },
+  };
 }
 
-module.exports = compartirHandler;
-                                             
+async function compartirSistema(phone) {
+  const link = await referralService.generarLinkReferido(phone);
+  const gif = await config.get("GifCompartirSistema");
+
+  return {
+    to: phone,
+    type: "image",
+    image: {
+      link: gif,
+      caption:
+        `🤖 *Mirá este sistema increíble* ✨\n\n` +
+        `Te atiende solo, te muestra productos y encima te da premios 🎁\n\n` +
+        `👉 ${link}`,
+    },
+  };
+}
+
+module.exports = {
+  compartirCatalogo,
+  compartirSistema,
+};
