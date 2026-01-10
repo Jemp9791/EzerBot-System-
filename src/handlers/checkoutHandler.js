@@ -1,24 +1,34 @@
-const carritoPorUsuario = require('./carritoHandler').carritoPorUsuario;
+// src/handlers/checkoutHandler.js
 
-function checkoutHandler(bot, msg) {
-  const chatId = msg.chat.id;
-  const userId = msg.from.id;
+const userState = require("../modules/state/userStateService");
+const copy = require("../modules/copy/copyService");
 
-  const carrito = carritoPorUsuario[userId] || [];
+async function show(phone) {
+  const text = await copy.paymentOptions();
 
-  if (carrito.length === 0) {
-    bot.sendMessage(chatId, '🛒 No tenés productos en tu carrito.');
-    return;
-  }
-
-  const resumen = carrito.map((p, i) => `${i + 1}. ${p}`).join('\n');
-
-  bot.sendMessage(chatId, `✅ *Compra confirmada*\n\nTu pedido:\n${resumen}`, {
-    parse_mode: 'Markdown'
-  });
-
-  // Vaciar carrito
-  carritoPorUsuario[userId] = [];
+  return {
+    to: phone,
+    type: "text",
+    text: {
+      body: text,
+    },
+  };
 }
 
-module.exports = checkoutHandler;
+async function confirm(phone) {
+  const state = userState.getState(phone);
+  const text = await copy.confirmPayment(state.paymentMethod || "—");
+
+  return {
+    to: phone,
+    type: "text",
+    text: {
+      body: text,
+    },
+  };
+}
+
+module.exports = {
+  show,
+  confirm,
+};
