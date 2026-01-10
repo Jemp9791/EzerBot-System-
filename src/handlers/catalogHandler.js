@@ -1,4 +1,4 @@
-const CatalogService = require('../../modules/catalog/catalogServices');
+const CatalogService = require('../../modules/catalog/catalogService');
 
 const catalogService = new CatalogService();
 
