@@ -8,6 +8,10 @@ function getDefaultState(phone) {
     stage: "WELCOME",
     cart: [],
     paymentMethod: null,
+
+    // 🆕 REFERIDOS
+    referredBy: null, // phone del que compartió
+
     lastInteraction: Date.now(),
   };
 }
@@ -43,10 +47,23 @@ function setPaymentMethod(phone, method) {
   state.lastInteraction = Date.now();
 }
 
+// 🆕 REFERIDOS
+function setReferredBy(phone, referrerPhone) {
+  const state = getState(phone);
+  state.referredBy = referrerPhone;
+}
+
+function clearReferral(phone) {
+  const state = getState(phone);
+  state.referredBy = null;
+}
+
 module.exports = {
   getState,
   setStage,
   addToCart,
   clearCart,
   setPaymentMethod,
-}; 
+  setReferredBy,
+  clearReferral,
+};
