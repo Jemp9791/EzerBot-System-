@@ -1,12 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
-// Handlers
-const catalogHandler = require('./src/handlers/catalogHandler');
-const carritoHandler = require('./src/handlers/carritoHandler');
-const checkoutHandler = require('./src/handlers/checkoutHandler');
-const adminConfirmHandler = require('./src/handlers/adminConfirmHandler');
-
+// 🔐 Token
 const token = process.env.TelegramBotToken;
 
 if (!token) {
@@ -14,66 +9,64 @@ if (!token) {
   process.exit(1);
 }
 
+// 🤖 Bot
 const bot = new TelegramBot(token, { polling: true });
 
-// =========================
-// LOG DE ARRANQUE
-// =========================
-console.log('🤖 EzerBot iniciado y en polling');
+// 🔹 Handlers
+const catalogHandler = require('./src/handlers/catalogHandler');
+const carritoHandler = require('./src/handlers/carritoHandler');
+const checkoutHandler = require('./src/handlers/checkoutHandler');
+const adminConfirmHandler = require('./src/handlers/adminConfirmHandler');
 
-// =========================
+// =======================
 // ERRORES DE POLLING
-// =========================
-bot.on('polling_error', (error) => {
-  console.error('Polling error:', error.code, error.message);
+// =======================
+bot.on('polling_error', (err) => {
+  console.error('❌ Polling error:', err.code, err.message);
 });
 
-// =========================
-// /start
-// =========================
-bot.onText(/^\/start$/, (msg) => {
-  bot.sendMessage(
-    msg.chat.id,
-    '¡Bienvenido a EZERBOT!',
-    {
-      reply_markup: {
-        keyboard: [['Menú']],
-        resize_keyboard: true,
-        one_time_keyboard: false
-      }
+// =======================
+// START
+// =======================
+bot.onText(/\/start/i, (msg) => {
+  bot.sendMessage(msg.chat.id, '👋 Bienvenida a EZERBOT', {
+    reply_markup: {
+      keyboard: [
+        ['📦 Catálogo'],
+        ['🛒 Carrito'],
+        ['✅ Checkout']
+      ],
+      resize_keyboard: true
     }
-  );
+  });
 });
 
-// =========================
-// /catalogo
-// =========================
-bot.onText(/^\/catalogo$/, (msg) => {
+// =======================
+// CATÁLOGO
+// =======================
+bot.onText(/📦 Catálogo|\/catalogo/i, (msg) => {
   catalogHandler(bot, msg);
 });
 
-// =========================
-// /carrito
-// =========================
-bot.onText(/^\/carrito$/, (msg) => {
+// =======================
+// CARRITO
+// =======================
+bot.onText(/🛒 Carrito|\/carrito/i, (msg) => {
   carritoHandler(bot, msg);
 });
 
-// =========================
-// /checkout
-// =========================
-bot.onText(/^\/checkout$/, (msg) => {
+// =======================
+// CHECKOUT
+// =======================
+bot.onText(/✅ Checkout|\/checkout/i, (msg) => {
   checkoutHandler(bot, msg);
 });
 
-// =========================
-// MENSAJES NORMALES (NO comandos)
-// =========================
+// =======================
+// MENSAJES ADMIN / CONFIRMACIONES
+// =======================
 bot.on('message', (msg) => {
-  if (!msg.text) return;
-
-  // ⚠️ MUY IMPORTANTE: no interceptar comandos
-  if (msg.text.startsWith('/')) return;
-
   adminConfirmHandler(bot, msg);
 });
+
+console.log('✅ EZERBOT iniciado correctamente'); 
