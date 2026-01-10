@@ -34,3 +34,16 @@ bot.on('callback_query', async (ctx) => {
 bot.launch();
 
 console.log('🤖 EzerBot iniciado correctamente');
+// --- Puerto dummy para Render (NO afecta al bot) ---
+const express = require('express');
+const app = express();
+
+const PORT = process.env.PORT || 3000;
+
+app.get('/', (req, res) => {
+  res.send('EzerBot activo');
+});
+
+app.listen(PORT, () => {
+  console.log(`Puerto dummy escuchando en ${PORT}`);
+});
