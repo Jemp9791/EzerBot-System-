@@ -1,16 +1,19 @@
 const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
-// Handlers (nombres EXACTOS según tu repo)
+// Handlers
 const catalogHandler = require('./src/handlers/catalogHandler.js');
 const carritoHandler = require('./src/handlers/carritoHandler.js');
 const checkoutHandler = require('./src/handlers/checkoutHandler.js');
-const adminConfirmHandler = require('./src/handlers/adminConfirmHandler.js'); // así está en tu repo
+const adminConfirmHandler = require('./src/handlers/adminConfirmHandler.js');
 
 const token = process.env.TelegramBotToken;
-
-// Bot en modo polling (necesario para Web Service)
 const bot = new TelegramBot(token, { polling: true });
+
+// 🔴 Captura errores de polling
+bot.on('polling_error', (error) => {
+  console.error('Polling error:', error.code, error.message);
+});
 
 // Comando /start
 bot.onText(/\/start/, (msg) => {
@@ -37,7 +40,7 @@ bot.onText(/\/checkout/, (msg) => {
   checkoutHandler(bot, msg);
 });
 
-// Mensajes del vendedor (confirmar/rechazar)
+// Mensajes del vendedor
 bot.on('message', (msg) => {
   adminConfirmHandler(bot, msg);
 });
