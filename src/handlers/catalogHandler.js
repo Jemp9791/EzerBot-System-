@@ -1,22 +1,22 @@
-const CatalogService = require('../modules/catalog/catalogServices');
+const CatalogService = require('../../modules/catalog/catalogServices');
 
-module.exports = async (bot, msg) => {
+const catalogService = new CatalogService();
+
+module.exports = async function catalogHandler(bot, msg) {
   const chatId = msg.chat.id;
 
   try {
-    const catalog = new CatalogService();
-    const productos = await catalog.getAllProducts();
+    const productos = await catalogService.getAllProducts();
 
     if (!productos || productos.length === 0) {
       return bot.sendMessage(chatId, '⚠️ No hay productos disponibles.');
     }
 
-    // Obtener categorías únicas
     const categorias = [
       ...new Set(
         productos
           .map(p => p.CATEGORIA)
-          .filter(c => c && c.trim() !== '')
+          .filter(Boolean)
       )
     ];
 
@@ -24,19 +24,19 @@ module.exports = async (bot, msg) => {
       return bot.sendMessage(chatId, '⚠️ No se encontraron categorías.');
     }
 
-    // Armar teclado
-    const keyboard = categorias.map(cat => [cat]);
+    const keyboard = categorias.map(c => ([{
+      text: c,
+      callback_data: `categoria_${c}`
+    }]));
 
-    await bot.sendMessage(chatId, '📦 Elegí una categoría:', {
+    await bot.sendMessage(chatId, '🛒 Elegí una categoría:', {
       reply_markup: {
-        keyboard,
-        resize_keyboard: true,
-        one_time_keyboard: false
+        inline_keyboard: keyboard
       }
     });
 
-  } catch (err) {
-    console.error('❌ Error en catalogHandler:', err.message);
+  } catch (error) {
+    console.error('❌ Error en catalogHandler:', error.message);
     bot.sendMessage(chatId, '❌ Error cargando el catálogo.');
   }
 };
