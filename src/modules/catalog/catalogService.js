@@ -1,19 +1,21 @@
+// src/modules/catalog/catalogService.js
 
-const axios = require('axios');
-class CatalogService {
-  constructor() {
-    this.url = process.env.CATALOGO_URL;
-  }
+async function obtenerCategorias() {
+  /**
+   * Acá va la lectura REAL de la hoja "Catalogo"
+   * Estructura esperada (ejemplo):
+   * Categoria | Producto | Precio | Activo
+   */
 
-  async getAllProducts() {
-    const res = await axios.get(this.url);
-    return res.data;
-  }
-
-  async getProductsByCategory(categoria) {
-    const productos = await this.getAllProducts();
-    return productos.filter(p => p.CATEGORIA === categoria);
-  }
+  // MOCK / PLACEHOLDER hasta conectar Sheets
+  return [
+    "Quesos",
+    "Fiambres",
+    "Picadas",
+    "Promociones",
+  ];
 }
 
-module.exports = CatalogService;
+module.exports = {
+  obtenerCategorias,
+};
