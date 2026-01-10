@@ -1,28 +1,37 @@
-const CatalogService = require('../modules/catalog/catalogService');
+// src/handlers/catalogHandler.js
 
-const catalog = new CatalogService();
+const config = require("../modules/config/configService");
 
-async function catalogHandler(ctx) {
-  try {
-    const productos = await catalog.getAllProducts();
+async function show(phone) {
+  const categorias = await config.list("CategoriasCatalogo");
+  const gif = await config.get("GifCatalogo");
 
-    if (!productos || productos.length === 0) {
-      return ctx.reply('No hay productos disponibles.');
-    }
+  let texto = "🧀 *Nuestro catálogo*\n\n";
+  categorias.forEach(cat => {
+    texto += `• ${cat}\n`;
+  });
 
-    const categorias = [...new Set(productos.map(p => p.CATEGORIA))];
+  texto += `\n👉 Decime qué categoría te interesa`;
 
-    return ctx.reply('Elegí una categoría:', {
-      reply_markup: {
-        inline_keyboard: categorias.map(c => [
-          { text: c, callback_data: `categoria_${c}` }
-        ])
-      }
-    });
-  } catch (err) {
-    console.error('❌ Error en catalogHandler:', err);
-    return ctx.reply('Error cargando el catálogo.');
-  }
+  return [
+    {
+      to: phone,
+      type: "text",
+      text: { body: texto },
+    },
+    gif
+      ? {
+          to: phone,
+          type: "image",
+          image: {
+            link: gif,
+            caption: "👆 Elegí tranquilo, te ayudo a armar el pedido 😉",
+          },
+        }
+      : null,
+  ].filter(Boolean);
 }
 
-module.exports = catalogHandler;
+module.exports = {
+  show,
+};
