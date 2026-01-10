@@ -2,20 +2,49 @@
 
 async function obtenerCategorias() {
   /**
-   * Acá va la lectura REAL de la hoja "Catalogo"
-   * Estructura esperada (ejemplo):
-   * Categoria | Producto | Precio | Activo
+   * Hoja: Catalogo
+   * Columnas ejemplo:
+   * Categoria | Producto | Precio | Imagen | Activo
    */
 
-  // MOCK / PLACEHOLDER hasta conectar Sheets
+  // 🔁 Placeholder hasta Sheets real
   return [
-    "Quesos",
-    "Fiambres",
-    "Picadas",
-    "Promociones",
+    {
+      id: "QUESOS",
+      nombre: "Quesos",
+      imagen: "https://...",
+    },
+    {
+      id: "FIAMBRES",
+      nombre: "Fiambres",
+      imagen: "https://...",
+    },
+    {
+      id: "PICADAS",
+      nombre: "Picadas",
+      imagen: "https://...",
+    },
+  ];
+}
+
+async function obtenerProductosPorCategoria(categoriaId) {
+  return [
+    {
+      id: "P001",
+      nombre: "Queso Tybo",
+      precio: 3500,
+      imagen: "https://...",
+    },
+    {
+      id: "P002",
+      nombre: "Queso Pategrás",
+      precio: 4200,
+      imagen: "https://...",
+    },
   ];
 }
 
 module.exports = {
   obtenerCategorias,
+  obtenerProductosPorCategoria,
 };
