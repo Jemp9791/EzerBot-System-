@@ -1,35 +1,42 @@
-const CatalogService = require('../modules/catalog/catalogServices');
+const CatalogService = require('../modules/catalog/catalogService');
 
-module.exports = async (bot, msg) => {
-  const chatId = msg.chat.id;
+const catalog = new CatalogService();
 
+async function categoriesHandler(ctx) {
   try {
-    const service = new CatalogService();
-    const productos = await service.getAllProducts();
+    const productos = await catalog.getAllProducts();
 
-    if (!productos.length) {
-      return bot.sendMessage(chatId, '⚠️ No hay productos disponibles.');
+    if (!productos || productos.length === 0) {
+      return ctx.reply('❌ No hay productos disponibles en este momento.');
     }
 
     const categorias = [
-      ...new Set(productos.map(p => p.CATEGORIA).filter(Boolean))
+      ...new Set(
+        productos
+          .map(p => p.CATEGORIA)
+          .filter(c => c && String(c).trim() !== '')
+      )
     ];
 
-    if (!categorias.length) {
-      return bot.sendMessage(chatId, '⚠️ No hay categorías.');
+    if (categorias.length === 0) {
+      return ctx.reply('❌ No se encontraron categorías.');
     }
 
-    const keyboard = categorias.map(cat => [cat]);
-
-    bot.sendMessage(chatId, '📂 Elegí una categoría:', {
+    await ctx.reply('📦 Elegí una categoría:', {
       reply_markup: {
-        keyboard,
-        resize_keyboard: true
+        inline_keyboard: categorias.map(c => [
+          {
+            text: c,
+            callback_data: `categoria_${c}`
+          }
+        ])
       }
     });
 
   } catch (err) {
-    console.error('❌ categoriesHandler:', err.message);
-    bot.sendMessage(chatId, '❌ Error cargando categorías.');
+    console.error('❌ Error en categoriesHandler:', err);
+    await ctx.reply('⚠️ Ocurrió un error al cargar las categorías.');
   }
-};
+}
+
+module.exports = categoriesHandler; 
