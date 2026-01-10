@@ -1,27 +1,19 @@
-async function startHandler(ctx) {
-  const texto = '👋 Bienvenida al bot';
-  const gifId = null; // o lo que venga de config
+module.exports = async (ctx) => {
+  console.log('📥 /start recibido');
 
-  if (gifId) {
-    await ctx.replyWithAnimation(gifId, {
-      caption: texto,
+  await ctx.reply(
+    '👋 Hola Jenny!\n\n' +
+    'Bienvenida a *EzerBot* 🤖\n\n' +
+    'Usá el menú para continuar.',
+    {
+      parse_mode: 'Markdown',
       reply_markup: {
         keyboard: [
-          ['📦 Catálogo', '🎟️ Sellos'],
-          ['ℹ️ Ayuda', '📣 Compartir']
+          ['📦 Catálogo', '🎟 Sellos'],
+          ['🆘 Ayuda', '📤 Compartir']
         ],
         resize_keyboard: true
       }
-    });
-  } else {
-    await ctx.reply(texto, {
-      reply_markup: {
-        keyboard: [
-          ['📦 Catálogo', '🎟️ Sellos'],
-          ['ℹ️ Ayuda', '📣 Compartir']
-        ],
-        resize_keyboard: true
-      }
-    });
-  }
-}
+    }
+  );
+};
