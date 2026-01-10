@@ -9,6 +9,7 @@ const startHandler = require("./handlers/startHandler");
 const catalogHandler = require("./handlers/catalogHandler");
 const carritoHandler = require("./handlers/carritoHandler");
 const checkoutHandler = require("./handlers/checkoutHandler");
+const compartirHandler = require("./handlers/compartirHandler");
 const posHandler = require("./handlers/posHandler");
 
 async function handleMessage(payload) {
@@ -19,9 +20,12 @@ async function handleMessage(payload) {
 
   if (!phone) return null;
 
-  // 🆕 detectar referido (ej: ?ref=54911...)
-  if (payload.referral?.referrer_id) {
-    userState.setReferredBy(phone, payload.referral.referrer_id);
+  // 🆕 REFERIDO POR LINK
+  if (payload.text?.body?.includes("?ref=")) {
+    const ref = payload.text.body.split("?ref=")[1];
+    if (ref && ref !== phone) {
+      userState.setReferredBy(phone, ref);
+    }
   }
 
   const state = userState.getState(phone);
@@ -30,9 +34,12 @@ async function handleMessage(payload) {
   // TEXTO
   // =============================
   if (payload.type === "text") {
-    const text = payload.text?.body?.toLowerCase() || "";
+    const text = payload.text.body.toLowerCase();
 
-    // 👨‍💼 CONFIRMACIÓN VENDEDOR
+    if (text.includes("compartir")) {
+      return compartirHandler.compartirCatalogo(phone);
+    }
+
     if (text.startsWith("confirmar pago")) {
       const parts = text.split(" ");
       const monto = Number(parts.find(p => !isNaN(p)));
@@ -40,17 +47,7 @@ async function handleMessage(payload) {
         ? "Transferencia"
         : "Efectivo";
 
-      const { mensajeCliente, mensajeReferidor } =
-        await posHandler.confirmarVenta(phone, monto, medioPago);
-
-      return {
-        to: phone,
-        type: "text",
-        text: { body: mensajeCliente },
-        extra: mensajeReferidor
-          ? { to: state.referredBy, text: mensajeReferidor }
-          : null,
-      };
+      return posHandler.confirmarVenta(phone, monto, medioPago);
     }
 
     if (state.stage === "WELCOME") {
