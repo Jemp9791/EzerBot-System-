@@ -1,58 +1,36 @@
-const TelegramBot = require('node-telegram-bot-api');
 require('dotenv').config();
 
-const token = process.env.TelegramBotToken;
-if (!token) {
-  console.error('❌ Falta TelegramBotToken');
-  process.exit(1);
-}
+const { Telegraf } = require('telegraf');
 
-const bot = new TelegramBot(token, { polling: true });
+// Bot
+const bot = new Telegraf(process.env.BOT_TOKEN);
 
-// ================= HANDLERS =================
+// Handlers existentes (SOLO los que realmente tenés)
 const startHandler = require('./src/handlers/startHandler');
-const helpHandler = require('./src/handlers/helpHandler');
-const catalogHandler = require('./src/handlers/catalogHandler');
 const categoriesHandler = require('./src/handlers/categoriesHandler');
 const categoryCarouselHandler = require('./src/handlers/categoryCarouselHandler');
-const quieroEsteHandler = require('./src/handlers/quieroEsteHandler');
-const carritoHandler = require('./src/handlers/carritoHandler');
-const checkoutHandler = require('./src/handlers/checkoutHandler');
-const ticketHandler = require('./src/handlers/ticketHandler');
-const compartirHandler = require('./src/handlers/compartirHandler');
 const navigationHandler = require('./src/handlers/navigationHandler');
-const adminConfirmHandler = require('./src/handlers/adminConfirmHandler');
+const helpHandler = require('./src/handlers/helpHandler');
 
-// ================= ERRORES =================
-bot.on('polling_error', err => {
-  console.error('❌ Polling error:', err.message);
-});
+// Comandos
+bot.start(startHandler);
+bot.command('catalogo', categoriesHandler);
+bot.hears('📖 Ayuda', helpHandler);
 
-// ================= COMANDOS =================
-bot.onText(/\/start/i, msg => startHandler(bot, msg));
-bot.onText(/\/help/i, msg => helpHandler(bot, msg));
-bot.onText(/📦 Catálogo|\/catalogo/i, msg => catalogHandler(bot, msg));
-bot.onText(/🛒 Carrito|\/carrito/i, msg => carritoHandler(bot, msg));
-bot.onText(/✅ Checkout|\/checkout/i, msg => checkoutHandler(bot, msg));
+// Callbacks
+bot.on('callback_query', async (ctx) => {
+  const data = ctx.callbackQuery.data;
 
-// ================= CALLBACKS =================
-bot.on('callback_query', query => {
-  if (!query.data) return;
+  if (data.startsWith('categoria_')) {
+    return categoryCarouselHandler(ctx);
+  }
 
-  if (query.data.startsWith('categoria_')) {
-    categoriesHandler(bot, query);
-  } else if (query.data.startsWith('producto_')) {
-    categoryCarouselHandler(bot, query);
-  } else if (query.data.startsWith('quiero_')) {
-    quieroEsteHandler(bot, query);
-  } else if (query.data.startsWith('nav_')) {
-    navigationHandler(bot, query);
+  if (data.startsWith('next_') || data.startsWith('prev_')) {
+    return navigationHandler(ctx);
   }
 });
 
-// ================= MENSAJES =================
-bot.on('message', msg => {
-  adminConfirmHandler(bot, msg);
-});
+// Lanzar bot
+bot.launch();
 
-console.log('✅ EZERBOT iniciado y escuchando'); 
+console.log('🤖 EzerBot iniciado correctamente');
