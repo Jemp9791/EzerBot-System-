@@ -48,5 +48,4 @@ async function compartirHandler(ctx) {
 }
 
 module.exports = compartirHandler;
-Mostrar texto citado
                                              
