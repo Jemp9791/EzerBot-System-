@@ -1,20 +1,35 @@
+const CatalogService = require('../modules/catalog/catalogServices');
 
-const CatalogService = require('../modules/catalog/catalogService');
-const catalog = new CatalogService();
+module.exports = async (bot, msg) => {
+  const chatId = msg.chat.id;
 
-async function categoriesHandler(ctx) {
-  const productos = await catalog.getAllProducts();
+  try {
+    const service = new CatalogService();
+    const productos = await service.getAllProducts();
 
-  const categorias = [...new Set(productos.map(p => p.CATEGORIA))];
-
-  await ctx.reply('Elegí una categoría:', {
-    reply_markup: {
-      inline_keyboard: categorias.map(c => [
-        { text: c, callback_data: `categoria_${c}` }
-      ])
+    if (!productos.length) {
+      return bot.sendMessage(chatId, '⚠️ No hay productos disponibles.');
     }
-  });
-}
 
-module.exports = categoriesHandler;
+    const categorias = [
+      ...new Set(productos.map(p => p.CATEGORIA).filter(Boolean))
+    ];
 
+    if (!categorias.length) {
+      return bot.sendMessage(chatId, '⚠️ No hay categorías.');
+    }
+
+    const keyboard = categorias.map(cat => [cat]);
+
+    bot.sendMessage(chatId, '📂 Elegí una categoría:', {
+      reply_markup: {
+        keyboard,
+        resize_keyboard: true
+      }
+    });
+
+  } catch (err) {
+    console.error('❌ categoriesHandler:', err.message);
+    bot.sendMessage(chatId, '❌ Error cargando categorías.');
+  }
+};
