@@ -1,21 +1,73 @@
-const { Telegraf } = require('telegraf');
+// src/bot.js
 
-const startHandler = require('./handlers/startHandler');
-const helpHandler = require('./handlers/helpHandler');
-const catalogHandler = require('./handlers/catalogHandler');
-const compartirHandler = require('./handlers/compartirHandler');
+const config = require("./modules/config/configService");
+const userState = require("./modules/state/userStateService");
+const actionRouter = require("./modules/actions/actionRouter");
 
-const bot = new Telegraf(process.env.BOT_TOKEN);
+// Handlers
+const startHandler = require("./handlers/startHandler");
+const catalogHandler = require("./handlers/catalogHandler");
+const carritoHandler = require("./handlers/carritoHandler");
+const checkoutHandler = require("./handlers/checkoutHandler");
 
-// START
-bot.start(startHandler);
+async function handleMessage(payload) {
+  const phone =
+    payload.from ||
+    payload.phone ||
+    payload?.contacts?.[0]?.wa_id;
 
-// BOTONES DEL TECLADO
-bot.hears('🆘 Ayuda', helpHandler);
-bot.hears('📦 Catálogo', catalogHandler);
-bot.hears('🎟 Sellos', (ctx) => ctx.reply('🎟 Sistema de sellos en construcción'));
-bot.hears('📤 Compartir', compartirHandler);
+  if (!phone) return null;
 
-bot.launch().then(() => {
-  console.log('🤖 EzerBot iniciado correctamente');
-});
+  const state = userState.getState(phone);
+
+  // =============================
+  // TEXTO
+  // =============================
+  if (payload.type === "text") {
+    if (state.stage === "WELCOME") {
+      userState.setStage(phone, "CATALOG");
+      return startHandler.showWelcome(phone);
+    }
+
+    if (state.stage === "CATALOG") {
+      return catalogHandler.show(phone);
+    }
+  }
+
+  // =============================
+  // BOTONES
+  // =============================
+  if (payload.type === "interactive") {
+    const buttonId =
+      payload.interactive?.button_reply?.id ||
+      payload.interactive?.list_reply?.id;
+
+    if (!buttonId) return null;
+
+    const action = await config.get(buttonId);
+    const result = actionRouter.execute(action, phone);
+
+    if (result === "CATALOG") {
+      return catalogHandler.show(phone);
+    }
+
+    if (result === "CART") {
+      return carritoHandler.show(phone);
+    }
+
+    if (result === "PAYMENT") {
+      return checkoutHandler.show(phone);
+    }
+
+    if (result === "CONFIRM_PAYMENT") {
+      userState.setStage(phone, "CONFIRMATION");
+      return checkoutHandler.confirm(phone);
+    }
+  }
+
+  return null;
+}
+
+module.exports = {
+  handleMessage,
+};
