@@ -7,8 +7,8 @@
     "start": "node index.js"
   },
   "dependencies": {
+    "telegraf": "^4.16.3",
     "axios": "^1.6.0",
-    "node-telegram-bot-api": "^0.61.0",
     "dotenv": "^16.4.0"
   }
-} 
+}
