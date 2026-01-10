@@ -1,6 +1,5 @@
 
 const axios = require('axios');
-
 class CatalogService {
   constructor() {
     this.url = process.env.CATALOGO_URL;
