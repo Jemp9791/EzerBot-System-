@@ -5,7 +5,7 @@ require('dotenv').config();
 const catalogHandler = require('./src/handlers/catalogHandler.js');
 const carritoHandler = require('./src/handlers/carritoHandler.js');
 const checkoutHandler = require('./src/handlers/checkoutHandler.js');
-const adminConfirmHandler = require('./src/handlers/admindConfirmHandler.js'); // así está en tu repo
+const adminConfirmHandler = require('./src/handlers/adminConfirmHandler.js'); // así está en tu repo
 
 const token = process.env.TelegramBotToken;
 
