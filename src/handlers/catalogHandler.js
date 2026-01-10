@@ -1,42 +1,38 @@
 // src/handlers/catalogHandler.js
 
 const catalogService = require("../modules/catalog/catalogService");
-const config = require("../modules/config/configService");
 
-async function show(phone) {
+async function mostrarCategorias(phone) {
   const categorias = await catalogService.obtenerCategorias();
-  const gif = await config.get("GifCatalogo");
 
-  let texto = "🧀 *Nuestro catálogo*\n\n";
-
-  categorias.forEach(cat => {
-    texto += `• ${cat}\n`;
-  });
-
-  texto += "\n👉 Decime qué categoría te interesa y te muestro opciones";
-
-  const mensajes = [
-    {
-      to: phone,
-      type: "text",
-      text: { body: texto },
-    },
-  ];
-
-  if (gif) {
-    mensajes.push({
-      to: phone,
-      type: "image",
-      image: {
-        link: gif,
-        caption: "👆 Elegí tranquilo, te ayudo a armar el pedido 😉",
+  return {
+    to: phone,
+    type: "interactive",
+    interactive: {
+      type: "list",
+      header: {
+        type: "text",
+        text: "🧀 Nuestro catálogo",
       },
-    });
-  }
-
-  return mensajes;
+      body: {
+        text: "Elegí una categoría para ojeár los productos 👇",
+      },
+      action: {
+        button: "Ver categorías",
+        sections: [
+          {
+            title: "Categorías",
+            rows: categorias.map(cat => ({
+              id: `CAT_${cat.id}`,
+              title: cat.nombre,
+            })),
+          },
+        ],
+      },
+    },
+  };
 }
 
 module.exports = {
-  show,
+  mostrarCategorias,
 };
