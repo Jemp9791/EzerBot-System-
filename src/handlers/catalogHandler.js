@@ -8,19 +8,30 @@ module.exports = async (bot, msg) => {
     const productos = await service.getAllProducts();
 
     if (!productos.length) {
-      return bot.sendMessage(chatId, '⚠️ No hay productos disponibles.');
+      return bot.sendMessage(chatId, '⚠️ El catálogo está vacío.');
     }
 
-    let texto = '📦 *Catálogo disponible:*\n\n';
+    // Obtener categorías únicas
+    const categorias = [
+      ...new Set(productos.map(p => p.CATEGORIA).filter(Boolean))
+    ];
 
-    productos.forEach(p => {
-      texto += `• ${p.NOMBRE || 'Producto'} - $${p.PRECIO || '0'}\n`;
+    if (!categorias.length) {
+      return bot.sendMessage(chatId, '⚠️ No hay categorías disponibles.');
+    }
+
+    const teclado = categorias.map(cat => [cat]);
+
+    bot.sendMessage(chatId, '📂 *Elegí una categoría:*', {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        keyboard: teclado,
+        resize_keyboard: true
+      }
     });
 
-    bot.sendMessage(chatId, texto, { parse_mode: 'Markdown' });
-
-  } catch (error) {
-    console.error('❌ Error en catalogHandler:', error.message);
+  } catch (err) {
+    console.error('❌ catalogHandler error:', err.message);
     bot.sendMessage(chatId, '❌ Error al cargar el catálogo.');
   }
-}; 
+};
