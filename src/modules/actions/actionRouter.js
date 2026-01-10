@@ -1,7 +1,9 @@
+// src/modules/actions/actionRouter.js
+
 const userState = require("../state/userStateService");
 
 function execute(action, phone) {
-  if (!action) return;
+  if (!action || typeof action !== "string") return null;
 
   const [type, value] = action.split(":");
 
@@ -18,4 +20,6 @@ function execute(action, phone) {
   }
 }
 
-module.exports = { execute };
+module.exports = {
+  execute,
+};
