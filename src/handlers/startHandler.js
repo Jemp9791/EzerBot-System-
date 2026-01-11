@@ -3,9 +3,9 @@
 const config = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
-  const text = await config.getValue('TextoBienvenida');
+  const text = await config.get('TextoBienvenida');
 
-  await ctx.reply(text || '¡Bienvenido! 👋');
+  await ctx.reply(text || '¡Bienvenida! 👋');
 }
 
 module.exports = {
