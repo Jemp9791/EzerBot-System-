@@ -5,16 +5,15 @@ async function showWelcome(ctx) {
     const texto = await config.getValue('TextoBienvenida');
 
     if (!texto) {
-      return ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
+      await ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
+      return;
     }
 
     await ctx.reply(texto);
-  } catch (error) {
-    console.error('Error en showWelcome:', error);
+  } catch (err) {
+    console.error('Error en showWelcome:', err);
     await ctx.reply('❌ Error interno al mostrar bienvenida');
   }
 }
 
-module.exports = {
-  showWelcome
-};
+module.exports = { showWelcome };
