@@ -1,9 +1,9 @@
+// src/handlers/startHandler.js
+
 const config = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
   try {
-    console.log('📥 /start recibido');
-
     const texto = await config.get('TextoBienvenida');
 
     if (!texto) {
@@ -11,13 +11,10 @@ async function showWelcome(ctx) {
       return;
     }
 
-    await ctx.reply(texto, {
-      parse_mode: 'Markdown',
-    });
-
+    await ctx.reply(texto);
   } catch (error) {
-    console.error('❌ Error en startHandler:', error);
-    await ctx.reply('❌ Error interno');
+    console.error('❌ Error en showWelcome:', error);
+    await ctx.reply('❌ Error interno al mostrar bienvenida');
   }
 }
 
