@@ -1,15 +1,15 @@
 // src/bot.js
 
 const userState = require("./modules/state/userStateService");
+const roleService = require("./modules/roles/roleService");
 
-// Handlers base
+// Handlers
 const startHandler = require("./handlers/startHandler");
 const catalogHandler = require("./handlers/catalogHandler");
 const productHandler = require("./handlers/productHandler");
 const menuHandler = require("./handlers/menuHandler");
 const compartirHandler = require("./handlers/compartirHandler");
-
-// Super vendedor
+const posHandler = require("./handlers/posHandler");
 const superSellerHandler = require("./handlers/superSellerHandler");
 
 async function handleMessage(payload) {
@@ -21,44 +21,56 @@ async function handleMessage(payload) {
   if (!phone) return null;
 
   const state = userState.getState(phone);
+  const role = await roleService.getRole(phone);
+  userState.setRole(phone, role);
 
-  // MENSAJE INICIAL
+  // =============================
+  // VENDEDOR / ADMIN
+  // =============================
+  if (payload.type === "text" && role !== "CLIENTE") {
+    const text = payload.text.body.toLowerCase();
+
+    if (text.startsWith("confirmar pago")) {
+      return posHandler.confirmarVentaDesdeTexto(phone, text);
+    }
+
+    return {
+      to: phone,
+      type: "text",
+      text: {
+        body: "👋 Modo vendedor activo.\nUsá: *confirmar pago monto medio*",
+      },
+    };
+  }
+
+  // =============================
+  // CLIENTE
+  // =============================
   if (payload.type === "text" && state.stage === "WELCOME") {
     userState.setStage(phone, "CATALOG");
     return startHandler.showWelcome(phone);
   }
 
-  // INTERACTIVOS
   if (payload.type === "interactive") {
     const id =
       payload.interactive?.list_reply?.id ||
       payload.interactive?.button_reply?.id;
 
-    // CATEGORÍAS
     if (id?.startsWith("CAT_")) {
-      const categoriaId = id.replace("CAT_", "");
+      const cat = id.replace("CAT_", "");
+      state.lastCategory = cat;
       userState.setStage(phone, "PRODUCTS");
-      state.lastCategory = categoriaId;
-      return productHandler.mostrarProductos(phone, categoriaId);
+      return productHandler.mostrarProductos(phone, cat);
     }
 
-    // PRODUCTO SELECCIONADO
     if (id?.startsWith("PROD_")) {
-      // acá luego se agrega al carrito
-
-      // 🔥 intervención super vendedor
       const mensajes = await superSellerHandler.intervenirDespuesProducto(
         phone,
         state.lastCategory
       );
-
-      return [
-        ...mensajes,
-        await menuHandler.mostrarMenu(phone),
-      ];
+      return [...mensajes, await menuHandler.mostrarMenu(phone)];
     }
 
-    // MENÚ
     if (id === "MENU_SEGUIR") {
       return catalogHandler.mostrarCategorias(phone);
     }
@@ -68,7 +80,6 @@ async function handleMessage(payload) {
     }
   }
 
-  // ENTRADA DIRECTA A CATÁLOGO
   if (state.stage === "CATALOG") {
     return catalogHandler.mostrarCategorias(phone);
   }
