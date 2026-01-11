@@ -8,7 +8,10 @@ bot.start(async (ctx) => {
   await showWelcome(ctx);
 });
 
-bot.launch();
+bot.launch({
+  dropPendingUpdates: true
+});
+
 console.log('🤖 Bot lanzado');
 
 module.exports = bot;
