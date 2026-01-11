@@ -1,81 +1,45 @@
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 
-// ==============================
-// CONFIGURACIÓN GOOGLE SHEETS
-// ==============================
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = 'Config';
 
 const doc = new GoogleSpreadsheet(SPREADSHEET_ID);
 
-// Cache simple para no pedir a Sheets todo el tiempo
 let cache = {};
 let lastLoad = 0;
-const CACHE_TTL = 60 * 1000; // 1 minuto
+const CACHE_TTL = 60 * 1000;
 
-// ==============================
-// AUTENTICACIÓN
-// ==============================
 async function auth() {
   await doc.useServiceAccountAuth({
     client_email: process.env.GOOGLE_CLIENT_EMAIL,
     private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
   });
-
   await doc.loadInfo();
 }
 
-// ==============================
-// CARGAR CONFIG DESDE SHEETS
-// ==============================
 async function loadConfig() {
   const now = Date.now();
-
-  if (now - lastLoad < CACHE_TTL && Object.keys(cache).length > 0) {
-    return cache;
-  }
+  if (now - lastLoad < CACHE_TTL && Object.keys(cache).length) return cache;
 
   await auth();
-
   const sheet = doc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) {
-    throw new Error(`Hoja "${SHEET_NAME}" no encontrada`);
-  }
+  if (!sheet) throw new Error('Hoja Config no encontrada');
 
   const rows = await sheet.getRows();
   const data = {};
 
-  rows.forEach(row => {
-    const key = row.Clave || row.clave;
-    const value = row.Valor || row.valor;
-
-    if (key) {
-      data[key.trim()] = value ? value.toString().trim() : '';
-    }
+  rows.forEach(r => {
+    if (r.Clave) data[r.Clave.trim()] = (r.Valor || '').toString().trim();
   });
 
   cache = data;
   lastLoad = now;
-
-  return cache;
+  return data;
 }
 
-// ==============================
-// API PÚBLICA
-// ==============================
 async function getValue(key) {
-  const config = await loadConfig();
-  return config[key] || null;
+  const cfg = await loadConfig();
+  return cfg[key] ?? null;
 }
 
-async function getAll() {
-  return await loadConfig();
-}
-
-// ==============================
-// EXPORT
-// ==============================
-module.exports = {
-  getValue,
-  getAll,
-};
+module.exports = { getValue };
