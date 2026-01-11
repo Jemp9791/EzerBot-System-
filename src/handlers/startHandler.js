@@ -10,10 +10,13 @@ async function showWelcome(ctx) {
     }
 
     await ctx.reply(texto);
+
   } catch (err) {
-    console.error('Error en showWelcome:', err);
+    console.error('❌ Error en showWelcome:', err.message);
     await ctx.reply('❌ Error interno al mostrar bienvenida');
   }
 }
 
-module.exports = { showWelcome };
+module.exports = {
+  showWelcome
+};
