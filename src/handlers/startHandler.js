@@ -1,10 +1,9 @@
-// src/handlers/startHandler.js
-
-const config = require('../modules/config/configService');
+const ConfigService = require('../modules/config/configService');
+const config = new ConfigService();
 
 async function showWelcome(ctx) {
   try {
-    const texto = await config.get('TextoBienvenida');
+    const texto = await config.getValue('TextoBienvenida');
 
     if (!texto) {
       await ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
@@ -13,11 +12,11 @@ async function showWelcome(ctx) {
 
     await ctx.reply(texto);
   } catch (error) {
-    console.error('❌ Error en showWelcome:', error);
+    console.error('Error en showWelcome:', error);
     await ctx.reply('❌ Error interno al mostrar bienvenida');
   }
 }
 
 module.exports = {
-  showWelcome,
+  showWelcome
 };
