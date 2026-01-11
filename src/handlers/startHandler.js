@@ -1,6 +1,5 @@
 // src/handlers/startHandler.js
 
-const copy = require("../modules/copy/copyService");
 
 async function showWelcome(phone) {
   const text = await copy.welcome();
