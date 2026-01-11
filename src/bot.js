@@ -1,3 +1,4 @@
+console.log('🤖 bot.js cargado');
 const { Telegraf } = require('telegraf');
 
 const { showWelcome } = require('./handlers/startHandler');
