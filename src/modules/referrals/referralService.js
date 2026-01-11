@@ -3,8 +3,13 @@
 const config = require("../config/configService");
 
 async function generarLinkReferido(phone) {
-  const baseUrl = await config.get("UrlBot"); 
-  // ej: https://wa.me/54911XXXXXXX
+  // Base del bot desde Config
+  const baseUrl = await config.get("UrlBot");
+
+  // Fallback por si no está configurado
+  if (!baseUrl) {
+    return "https://wa.me/549XXXXXXXXX";
+  }
 
   return `${baseUrl}?ref=${phone}`;
 }
