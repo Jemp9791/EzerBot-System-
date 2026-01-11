@@ -1,22 +1,18 @@
-const config = require('../modules/config/configService');
+const configService = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
   try {
-    const texto = await config.getValue('TextoBienvenida');
+    const texto = await configService.getValue('TextoBienvenida');
 
     if (!texto) {
-      await ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
-      return;
+      return ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
     }
 
     await ctx.reply(texto);
-
-  } catch (err) {
-    console.error('❌ Error en showWelcome:', err.message);
+  } catch (error) {
+    console.error('❌ Error en showWelcome:', error.message);
     await ctx.reply('❌ Error interno al mostrar bienvenida');
   }
 }
 
-module.exports = {
-  showWelcome
-};
+module.exports = { showWelcome };
