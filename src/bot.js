@@ -1,16 +1,13 @@
 // src/bot.js
 
-const config = require("./modules/config/configService");
 const userState = require("./modules/state/userStateService");
-const actionRouter = require("./modules/actions/actionRouter");
 
 // Handlers
 const startHandler = require("./handlers/startHandler");
 const catalogHandler = require("./handlers/catalogHandler");
-const carritoHandler = require("./handlers/carritoHandler");
-const checkoutHandler = require("./handlers/checkoutHandler");
+const productHandler = require("./handlers/productHandler");
+const menuHandler = require("./handlers/menuHandler");
 const compartirHandler = require("./handlers/compartirHandler");
-const posHandler = require("./handlers/posHandler");
 
 async function handleMessage(payload) {
   const phone =
@@ -20,62 +17,46 @@ async function handleMessage(payload) {
 
   if (!phone) return null;
 
-  // 🆕 REFERIDO POR LINK
-  if (payload.text?.body?.includes("?ref=")) {
-    const ref = payload.text.body.split("?ref=")[1];
-    if (ref && ref !== phone) {
-      userState.setReferredBy(phone, ref);
-    }
-  }
-
   const state = userState.getState(phone);
 
-  // =============================
-  // TEXTO
-  // =============================
-  if (payload.type === "text") {
-    const text = payload.text.body.toLowerCase();
+  // TEXTO INICIAL
+  if (payload.type === "text" && state.stage === "WELCOME") {
+    userState.setStage(phone, "CATALOG");
+    return startHandler.showWelcome(phone);
+  }
 
-    if (text.includes("compartir")) {
+  // INTERACTIVOS (CARRUSEL)
+  if (payload.type === "interactive") {
+    const id =
+      payload.interactive?.list_reply?.id ||
+      payload.interactive?.button_reply?.id;
+
+    // CATEGORÍAS
+    if (id?.startsWith("CAT_")) {
+      const categoriaId = id.replace("CAT_", "");
+      userState.setStage(phone, "PRODUCTS");
+      return productHandler.mostrarProductos(phone, categoriaId);
+    }
+
+    // PRODUCTOS
+    if (id?.startsWith("PROD_")) {
+      // acá luego sumás al carrito
+      return menuHandler.mostrarMenu(phone);
+    }
+
+    // MENÚ
+    if (id === "MENU_COMPARTIR") {
       return compartirHandler.compartirCatalogo(phone);
     }
 
-    if (text.startsWith("confirmar pago")) {
-      const parts = text.split(" ");
-      const monto = Number(parts.find(p => !isNaN(p)));
-      const medioPago = text.includes("transfer")
-        ? "Transferencia"
-        : "Efectivo";
-
-      return posHandler.confirmarVenta(phone, monto, medioPago);
-    }
-
-    if (state.stage === "WELCOME") {
-      userState.setStage(phone, "CATALOG");
-      return startHandler.showWelcome(phone);
-    }
-
-    if (state.stage === "CATALOG") {
-      return catalogHandler.show(phone);
+    if (id === "MENU_SEGUIR") {
+      return catalogHandler.mostrarCategorias(phone);
     }
   }
 
-  // =============================
-  // INTERACTIVOS
-  // =============================
-  if (payload.type === "interactive") {
-    const buttonId =
-      payload.interactive?.button_reply?.id ||
-      payload.interactive?.list_reply?.id;
-
-    if (!buttonId) return null;
-
-    const action = await config.get(buttonId);
-    const result = actionRouter.execute(action, phone);
-
-    if (result === "CATALOG") return catalogHandler.show(phone);
-    if (result === "CART") return carritoHandler.show(phone);
-    if (result === "PAYMENT") return checkoutHandler.show(phone);
+  // ENTRADA A CATÁLOGO
+  if (state.stage === "CATALOG") {
+    return catalogHandler.mostrarCategorias(phone);
   }
 
   return null;
