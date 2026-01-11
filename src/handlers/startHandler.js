@@ -1,7 +1,6 @@
 // src/handlers/startHandler.js
 
-const ConfigService = require('../modules/config/configService');
-const config = new ConfigService();
+const config = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
   const text = await config.getValue('TextoBienvenida');
