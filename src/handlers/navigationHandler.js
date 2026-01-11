@@ -1,13 +1,23 @@
+// src/handlers/navigationHandler.js
 
 const CatalogService = require('../modules/catalog/catalogService');
 const catalog = new CatalogService();
 
 async function navigationHandler(ctx) {
+  if (!ctx.callbackQuery || !ctx.callbackQuery.data) return;
+
   const data = ctx.callbackQuery.data;
   const [action, categoria, indexStr] = data.split('_');
-  let index = parseInt(indexStr);
+
+  let index = parseInt(indexStr, 10);
+  if (isNaN(index)) index = 0;
 
   const productos = await catalog.getProductsByCategory(categoria);
+
+  if (!productos || productos.length === 0) {
+    await ctx.answerCbQuery('No hay productos en esta categoría');
+    return;
+  }
 
   if (action === 'next') index++;
   if (action === 'prev') index--;
@@ -21,7 +31,10 @@ async function navigationHandler(ctx) {
     {
       type: 'photo',
       media: p.IMAGEN,
-      caption: `*${p.NOMBRE}*\n$${p.PRECIO} ${p.UNIDAD}\n\n${p.DESCRIPCION}`,
+      caption:
+        `*${p.NOMBRE}*\n` +
+        `$${p.PRECIO} ${p.UNIDAD}\n\n` +
+        `${p.DESCRIPCION || ''}`,
       parse_mode: 'Markdown'
     },
     {
@@ -35,7 +48,7 @@ async function navigationHandler(ctx) {
             { text: '❤️ Quiero este', callback_data: `want_${p.CODIGO}` }
           ],
           [
-            { text: '🔗 Compartir', switch_inline_query: p.NOMBRE }
+            { text: '🔗 Compartir', callback_data: `share_${p.CODIGO}` }
           ]
         ]
       }
@@ -44,4 +57,3 @@ async function navigationHandler(ctx) {
 }
 
 module.exports = navigationHandler;
-    
