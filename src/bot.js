@@ -6,9 +6,12 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 const { showWelcome } = require('./handlers/startHandler');
 
 bot.start(async (ctx) => {
-  console.log('/start recibido');
+  console.log('➡️ /start recibido de', ctx.from.id);
   await showWelcome(ctx);
 });
 
-bot.launch();
-console.log('🤖 Bot lanzado');
+bot.launch().then(() => {
+  console.log('🤖 Bot lanzado correctamente');
+});
+
+module.exports = bot;
