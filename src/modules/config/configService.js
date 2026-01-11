@@ -1,69 +1,47 @@
-// src/modules/config/configService.js
+const { GoogleSpreadsheet } = require('google-spreadsheet');
 
-let cache = {
-  data: null,
-  timestamp: 0,
-};
+const SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const SHEET_NAME = 'Config';
 
-const CACHE_TTL = 8000;
+let cache = null;
 
 async function loadConfig() {
-  // 👉 acá va la lectura real de Google Sheets
-  // devolver objeto { KEY: VALUE }
-}
+  if (cache) return cache;
 
-function normalize(value) {
-  if (value === "SI") return true;
-  if (value === "NO") return false;
-  if (!isNaN(value)) return Number(value);
-  if (typeof value === "string" && value.includes("|"))
-    return value.split("|").map(v => v.trim());
-  return value;
-}
+  const doc = new GoogleSpreadsheet(SHEET_ID);
+  await doc.useServiceAccountAuth({
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+  });
 
-async function getConfig() {
-  const now = Date.now();
-  if (cache.data && now - cache.timestamp < CACHE_TTL) {
-    return cache.data;
+  await doc.loadInfo();
+
+  const sheet = doc.sheetsByTitle[SHEET_NAME];
+  if (!sheet) {
+    throw new Error(`❌ Hoja "${SHEET_NAME}" no encontrada`);
   }
 
-  const raw = await loadConfig();
-  const normalized = {};
+  const rows = await sheet.getRows();
+  const config = {};
 
-  for (const key in raw) {
-    normalized[key] = normalize(raw[key]);
-  }
+  rows.forEach(row => {
+    if (!row.KEY) return;
 
-  cache = {
-    data: normalized,
-    timestamp: now,
-  };
+    const key = String(row.KEY).trim();
+    const value = row.VALUE ? String(row.VALUE).trim() : '';
 
-  return normalized;
+    config[key] = value;
+  });
+
+  cache = config;
+  return config;
+}
+
+async function get(key) {
+  const config = await loadConfig();
+  return config[key] || null;
 }
 
 module.exports = {
-  async get(key) {
-    const cfg = await getConfig();
-    return cfg[key];
-  },
-
-  async isEnabled(key) {
-    const val = await this.get(key);
-    return val === true;
-  },
-
-  async text(key) {
-    return this.get(key);
-  },
-
-  async number(key) {
-    const val = await this.get(key);
-    return Number(val);
-  },
-
-  async list(key) {
-    const val = await this.get(key);
-    return Array.isArray(val) ? val : [];
-  },
-}; 
+  get,
+};
