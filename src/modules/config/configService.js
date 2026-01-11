@@ -1,29 +1,72 @@
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 
-const doc = new GoogleSpreadsheet(process.env.SHEET_ID);
+class ConfigService {
+  constructor() {
+    if (ConfigService.instance) {
+      return ConfigService.instance;
+    }
 
-async function getValue(key) {
-  try {
-    await doc.useServiceAccountAuth({
-      client_email: process.env.GOOGLE_CLIENT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    });
+    this.doc = null;
+    this.sheet = null;
 
-    await doc.loadInfo();
+    ConfigService.instance = this;
+  }
 
-    const sheet = doc.sheetsByTitle['Config'];
-    const rows = await sheet.getRows();
+  async init() {
+    if (this.sheet) return;
 
-    const row = rows.find(r => r.Clave === key);
+    try {
+      const privateKey = process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 
-    return row ? row.Valor : null;
+      if (!process.env.GOOGLE_SHEET_ID) {
+        throw new Error('GOOGLE_SHEET_ID no definido');
+      }
 
-  } catch (err) {
-    console.error('❌ Error en ConfigService:', err.message);
-    throw err;
+      if (!process.env.GOOGLE_CLIENT_EMAIL) {
+        throw new Error('GOOGLE_CLIENT_EMAIL no definido');
+      }
+
+      if (!privateKey) {
+        throw new Error('GOOGLE_PRIVATE_KEY no definido');
+      }
+
+      this.doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
+
+      await this.doc.useServiceAccountAuth({
+        client_email: process.env.GOOGLE_CLIENT_EMAIL,
+        private_key: privateKey,
+      });
+
+      await this.doc.loadInfo();
+
+      // 🔴 ESTE NOMBRE TIENE QUE SER EXACTO
+      this.sheet = this.doc.sheetsByTitle['Config'];
+
+      if (!this.sheet) {
+        throw new Error('Hoja "Config" no encontrada');
+      }
+
+    } catch (error) {
+      console.error('❌ Error inicializando ConfigService:', error.message);
+      throw error;
+    }
+  }
+
+  async getValue(key) {
+    await this.init();
+
+    const rows = await this.sheet.getRows();
+
+    const row = rows.find(
+      r => String(r.Clave).trim() === String(key).trim()
+    );
+
+    if (!row) {
+      return null;
+    }
+
+    return row.Valor ?? null;
   }
 }
 
-module.exports = {
-  getValue
-};
+module.exports = new ConfigService();
