@@ -1,20 +1,22 @@
-
+// src/handlers/helpHandler.js
 
 const ConfigService = require('../modules/config/configService');
 const config = new ConfigService();
 
 async function helpHandler(ctx) {
-  const gif = await config.getValue('SellosURL'); 
+  const gif = await config.getValue('GifAyudaID');
   const texto = await config.getValue('TextoBienvenida');
+  const whatsapp = await config.getValue('WhatsAppLink');
+  const email = await config.getValue('EmailSistema');
 
   await ctx.replyWithAnimation(gif, {
     caption: texto,
     parse_mode: 'Markdown',
     reply_markup: {
       inline_keyboard: [
-        [{ text: '📞 WhatsApp', url: await config.getValue('WhatsAppLink') }],
-        [{ text: '📩 Email', url: `mailto:${await config.getValue('EmailSistema')}` }]
-      ]
+        whatsapp ? [{ text: '📞 WhatsApp', url: whatsapp }] : [],
+        email ? [{ text: '📩 Email', url: `mailto:${email}` }] : []
+      ].filter(row => row.length)
     }
   });
 }
