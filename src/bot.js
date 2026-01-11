@@ -2,12 +2,15 @@
 
 const userState = require("./modules/state/userStateService");
 
-// Handlers
+// Handlers base
 const startHandler = require("./handlers/startHandler");
 const catalogHandler = require("./handlers/catalogHandler");
 const productHandler = require("./handlers/productHandler");
 const menuHandler = require("./handlers/menuHandler");
 const compartirHandler = require("./handlers/compartirHandler");
+
+// Super vendedor
+const superSellerHandler = require("./handlers/superSellerHandler");
 
 async function handleMessage(payload) {
   const phone =
@@ -19,13 +22,13 @@ async function handleMessage(payload) {
 
   const state = userState.getState(phone);
 
-  // TEXTO INICIAL
+  // MENSAJE INICIAL
   if (payload.type === "text" && state.stage === "WELCOME") {
     userState.setStage(phone, "CATALOG");
     return startHandler.showWelcome(phone);
   }
 
-  // INTERACTIVOS (CARRUSEL)
+  // INTERACTIVOS
   if (payload.type === "interactive") {
     const id =
       payload.interactive?.list_reply?.id ||
@@ -35,26 +38,37 @@ async function handleMessage(payload) {
     if (id?.startsWith("CAT_")) {
       const categoriaId = id.replace("CAT_", "");
       userState.setStage(phone, "PRODUCTS");
+      state.lastCategory = categoriaId;
       return productHandler.mostrarProductos(phone, categoriaId);
     }
 
-    // PRODUCTOS
+    // PRODUCTO SELECCIONADO
     if (id?.startsWith("PROD_")) {
-      // acá luego sumás al carrito
-      return menuHandler.mostrarMenu(phone);
+      // acá luego se agrega al carrito
+
+      // 🔥 intervención super vendedor
+      const mensajes = await superSellerHandler.intervenirDespuesProducto(
+        phone,
+        state.lastCategory
+      );
+
+      return [
+        ...mensajes,
+        await menuHandler.mostrarMenu(phone),
+      ];
     }
 
     // MENÚ
-    if (id === "MENU_COMPARTIR") {
-      return compartirHandler.compartirCatalogo(phone);
-    }
-
     if (id === "MENU_SEGUIR") {
       return catalogHandler.mostrarCategorias(phone);
     }
+
+    if (id === "MENU_COMPARTIR") {
+      return compartirHandler.compartirCatalogo(phone);
+    }
   }
 
-  // ENTRADA A CATÁLOGO
+  // ENTRADA DIRECTA A CATÁLOGO
   if (state.stage === "CATALOG") {
     return catalogHandler.mostrarCategorias(phone);
   }
