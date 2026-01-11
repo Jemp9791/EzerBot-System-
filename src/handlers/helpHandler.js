@@ -1,7 +1,6 @@
 // src/handlers/helpHandler.js
 
-const ConfigService = require('../modules/config/configService');
-const config = new ConfigService();
+const config = require('../modules/config/configService');
 
 async function helpHandler(ctx) {
   const gif = await config.getValue('GifAyudaID');
