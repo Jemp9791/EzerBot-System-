@@ -1,10 +1,6 @@
 require('dotenv').config();
-
-// 🔥 ARRANQUE FORZADO DEL BOT
-console.log('🚀 Iniciando bot...');
 require('./src/bot');
 
-// 🌐 Servidor dummy para Render
 const express = require('express');
 const app = express();
 
@@ -15,5 +11,5 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log('🌐 Puerto dummy escuchando en', PORT);
+  console.log('Puerto dummy escuchando en', PORT);
 });
