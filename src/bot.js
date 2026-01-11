@@ -7,11 +7,17 @@ const navigationHandler = require('./handlers/navigationHandler');
 const token = process.env.BOT_TOKEN;
 
 if (!token) {
-  console.error('❌ BOT_TOKEN no definido en variables de entorno');
+  console.error('❌ BOT_TOKEN no definido');
   process.exit(1);
 }
 
 const bot = new Telegraf(token);
+
+// ===== LOG GLOBAL (CLAVE) =====
+bot.use(async (ctx, next) => {
+  console.log('📩 Update recibido:', ctx.updateType);
+  return next();
+});
 
 // ===== COMANDOS =====
 bot.start(async (ctx) => {
@@ -24,16 +30,20 @@ bot.command('help', async (ctx) => {
   await helpHandler(ctx);
 });
 
-// ===== CALLBACKS (CARRUSEL) =====
+// ===== CALLBACKS =====
 bot.on('callback_query', async (ctx) => {
+  console.log('🔘 Callback recibido');
   await navigationHandler(ctx);
 });
 
-// ===== ARRANQUE DEL BOT (CLAVE) =====
+// ===== ARRANQUE FORZADO PARA RENDER =====
 bot.launch({
+  polling: {
+    timeout: 30
+  },
   dropPendingUpdates: true
 }).then(() => {
-  console.log('🤖 Bot conectado a Telegram (updates limpios)');
+  console.log('🤖 Bot de Telegram escuchando (polling activo)');
 });
 
 // ===== CIERRE LIMPIO =====
