@@ -20,9 +20,8 @@ async function handleMessage(payload) {
 
   if (!phone) return null;
 
-  const state = userState.getState(phone);
   const role = await roleService.getRole(phone);
-  userState.setRole(phone, role);
+  const state = userState.getState(phone);
 
   // =============================
   // VENDEDOR / ADMIN
@@ -31,14 +30,32 @@ async function handleMessage(payload) {
     const text = payload.text.body.toLowerCase();
 
     if (text.startsWith("confirmar pago")) {
-      return posHandler.confirmarVentaDesdeTexto(phone, text);
+      // ejemplo: confirmar pago 15000 efectivo
+      const parts = text.split(" ");
+      const monto = Number(parts.find(p => !isNaN(p)));
+      const medioPago = text.includes("transfer")
+        ? "Transferencia"
+        : "Efectivo";
+
+      const mensaje = await posHandler.confirmarVenta(
+        phone,
+        monto,
+        medioPago,
+        phone // vendedor
+      );
+
+      return {
+        to: phone,
+        type: "text",
+        text: { body: mensaje },
+      };
     }
 
     return {
       to: phone,
       type: "text",
       text: {
-        body: "👋 Modo vendedor activo.\nUsá: *confirmar pago monto medio*",
+        body: "👋 Modo vendedor.\nUsá: *confirmar pago monto medio*",
       },
     };
   }
