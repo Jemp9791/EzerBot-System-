@@ -1,7 +1,6 @@
 // src/handlers/navigationHandler.js
 
-const CatalogService = require('../modules/catalog/catalogService');
-const catalog = new CatalogService();
+const catalog = require('../modules/catalog/catalogService');
 
 async function navigationHandler(ctx) {
   if (!ctx.callbackQuery || !ctx.callbackQuery.data) return;
