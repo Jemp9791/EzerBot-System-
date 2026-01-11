@@ -17,6 +17,4 @@ async function showWelcome(ctx) {
   }
 }
 
-module.exports = {
-  showWelcome
-};
+module.exports = { showWelcome };
