@@ -1,47 +1,36 @@
 const { GoogleSpreadsheet } = require('google-spreadsheet');
 
-const SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const SHEET_NAME = 'Config';
-
-let cache = null;
-
-async function loadConfig() {
-  if (cache) return cache;
-
-  const doc = new GoogleSpreadsheet(SHEET_ID);
-  await doc.useServiceAccountAuth({
-    client_email: process.env.GOOGLE_CLIENT_EMAIL,
-    private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  });
-
-  await doc.loadInfo();
-
-  const sheet = doc.sheetsByTitle[SHEET_NAME];
-  if (!sheet) {
-    throw new Error(`❌ Hoja "${SHEET_NAME}" no encontrada`);
+class ConfigService {
+  constructor() {
+    this.doc = new GoogleSpreadsheet(process.env.GOOGLE_SHEET_ID);
   }
 
-  const rows = await sheet.getRows();
-  const config = {};
+  async init() {
+    if (this.initialized) return;
 
-  rows.forEach(row => {
-    if (!row.KEY) return;
+    await this.doc.useServiceAccountAuth({
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    });
 
-    const key = String(row.KEY).trim();
-    const value = row.VALUE ? String(row.VALUE).trim() : '';
+    await this.doc.loadInfo();
+    this.sheet = this.doc.sheetsByTitle['Config'];
 
-    config[key] = value;
-  });
+    if (!this.sheet) {
+      throw new Error('Hoja Config no encontrada');
+    }
 
-  cache = config;
-  return config;
+    this.initialized = true;
+  }
+
+  async getValue(key) {
+    await this.init();
+
+    const rows = await this.sheet.getRows();
+    const row = rows.find(r => r.key === key);
+
+    return row ? row.value : null;
+  }
 }
 
-async function get(key) {
-  const config = await loadConfig();
-  return config[key] || null;
-}
-
-module.exports = {
-  get,
-};
+module.exports = ConfigService;
