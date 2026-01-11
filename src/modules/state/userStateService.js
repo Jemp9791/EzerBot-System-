@@ -5,13 +5,12 @@ const states = {};
 function getDefaultState(phone) {
   return {
     phone,
+    role: "CLIENTE",
     stage: "WELCOME",
     cart: [],
     paymentMethod: null,
-
-    // 🆕 REFERIDOS
-    referredBy: null, // phone del que compartió
-
+    referredBy: null,
+    lastCategory: null,
     lastInteraction: Date.now(),
   };
 }
@@ -23,34 +22,20 @@ function getState(phone) {
   return states[phone];
 }
 
+function setRole(phone, role) {
+  const state = getState(phone);
+  state.role = role;
+}
+
 function setStage(phone, stage) {
   const state = getState(phone);
   state.stage = stage;
   state.lastInteraction = Date.now();
 }
 
-function addToCart(phone, item) {
+function setReferredBy(phone, ref) {
   const state = getState(phone);
-  state.cart.push(item);
-  state.lastInteraction = Date.now();
-}
-
-function clearCart(phone) {
-  const state = getState(phone);
-  state.cart = [];
-  state.lastInteraction = Date.now();
-}
-
-function setPaymentMethod(phone, method) {
-  const state = getState(phone);
-  state.paymentMethod = method;
-  state.lastInteraction = Date.now();
-}
-
-// 🆕 REFERIDOS
-function setReferredBy(phone, referrerPhone) {
-  const state = getState(phone);
-  state.referredBy = referrerPhone;
+  state.referredBy = ref;
 }
 
 function clearReferral(phone) {
@@ -60,10 +45,8 @@ function clearReferral(phone) {
 
 module.exports = {
   getState,
+  setRole,
   setStage,
-  addToCart,
-  clearCart,
-  setPaymentMethod,
   setReferredBy,
   clearReferral,
 };
