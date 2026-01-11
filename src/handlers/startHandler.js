@@ -1,15 +1,13 @@
-const ConfigService = require('../modules/config/configService');
-const config = new ConfigService();
+const config = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
   try {
     console.log('📥 showWelcome ejecutado');
 
-    // 🔑 CLAVE EXACTA DE SHEETS
     const texto = await config.getValue('TextoBienvenida');
 
     if (!texto) {
-      await ctx.reply('⚠️ Texto de bienvenida no configurado');
+      await ctx.reply('⚠️ TextoBienvenida no configurado');
       return;
     }
 
@@ -19,7 +17,7 @@ async function showWelcome(ctx) {
 
   } catch (error) {
     console.error('❌ Error en showWelcome:', error);
-    await ctx.reply('❌ Error al mostrar el mensaje de bienvenida');
+    await ctx.reply('❌ Error interno');
   }
 }
 
