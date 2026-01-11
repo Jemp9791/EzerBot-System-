@@ -1,13 +1,11 @@
-const ConfigService = require('../modules/config/configService');
-const config = new ConfigService();
+const config = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
   try {
     const texto = await config.getValue('TextoBienvenida');
 
     if (!texto) {
-      await ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
-      return;
+      return ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
     }
 
     await ctx.reply(texto);
@@ -17,4 +15,6 @@ async function showWelcome(ctx) {
   }
 }
 
-module.exports = { showWelcome };
+module.exports = {
+  showWelcome
+};
