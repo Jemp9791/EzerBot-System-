@@ -16,11 +16,17 @@ bot.start(async (ctx) => {
   await ctx.reply('Bot activo ✅');
 });
 
-bot.launch({
-  dropPendingUpdates: true
-}).then(() => {
-  console.log('🤖 Bot de Telegram escuchando (polling activo)');
-});
+(async () => {
+  try {
+    console.log('🚀 Lanzando bot (polling)...');
+    await bot.launch({
+      dropPendingUpdates: true,
+    });
+    console.log('🤖 Bot de Telegram escuchando (polling activo)');
+  } catch (err) {
+    console.error('❌ Error al lanzar bot:', err);
+  }
+})();
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
