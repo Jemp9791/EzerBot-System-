@@ -2,12 +2,12 @@ const config = require('../modules/config/configService');
 
 async function showWelcome(ctx) {
   try {
-    console.log('📥 showWelcome ejecutado');
+    console.log('📥 /start recibido');
 
-    const texto = await config.getValue('TextoBienvenida');
+    const texto = await config.get('TextoBienvenida');
 
     if (!texto) {
-      await ctx.reply('⚠️ TextoBienvenida no configurado');
+      await ctx.reply('⚠️ TextoBienvenida no configurado en Sheets');
       return;
     }
 
@@ -16,7 +16,7 @@ async function showWelcome(ctx) {
     });
 
   } catch (error) {
-    console.error('❌ Error en showWelcome:', error);
+    console.error('❌ Error en startHandler:', error);
     await ctx.reply('❌ Error interno');
   }
 }
