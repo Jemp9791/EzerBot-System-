@@ -30,8 +30,10 @@ bot.on('callback_query', async (ctx) => {
 });
 
 // ===== ARRANQUE DEL BOT (CLAVE) =====
-bot.launch().then(() => {
-  console.log('🤖 Bot de Telegram iniciado correctamente');
+bot.launch({
+  dropPendingUpdates: true
+}).then(() => {
+  console.log('🤖 Bot conectado a Telegram (updates limpios)');
 });
 
 // ===== CIERRE LIMPIO =====
