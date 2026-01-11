@@ -1,12 +1,17 @@
 // src/handlers/posHandler.js
 
 const posService = require("../modules/pos/posService");
+const stockService = require("../modules/stock/stockService");
+const ticketService = require("../modules/ticket/ticketService");
 const userState = require("../modules/state/userStateService");
-const metricsService = require("../modules/metrics/metricsService");
+const config = require("../modules/config/configService");
 
 async function confirmarVenta(phone, monto, medioPago, vendedor) {
   const state = userState.getState(phone);
 
+  const negocio = await config.get("NegocioNombre");
+
+  // 1️⃣ procesar venta
   const venta = await posService.procesarVenta({
     phone,
     monto,
@@ -14,35 +19,29 @@ async function confirmarVenta(phone, monto, medioPago, vendedor) {
     referidoA: state.referredBy,
   });
 
-  // 📊 registrar métricas
-  await metricsService.registrarVentaMetrica({
-    phone,
-    monto,
+  // 2️⃣ descontar stock
+  await stockService.descontarStock(state.cart);
+
+  // 3️⃣ generar ticket
+  const ticket = await ticketService.generarTicket({
+    negocio,
+    items: state.cart,
+    total: monto,
     medioPago,
-    sellosCompra: venta.sellosCompra,
-    sellosReferido: venta.sellosReferido,
-    referidoA: venta.referidoA,
     vendedor,
   });
 
-  // 🔄 limpiar estado
+  // 4️⃣ limpiar estado
+  userState.clearCart(phone);
   userState.clearReferral(phone);
   userState.setStage(phone, "WELCOME");
 
-  let mensajeCliente =
-    `🎉 *Pago confirmado* 🎉\n\n` +
-    `💰 Monto: *$${monto}*\n` +
-    `💳 Medio: *${medioPago}*\n`;
-
-  if (venta.sellosCompra > 0) {
-    mensajeCliente += `🏷️ Sumaste *${venta.sellosCompra} sellos* 🎁\n`;
-  }
-
-  mensajeCliente += `\n¡Gracias por tu compra! 🧀`;
-
-  return mensajeCliente;
+  return {
+    mensajeCliente: ticket,
+    ticket,
+  };
 }
 
 module.exports = {
   confirmarVenta,
-};
+}; 
