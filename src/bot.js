@@ -1,17 +1,14 @@
 const { Telegraf } = require('telegraf');
-require('dotenv').config();
+const { showWelcome } = require('./handlers/startHandler');
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-const { showWelcome } = require('./handlers/startHandler');
-
 bot.start(async (ctx) => {
-  console.log('➡️ /start recibido de', ctx.from.id);
+  console.log('➡️ /start recibido');
   await showWelcome(ctx);
 });
 
-bot.launch().then(() => {
-  console.log('🤖 Bot lanzado correctamente');
-});
+bot.launch();
+console.log('🤖 Bot lanzado');
 
 module.exports = bot;
