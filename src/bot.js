@@ -1,17 +1,13 @@
-const { Telegraf } = require('telegraf');
-const { showWelcome } = require('./handlers/startHandler');
+import { Telegraf } from 'telegraf';
+import startHandler from './handlers/startHandler.js';
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 bot.start(async (ctx) => {
-  console.log('➡️ /start recibido');
-  await showWelcome(ctx);
+  console.log('/start recibido');
+  await startHandler(ctx);
 });
 
-bot.launch({
-  dropPendingUpdates: true
-});
+bot.launch();
 
-console.log('🤖 Bot lanzado');
-
-module.exports = bot;
+export default bot;
