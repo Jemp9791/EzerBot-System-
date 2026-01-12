@@ -1,9 +1,8 @@
-require('dotenv').config();
-require('./src/bot');
+import 'dotenv/config';
+import express from 'express';
+import './src/bot.js';
 
-const express = require('express');
 const app = express();
-
 const PORT = process.env.PORT || 10000;
 
 app.get('/', (req, res) => {
